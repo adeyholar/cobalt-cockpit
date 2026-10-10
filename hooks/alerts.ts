@@ -56,6 +56,9 @@ export type Facts = {
   atStop: boolean
 }
 
+/** A blocker is "retries exhausted" only when a check really ran and kept failing; a missing, changed or unstartable script is a blocked run. */
+export const exhaustedBlocker = (blocker: string | null): string | null => (blocker !== null && /^STOP GUARD: check (?:exit|timed out)/.test(blocker) ? blocker : null)
+
 export const keyOf = (taskId: number, kind: AlertKind, detail: string): string => `${taskId}:${kind}:${detail}`
 
 /** The conditions that call for a person, in the order they are told. A recoverable failure is not among them. */

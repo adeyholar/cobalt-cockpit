@@ -1,6 +1,7 @@
 // The optional Stop-hook verification guard: OFF unless asked, real exit codes only, bounded, never a loop.
 
 import { describe, expect, test } from 'claude-code/testing'
+import { exhaustedBlocker } from '../hooks/alerts'
 import { attemptsOf, configOf, scriptPathOf, verdictOf } from '../hooks/stopguard'
 import type { CheckRecord } from '../hooks/stopguard'
 import { command, planAndComplete, start, world } from './world'
@@ -118,5 +119,14 @@ describe('the hook', () => {
     expect(out).toContain('STOP-HOOK VERIFICATION GUARD')
     expect(out).toContain('ENFORCE · script check.sh')
     expect(Object.keys(w.files).some(f => f.endsWith('settings.json'))).toBe(false)
+  })
+})
+
+describe('what the alert says about a blocked stop', () => {
+  test('a missing or changed script is a blocked run, not exhausted retries', () => {
+    expect(exhaustedBlocker('STOP GUARD: the configured check script is missing or not runnable')).toBeNull()
+    expect(exhaustedBlocker('STOP GUARD: the check script changed during this session')).toBeNull()
+    expect(exhaustedBlocker('STOP GUARD: check exit 3 after 2 attempts')).not.toBeNull()
+    expect(exhaustedBlocker('STOP GUARD: check timed out after 2 attempts')).not.toBeNull()
   })
 })

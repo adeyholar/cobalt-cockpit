@@ -57,7 +57,7 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { EMPTY_GUARD, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
+import { EMPTY_GUARD, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
 import type { GuardConfig } from './alerts'
 import { attemptsOf, boundedChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, verdictOf, BLOCKER_PREFIX, type CheckRecord, type StopConfig } from './stopguard'
 import { applyAction, blockMilestone, unblock, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
@@ -2334,7 +2334,8 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
     const due = dueOf({
       taskId: task.id,
       securityFailed: task.gates.SECURITY.state === 'fail',
-      stopBlocker: task.blocker !== null && task.blocker.startsWith(BLOCKER_PREFIX) ? task.blocker : null,
+      // only a check that really ran and kept failing is "retries exhausted"; a missing, changed or unstartable script is a blocked run
+      stopBlocker: exhaustedBlocker(task.blocker),
       blocker: task.blocker,
       releaseNoGo: review !== undefined && review.grounds.includes('release') && !(review.cleared ?? []).some(c => c.ground === 'release') && latest?.outcome === 'no-go',
       reviewOpen: review !== undefined && review.state !== 'adjudicated',
