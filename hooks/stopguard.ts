@@ -12,10 +12,11 @@
 // What counts as proof: the script's real exit code, 0, run now against this
 // working tree, from a script whose content is unchanged since the session
 // began (the agent that is being checked must not be able to edit its own
-// judge). Never a model's sentence, never a prompt, never repository metadata:
-// the script is named only in the owner's own plugin options, a project
-// settings file may not enable this, and it is run as an argv, not through a
-// shell. A passing script establishes the TEST gate and nothing else: it does
+// judge). Never a model's sentence and never a prompt: the script is named
+// only in the plugin's own options and is run as an argv, not through a shell.
+// Whether a project-scoped settings file can supply plugin options is a host
+// property this plugin does not control; pin the hash when the repository is
+// not yours. A passing script establishes the TEST gate and nothing else: it does
 // not clear a mandatory Opus review or release approval, and Cockpit commits,
 // pushes and releases nothing.
 //
