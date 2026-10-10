@@ -66,8 +66,8 @@ describe('configuration and policy', () => {
     expect(validChecks('not a list')).toEqual([])
   })
   test('what the alert says about a blocked stop', () => {
-    expect(exhaustedBlocker('STOP GUARD: the configured check script is missing or not runnable')).toBeNull()
-    expect(exhaustedBlocker('STOP GUARD: check exit 3 after 2 attempts')).not.toBeNull()
+    expect(exhaustedBlocker('the configured check script is missing or not runnable')).toBeNull()
+    expect(exhaustedBlocker('check exit 3 after 2 attempts')).not.toBeNull()
   })
 })
 
@@ -100,7 +100,7 @@ describe('the hook', () => {
     expect(blocked).toEqual([true, false, false, false, false, false])
     expect(runs(w)).toBe(2)
     const task = held.get('task')!.value as any
-    expect(task.blocker).toContain('STOP GUARD')
+    expect(task.stopHold?.reason).toBeDefined()
     expect(task.status).toBe('blocked')
     expect(task.percent).toBeLessThan(100)
   })
@@ -261,12 +261,12 @@ describe('completion integrity', () => {
   test('a held task cannot be released or re-passed through the progress tool', guard({ stopMaxContinuations: 1 }), async ($, on) => {
     const { held } = await armed($, on, 'fails')
     await stop($)
-    expect((held.get('task')!.value as any).blocker).toContain('STOP GUARD')
+    expect((held.get('task')!.value as any).stopHold).toBeDefined()
     for (const input of [{ action: 'unblock' }, { action: 'gate', gate: 'TEST', state: 'pass', evidence: 'I ran the tests myself' }, { action: 'gate', gate: 'TEST', state: 'pending' }, { action: 'block', milestone: 'm2', note: 'something else' }, { action: 'gates', gates: [{ gate: 'TEST', state: 'na', evidence: 'x' }] }]) {
-      expect(await progress($, input)).toContain('STOP GUARD hold')
+      expect(await progress($, input)).toContain('STOP GUARD')
     }
     const task = held.get('task')!.value as any
-    expect(task.blocker).toContain('STOP GUARD')
+    expect(task.stopHold).toBeDefined()
     expect(task.gates.TEST.state).toBe('fail')
     expect(task.status).toBe('blocked')
   })

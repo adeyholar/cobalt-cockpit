@@ -108,7 +108,7 @@ export const doctorText = (f: DoctorFacts): string => {
     out.push(line(g.problems.length > 0 || g.script === null ? 'WARN' : 'OK', `ENFORCE · script ${g.script ?? 'NOT SET'} · ${g.pinned ? 'sha-256 pinned · ' : ''}trust: ${g.trust}${g.trust === 'enrolled' ? '' : ' (a person must run /cockpit guard trust)'} · timeout ${g.timeoutSec}s · ${g.maxAttempts} attempt${g.maxAttempts === 1 ? '' : 's'} per task`))
     for (const p of g.problems) out.push(line('WARN', p))
     out.push(line('INFO', g.last === null ? 'no check run yet this session' : `last check: ${g.last.outcome}${g.last.exit === null ? '' : ` (exit ${g.last.exit})`}`))
-    out.push(line('INFO', 'a pass sets the TEST gate only; it does not clear a required Opus review or any release approval. Exhausted attempts, a missing, changed or refused script mark the task BLOCKED and the stop is allowed.'))
+    out.push(line('INFO', 'a pass sets the TEST gate only; it does not clear a required Opus review or any release approval. Exhausted attempts, a missing, changed or refused script hold the task (BLOCKED, never DONE) and the stop is allowed; only a passing check or /cockpit guard release lifts the hold, and a release passes nothing.'))
   }
   out.push('', 'COBALT GUARD · owner alerts')
   out.push(line('INFO', f.guard.enabled ? `ARMED (${f.guard.label}) · ${f.guard.used} of ${f.guard.max} alerts used · one per ${f.guard.cooldownSec}s at most · delivery is the host's terminal notification; it cannot confirm that you saw it` : 'OFF (guardAlerts=false); nothing is sent'))

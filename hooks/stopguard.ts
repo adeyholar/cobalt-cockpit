@@ -27,13 +27,13 @@
 // reason, never DONE.
 
 import type { Task } from '../types'
-import { STOP_GUARD_PREFIX, oneLine } from './model'
+import { holdTask, oneLine, uidOf } from './model'
+export { uidOf }
 
 export type Policy = 'OBSERVE' | 'ENFORCE'
 export const MAX_ATTEMPTS_CEILING = 10
 export const TIMEOUT_CEILING_MS = 900_000
 export const MIN_SUMMARY_CHARS = 60
-export const BLOCKER_PREFIX = STOP_GUARD_PREFIX
 
 export type StopConfig = {
   policy: Policy
@@ -80,8 +80,8 @@ export const configOf = (options: Readonly<Record<string, unknown>>, home: strin
   }
 }
 
-export type Outcome = 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable'
-export const OUTCOMES: readonly Outcome[] = ['pass', 'fail', 'timeout', 'error', 'missing', 'untrusted', 'unstable']
+export type Outcome = 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable' | 'released'
+export const OUTCOMES: readonly Outcome[] = ['pass', 'fail', 'timeout', 'error', 'missing', 'untrusted', 'unstable', 'released']
 export type CheckRecord = {
   taskId: number
   /** Which task, across resets and restarts: task numbers start again at 1, this does not. */
@@ -106,9 +106,6 @@ export type CheckRecord = {
   /** Whether the closing message carried a change summary of a useful length. */
   hasSummary: boolean
 }
-
-/** The task's identity across resets and restarts. Its number starts again at 1 after a reset; its start time does not repeat. */
-export const uidOf = (task: Task): string => `${task.id}@${task.startedAt}`
 
 /** Whether this task changed anything a check could be about. */
 export const hasChanges = (task: Task | null): boolean => task !== null && (task.edited === true || task.files.length > 0 || task.kind === 'coding')
@@ -204,3 +201,39 @@ export const verdictOf = (v: VerdictInput): Verdict => {
 }
 
 export const boundedChecks = (checks: readonly CheckRecord[], add: CheckRecord, cap = 24): CheckRecord[] => [...checks, add].slice(-cap)
+
+const PREFIX = /^STOP GUARD: /
+
+/**
+ * Settles the protected Stop guard state of a task saved before it was a field of its own (guardSchema absent). Run once per
+ * task, and again harmlessly: a settled task is returned as it is.
+ *
+ * Evidence is the guard's own check records in the Run Ledger, which the model cannot write, never the blocker text, which it can:
+ *  - a non-complete record for this task AND the guard's blocker, or the budget spent, or a check that could not run: HELD;
+ *  - a guard blocker whose records all completed, or whose records were unreadable: HELD as ambiguous (needs a fresh check or
+ *    a person's release; nothing is granted);
+ *  - a guard-looking blocker with no record at all is an ordinary blocker and stays one;
+ *  - everything else (OBSERVE, completed, other blockers, failed gates) is unchanged.
+ * No script trust is invented: trust lives in its own store and is not read from here.
+ */
+export const migrateStopHold = (task: Task, checks: readonly CheckRecord[], dropped: number, maxAttempts: number, now: number): Task => {
+  if (task.guardSchema === 1) return task
+  const settled: Task = { ...task, guardSchema: 1 }
+  if (task.stopHold !== undefined) return settled
+  const uid = uidOf(task)
+  const mine = checks.filter(c => c.uid === uid && c.outcome !== 'released')
+  const last = mine.at(-1)
+  const looksHeld = task.blocker !== null && PREFIX.test(task.blocker)
+  const reason = looksHeld ? (task.blocker as string).replace(PREFIX, '') : null
+  const spent = attemptsOf(checks, uid)
+  if (last === undefined) {
+    // no record: a forged or foreign blocker is ordinary, unless records were lost, when it cannot be told apart
+    return looksHeld && dropped > 0 ? holdTask(settled, 'legacy Stop guard state could not be read; run the check again or release it', 0, now) : settled
+  }
+  if (last.complete) return looksHeld ? holdTask(settled, `legacy state is ambiguous (${reason}); run the check again or release it`, spent, now) : settled
+  if (looksHeld || spent >= maxAttempts || last.outcome === 'error' || last.outcome === 'untrusted') {
+    return holdTask(settled, reason ?? (last.outcome === 'error' || last.outcome === 'untrusted' ? `legacy check ${last.outcome}` : 'the refusal budget was spent before this version'), spent, now)
+  }
+
+  return settled
+}

@@ -59,8 +59,8 @@ import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
 import { EMPTY_GUARD, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
 import type { GuardConfig } from './alerts'
-import { uidOf, attemptsOf, boundedChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, verdictOf, BLOCKER_PREFIX, type CheckRecord, type StopConfig } from './stopguard'
-import { applyAction, blockMilestone, unblock, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
+import { uidOf, attemptsOf, boundedChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, type CheckRecord, type StopConfig } from './stopguard'
+import { applyAction, clearHold, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
 import { basename, parseShell, unwrap } from './shell'
 import { COLORS, fit, heading, hudRows, paneRows, visualStateOf } from './view'
@@ -1416,8 +1416,21 @@ const sound = async ($: EngineInterface, cue: Cue): Promise<string | null> => {
   }
 }
 
+/**
+ * A task saved before the Stop guard's hold was a field of its own is settled once, from the guard's own records
+ * (see migrateStopHold). Idempotent, and run before any action can touch the task, so no path sees the old shape.
+ */
+const adoptLegacyHold = async ($: EngineInterface): Promise<void> => {
+  const held = await read($, taskAtom)
+  if (held === null || held.guardSchema === 1) return
+  const ledger = await read($, ledgerAtom)
+  const now = await $.clock.now()
+  await update($, taskAtom, old => (old === null ? old : migrateStopHold(old, ledger.stopChecks ?? [], ledger.stopDropped ?? 0, stopCfg.maxAttempts, now)))
+}
+
 /** Applies a change to the task, settles what follows from it, and plays what it earned. */
 const change = async ($: EngineInterface, apply: (task: Task, now: number) => Task): Promise<Task | null> => {
+  await hush(() => adoptLegacyHold($))
   const now = await $.clock.now()
   let cues: Cue[] = []
   const task = await update($, taskAtom, old => {
@@ -1830,6 +1843,7 @@ const reconcileTree = ($: EngineInterface): Promise<void> => {
 }
 
 const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: string }): Promise<{ result: string }> => {
+  await hush(() => adoptLegacyHold($))
   if (e.agentId !== undefined) {
     return {
       result: 'Cobalt Cockpit: the task state belongs to the main conversation. Report your result to it instead; nothing was changed.',
@@ -1845,6 +1859,8 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
   const goalChecked = before !== null && needsAlignment(before)
   const stamp = goalChecked && e.action === 'align' ? await treeStamp($, baseOf(before.gateTree)) : null
   const gateStamp = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') ? await treeStamp($, baseOf(before.gateTree)) : null
+  // what a read-only claim is measured against later
+  const planStamp = e.action === 'plan' && (e as { kind?: unknown }).kind === 'readonly' ? await treeStamp($) : null
   let reply = ''
   let unprotected = ''
   let cues: Cue[] = []
@@ -1875,7 +1891,7 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
     cues = settled.cues
     reply = [outcome.note, unprotected, summaryOf(settled.task)].filter(Boolean).join(' ')
 
-    return settled.task
+    return planStamp !== null && settled.task.kind === 'readonly' ? { ...settled.task, planTree: planStamp } : settled.task
   })
   for (const cue of cues) void sound($, cue)
   if (held !== null) await quiet(async () => { await mutateLedger($, l => recordDiscovery(l, held, now)); await persist($) })
@@ -1974,7 +1990,8 @@ const noteEnd = async (
       for (const edit of edits) chain = touchFile(chain, edit.path, edit.added, edit.removed)
       if (observed !== null) chain = checkedAt(chain, observed)
       if (edits.length > 0 && isSonnetLed()) chain = requireReview(chain, mandatoryGrounds(factsOf({ ...chain, files: chain.files.map(f => ({ ...f, path: relative(f.path) })) }, 0, chain.promptGrounds ?? [])))
-      for (const reading of readings) chain = setGate(chain, reading.gate, reading.state, reading.evidence, 'auto', now)
+      // a test command's result cannot lift or replace what the Stop guard holds the task for
+      for (const reading of readings) if (!(reading.gate === 'TEST' && isGuardHeld(chain))) chain = setGate(chain, reading.gate, reading.state, reading.evidence, 'auto', now)
       if (observed !== null) chain = stampGates(chain, observed)
 
       return chain
@@ -2259,11 +2276,17 @@ export const registerLedger = (on: On): void => {
   on('classic.SessionStart', async ($, e, next) => {
     const ran = await next(e)
     if (e.source === 'resume') await hush(() => restore($))
+    await hush(() => adoptLegacyHold($))
 
     return ran
   }).catch(($, e, next) => next(e))
   on('classic.Stop', async ($, e, next) => {
-    const reason = await stopGuard($, e).catch(() => null)
+    // an exception in the guard is not a pass: the task is held with that reason and the stop is allowed (no loop, no DONE)
+    const reason = await stopGuard($, e).catch(async () => {
+      await hush(() => change($, (t, now) => (stopCfg.policy === 'ENFORCE' ? holdTask(t, 'the Stop guard raised an error while checking', 0, now) : t)))
+
+      return null
+    })
     // a stop that is about to be allowed is when an unfinished run needs a person
     if (reason === null) await raiseAlerts($, true)
     if (reason !== null) return { block: reason }
@@ -2334,8 +2357,8 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
       taskUid: uidOf(task),
       securityFailed: task.gates.SECURITY.state === 'fail',
       // only a check that really ran and kept failing is "retries exhausted"; a missing, changed or unstartable script is a blocked run
-      stopBlocker: exhaustedBlocker(task.blocker),
-      blocker: task.blocker,
+      stopBlocker: exhaustedBlocker(task.stopHold?.reason ?? null),
+      blocker: task.stopHold?.reason ?? task.blocker,
       releaseNoGo: review !== undefined && review.grounds.includes('release') && !(review.cleared ?? []).some(c => c.ground === 'release') && latest?.outcome === 'no-go',
       reviewOpen: review !== undefined && review.state !== 'adjudicated',
       atStop,
@@ -2452,14 +2475,27 @@ const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean,
   if (first !== undefined && first.verifier !== trust.verifier) return rec({ outcome: 'untrusted', sha: short, summary: 'another verifier than the one this task started with' })
   const cwd = await $.session.cwd().catch(() => undefined)
   try {
+    // Before EVERY execution the script is checked against the enrolled bytes again, and once more after it ran: a swap between
+    // two runs, or during one, makes the result untrusted. The exec itself is by path, so the interval between this check and the
+    // exec remains (the plugin API has no exec-by-descriptor); it is narrowed, not closed.
+    const runOnce = async () => {
+      const now = await trustState($, stopCfg)
+      if (now.state !== 'enrolled' || now.sha !== trust.sha) return null
+      const out = await $.process.run([script], { timeoutMs: stopCfg.timeoutMs, ...(cwd === undefined ? {} : { cwd }) })
+
+      return (await rawSha($, script)) === trust.sha ? out : null
+    }
+    const changedMeanwhile = () => rec({ outcome: 'untrusted', sha: short, summary: 'changed while the guard was using it' })
     // A check that leaves artifacts behind (a cache directory, build output) moves the tree itself. It is run once more from
     // the tree it left, and only a tree that still moves is unstable. At most two runs; a check cannot loop here.
     let before = await treeStamp($)
-    let r = await $.process.run([script], { timeoutMs: stopCfg.timeoutMs, ...(cwd === undefined ? {} : { cwd }) })
+    let r = await runOnce()
+    if (r === null) return changedMeanwhile()
     let after = await treeStamp($)
     if (before !== null && after !== null && before !== after) {
       before = after
-      r = await $.process.run([script], { timeoutMs: stopCfg.timeoutMs, ...(cwd === undefined ? {} : { cwd }) })
+      r = await runOnce()
+      if (r === null) return changedMeanwhile()
       after = await treeStamp($)
     }
     const ms = (await $.clock.now()) - at
@@ -2476,22 +2512,41 @@ const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean,
   }
 }
 
+/** Whether anything may have changed that a check should be about. A model's "read-only" is a claim, measured against the tree. */
+const mayHaveChanged = async ($: EngineInterface, task: Task): Promise<boolean> => {
+  if (hasChanges(task)) return true
+  if (task.kind === 'readonly') {
+    const now = await treeStamp($)
+
+    // an unknown state is never proof of an unchanged tree
+    return task.planTree === undefined || now === null || now !== task.planTree
+  }
+  // changes the tool hooks did not see (an MCP tool, a Bash command with no edit diff) still show in the repository
+  await quiet(() => refreshGit($))
+
+  return ((await read($, gitAtom))?.dirty ?? 0) > 0
+}
+
 const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; last_assistant_message?: string }): Promise<string | null> => {
   await loadStopCfg($)
+  await hush(() => adoptLegacyHold($))
   const task = await read($, taskAtom)
   if (stopCfg.policy !== 'ENFORCE' || stopCfg.problems.length > 0 || stopCfg.script === null || task === null) return null
-  // changes the tool hooks did not see (an MCP tool, a Bash command with no edit diff) still show in the repository
-  const dirty = (await read($, gitAtom))?.dirty ?? 0
-  if (!hasChanges(task) && !(dirty > 0 && task.kind !== 'readonly')) return null
+  if (!isGuardHeld(task) && !(await mayHaveChanged($, task))) return null
   const uid = uidOf(task)
   // the Ledger is where the attempts are kept, so a resumed session finds the budget as it was left
   const checks = (await read($, ledgerAtom)).stopChecks ?? []
   const spent = attemptsOf(checks, uid)
   const hasSummary = hasChangeSummary(e.last_assistant_message)
-  // every check since the last one that completed the task is an attempt, whatever it said: the budget cannot be reset by a pass
-  if (spent >= stopCfg.maxAttempts) return null
-  // a refusal or a script that cannot start is final for this task: it is not asked again
   const lastRun = [...checks].reverse().find(c => c.uid === uid)
+  // every check since the last one that completed the task is an attempt, whatever it said: the budget cannot be reset by a pass.
+  // A spent budget stays spent until a person releases the hold; the hold is put back if it is somehow missing.
+  if (spent >= stopCfg.maxAttempts) {
+    if (!isGuardHeld(task) && lastRun !== undefined && !lastRun.complete) await change($, (t, now) => holdTask(t, 'the refusal budget is spent without a completed check', spent, now))
+
+    return null
+  }
+  // a refusal or a script that cannot start is final for this task: it is not asked again
   if (lastRun !== undefined && (lastRun.outcome === 'error' || lastRun.outcome === 'untrusted')) return null
   const run = await runStopCheck($, task, hasSummary, checks)
   const verdict = verdictOf({ cfg: stopCfg, spent, run, hasSummary })
@@ -2504,8 +2559,8 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
     if (run.outcome === 'pass' && run.tree !== null) chain = checkedAt(chain, run.tree)
     if (run.outcome === 'pass' || run.outcome === 'fail' || run.outcome === 'timeout') chain = setGate(chain, 'TEST', run.outcome === 'pass' ? 'pass' : 'fail', `stop check ${run.name} ${detail}${run.tree === null && run.outcome === 'pass' ? ' (tree state unknown)' : ''}`, 'auto', now)
     if (run.outcome === 'pass' && run.tree !== null) chain = stampGates(chain, run.tree)
-    if (verdict.action === 'allow' && verdict.state === 'BLOCKED') chain = blockMilestone(chain, null, BLOCKER_PREFIX + oneLine(verdict.reason, 200), now).task
-    else if (verdict.action === 'allow' && verdict.state === 'VERIFIED' && chain.blocker?.startsWith(BLOCKER_PREFIX)) chain = unblock(chain, now).task
+    if (verdict.action === 'allow' && verdict.state === 'BLOCKED') chain = holdTask(chain, verdict.reason, spent + 1, now)
+    else if (verdict.action === 'allow' && verdict.state === 'VERIFIED') chain = clearHold(chain, now)
 
     return chain
   })
@@ -3418,13 +3473,26 @@ export const register: Register = (on, options) => {
           map[scope.key] = { sha, at: await $.clock.now() }
           await $.store.set(TRUST_KEY, Object.fromEntries(Object.entries(map).slice(-32)))
 
-          return { text: `Cockpit: trusted ${c.script.slice(c.script.lastIndexOf('/') + 1)} (${sha.slice(0, 12)}) for this project. A change to its bytes ends the trust.` }
+          return { text: `Cockpit: trusted ${c.script.slice(c.script.lastIndexOf('/') + 1)} (${sha.slice(0, 12)}) for this project. A change to its bytes ends the trust. If this task is already held, /cockpit guard release lets it be checked again.` }
+        }
+        if (arg === 'release') {
+          // lifting a hold is the person's alone, and it passes nothing: TEST goes back to pending and the budget starts over
+          if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: a Stop guard hold is released only by a command you type; nothing was changed.' }
+          const before = await read($, taskAtom)
+          if (before === null || !isGuardHeld(before)) return { text: 'Cockpit: the task is not held by the Stop guard; nothing was changed.' }
+          await change($, (t, now) => releaseHold(t, now))
+          const at = await $.clock.now()
+          const mark: CheckRecord = { taskId: before.id, uid: uidOf(before), verifier: 'released', complete: true, name: 'released', sha: null, at, outcome: 'released', exit: null, ms: null, tree: null, summary: 'hold released by a person', hasSummary: true }
+          await update($, ledgerAtom, old => ({ ...old, stopChecks: boundedChecks(old.stopChecks ?? [], mark) }))
+          await hush(() => persist($))
+
+          return { text: 'Cockpit: the Stop guard hold was released. Nothing was verified: TEST is pending and the check will run at the next stop. The refusal budget starts over.' }
         }
         if ((arg === 'ack' || arg === 'silence') && !isPersonOrigin(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
         if (arg === 'ack' || arg === 'silence') {
           await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
           if (arg === 'silence') await update($, guardAtom, old => ({ ...old, all: true }))
-        } else if (arg !== '') return { text: 'Usage: /cockpit guard | ack | silence | trust [hash] | untrust' }
+        } else if (arg !== '') return { text: 'Usage: /cockpit guard | ack | silence | trust [hash] | untrust | release' }
         const view = await guardView($)
 
         return { text: guardText(guardCfg, view.state, view.kept) + (arg === 'ack' || arg === 'silence' ? '\nThe verification verdict was not changed.' : '') }

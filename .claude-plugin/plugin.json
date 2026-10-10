@@ -69,7 +69,7 @@
     "verifyScript": {
       "type": "string",
       "title": "Verification script (absolute path)",
-      "description": "Your own check script, run directly (no shell) in the project directory. Exit 0 means verified. It is hashed when the session starts and a later change is not trusted. Leave empty to disable the guard.",
+      "description": "Your own check script, run directly (no shell) in the project directory. Exit 0 means verified. It is not trusted until you enroll its sha-256 with /cockpit guard trust; it is re-hashed before every run and a changed script is not run. Leave empty to disable the guard.",
       "default": ""
     },
     "verifyScriptSha256": {

@@ -445,6 +445,7 @@ export const paneRows = (input: HudInput, columns: number, now: number, withBann
     ]),
     field('Milestones', [{ text: `${done}/${task.milestones.length}`, color: done === task.milestones.length ? COLORS.ok : undefined }, { text: `  ${task.status.toUpperCase()}`, color }]),
   )
+  if (task.stopHold !== undefined) push(field('Held', [{ text: `STOP GUARD: ${task.stopHold.reason}`, color: COLORS.warn }]))
   if (task.blocker !== null) push(field('Blocker', [{ text: task.blocker, color: COLORS.warn }]))
   push(field('Latest', [{ text: task.lastAction === null ? 'nothing yet' : `${duration(now - task.lastAction.at)} ago  ${task.lastAction.text}`, ...(task.lastAction === null ? { isDim: true } : {}) }]))
 

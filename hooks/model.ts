@@ -79,9 +79,36 @@ export const oneLine = (text: string, max: number): string => {
 }
 
 /** A task as a prompt starts it: no milestones, so no progress to claim. */
-/** What the Stop guard writes in a task's blocker. Only the guard clears or replaces it: the progress tool cannot. */
-export const STOP_GUARD_PREFIX = 'STOP GUARD: '
-export const isGuardHeld = (task: Task): boolean => task.blocker !== null && task.blocker.startsWith(STOP_GUARD_PREFIX)
+/**
+ * The Stop guard's hold is task state of its own (`task.stopHold`), not a blocker string: nothing the progress tool sets,
+ * clears or forges can touch it. It is placed by `holdTask` (the guard), lifted by `clearHold` (the guard, on a fresh
+ * verified pass) or `releaseHold` (a person's command), and the one rule for completion below reads it.
+ */
+export const isGuardHeld = (task: Task): boolean => task.stopHold !== undefined
+
+/** The task's identity across plans. Task numbers start again at 1 after a reset; this does not repeat. */
+export const uidOf = (task: Task): string => task.lineage ?? `${task.id}@${task.startedAt}`
+
+export const holdTask = (task: Task, reason: string, refusals: number, now: number): Task => ({
+  ...task,
+  stopHold: { reason: oneLine(reason, 200), at: now, refusals },
+  updatedAt: now,
+})
+
+/** The guard lifts its own hold when a check has passed and completion was allowed. */
+export const clearHold = (task: Task, now: number): Task => {
+  const { stopHold: _held, ...rest } = task
+
+  return { ...rest, updatedAt: now }
+}
+
+/** A person releases the hold. It passes nothing: TEST goes back to pending and the goal check starts over. */
+export const releaseHold = (task: Task, now: number): Task => {
+  const cleared = clearHold(task, now)
+  const gate: Gate = { ...cleared.gates.TEST, state: 'pending', evidence: 'hold released by a person; the check has not been run again', source: 'auto', at: now }
+
+  return invalidateAlignment({ ...cleared, gates: { ...cleared.gates, TEST: gate } }, 'the Stop guard hold was released')
+}
 
 export const newTask = (id: number, goal: string, now: number, startSha: string | null): Task => ({
   id,
@@ -89,6 +116,7 @@ export const newTask = (id: number, goal: string, now: number, startSha: string 
   goal: oneLine(goal, 160),
   lastPrompt: oneLine(goal, 160),
   kind: 'unplanned',
+  guardSchema: 1,
   startedAt: now,
   updatedAt: now,
   startSha,
@@ -150,7 +178,7 @@ export const unsatisfiedGates = (task: Task): GateName[] =>
 export const isReviewSatisfied = (task: Task): boolean => task.review === undefined || task.review.state === 'adjudicated'
 
 /** True when nothing but the gates, the consultation and the goal check stand between the milestones and DONE. */
-const isVerified = (task: Task): boolean => areGatesSatisfied(task) && isReviewSatisfied(task) && isAlignmentSatisfied(task)
+const isVerified = (task: Task): boolean => !isGuardHeld(task) && areGatesSatisfied(task) && isReviewSatisfied(task) && isAlignmentSatisfied(task)
 
 const reviewNote = (task: Task): string =>
   task.review === undefined ? '' : `Opus consultation (${task.review.grounds.join(', ')}) ${task.review.state}`
@@ -170,7 +198,7 @@ export const percentOf = (task: Task): number => {
 
 const statusOf = (task: Task, percent: number): TaskStatus => {
   if (task.milestones.length === 0) return 'idle'
-  if (task.blocker !== null || task.milestones.some(one => one.state === 'blocked')) return 'blocked'
+  if (isGuardHeld(task) || task.blocker !== null || task.milestones.some(one => one.state === 'blocked')) return 'blocked'
   if (percent === 100) return 'done'
   const open = task.milestones.filter(one => one.state !== 'done')
   const isOnlyVerifyLeft = open.every(one => one.phase === 'VERIFY')
@@ -266,7 +294,8 @@ export const planTask = (task: Task, input: PlanInput, now: number): Outcome => 
   if (titles.length > MAX_MILESTONES) {
     return { task, error: `a plan takes at most ${MAX_MILESTONES} milestones` }
   }
-  const kind: TaskKind = input.kind === 'readonly' ? 'readonly' : 'coding'
+  // a held task cannot be re-declared read-only to shed its verification
+  const kind: TaskKind = input.kind === 'readonly' && !isGuardHeld(task) ? 'readonly' : 'coding'
   const isReplan = input.isReplan === true && task.milestones.length > 0
   const previous = isReplan ? task.milestones : []
   const milestones = titles.map((one, index): Milestone => {
@@ -283,7 +312,9 @@ export const planTask = (task: Task, input: PlanInput, now: number): Outcome => 
   const gates = { ...task.gates }
   for (const name of GATES) {
     const gate = gates[name]
-    if (kind === 'readonly') {
+    if (name === 'TEST' && isGuardHeld(task)) {
+      gates[name] = { ...gate, isRequired: true }
+    } else if (kind === 'readonly') {
       gates[name] = {
         state: 'na',
         isRequired: false,
@@ -343,6 +374,14 @@ export const completeMilestone = (task: Task, ref: unknown, note: string | null,
       note: `${found.id} is HELD, not complete: gate${open.length === 1 ? '' : 's'} ${open.join(
         ', ',
       )} not satisfied. Run the checks and report each with action "gate" (pass/fail), or mark a gate "na" with the reason it does not apply.`,
+    }
+  }
+  if (found.phase === 'VERIFY' && isGuardHeld(task)) {
+    const held: Milestone = { ...found, state: 'active', note: 'held: STOP GUARD' }
+
+    return {
+      task: { ...task, milestones: replaceMilestone(task, held), updatedAt: now },
+      note: `${found.id} is HELD, not complete: the Stop guard is holding this task (${task.stopHold?.reason ?? 'verification'}). Only the owner's verification script passing, or a person releasing it, lifts the hold.`,
     }
   }
   if (found.phase === 'VERIFY' && !isReviewSatisfied(task)) {
@@ -554,7 +593,7 @@ export const summaryOf = (task: Task | null): string => {
             : `UNVERIFIED: ${alignmentNote(task)}; not done until alignment is ALIGNED (action "align").`
           : `UNVERIFIED: not done until ${open.join(', ')} ${open.length === 1 ? 'is' : 'are'} pass or na.`
         : task.status === 'blocked'
-          ? `BLOCKED: ${task.blocker ?? 'a milestone is blocked'}.`
+          ? `BLOCKED: ${task.stopHold !== undefined ? `STOP GUARD: ${task.stopHold.reason}` : task.blocker ?? 'a milestone is blocked'}.`
           : open.length > 0
             ? `Open gates: ${open.join(', ')}.`
             : 'All required gates satisfied.'
@@ -624,6 +663,11 @@ export const applyAction = (task: Task, given: ProgressInput, now: number, sha: 
               // A review the person or the files made necessary is not planned away:
               // it follows the work into the next plan until Opus has answered it.
               ...(task.review === undefined ? {} : { review: task.review }),
+              // A plan continues the task. Its identity, the Stop guard's hold and the tree a read-only claim was measured against
+              // go with it; only a person's reset begins a task that owes nothing.
+              lineage: uidOf(task),
+              ...(task.stopHold === undefined ? {} : { stopHold: task.stopHold }),
+              ...(task.planTree === undefined ? {} : { planTree: task.planTree }),
               // Edits already made are not unmade by planning again, whatever the new plan calls itself.
               ...(task.edited === true || task.files.length > 0 ? { edited: true as const } : {}),
               ...(task.promptGrounds === undefined ? {} : { promptGrounds: task.promptGrounds }),
@@ -646,12 +690,8 @@ export const applyAction = (task: Task, given: ProgressInput, now: number, sha: 
     case 'fail':
       return failMilestone(task, input.milestone, note, now)
     case 'block':
-      if (isGuardHeld(task)) return { task, error: 'STOP GUARD hold: the task is held by the Stop guard and only a person can release it (/cockpit reset); nothing was changed' }
-
       return blockMilestone(task, input.milestone, note, now)
     case 'unblock':
-      if (isGuardHeld(task)) return { task, error: 'STOP GUARD hold: the Stop guard blocked this task and the progress tool cannot unblock it; nothing was changed' }
-
       return unblock(task, now)
     case 'gate': {
       if (Array.isArray(input.gates) && input.gates.length > 0) {

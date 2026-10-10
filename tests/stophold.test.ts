@@ -1,0 +1,393 @@
+// One boundary for completion: the Stop guard's hold is task state of its own. No progress action, plan, test report or
+// forged blocker can lift it, and a saved task from before the field existed cannot slip out of it.
+
+import { describe, expect, test } from 'claude-code/testing'
+import { emptyLedger, migrateLedger } from '../hooks/ledger'
+import { completeMilestone, holdTask, newTask, planTask, settle } from '../hooks/model'
+import { migrateStopHold } from '../hooks/stopguard'
+import type { CheckRecord } from '../hooks/stopguard'
+import type { Task } from '../types'
+import { FIVE, bash, command, hostState, passAllGates, planAndComplete, progress, start, world } from './world'
+
+const SCRIPT = '/work/check.sh'
+const SUMMARY = 'Changed the parser to reject empty input and added a regression test for the empty case.'
+const guard = (extra: Record<string, unknown> = {}) => ({ options: { stopGuard: 'ENFORCE', verifyScript: SCRIPT, stopMaxContinuations: 1, ...extra } })
+const stop = ($: any) => $.classic.Stop({ stop_hook_active: false, last_assistant_message: SUMMARY }) as Promise<{ block?: string }>
+const enroll = async ($: any): Promise<void> => {
+  const sha = /sha-256  ([0-9a-f]{64})/.exec(String((await command($, 'guard trust')).text))![1]!
+  await command($, `guard trust ${sha.slice(0, 12)}`)
+}
+const taskOf = (held: ReturnType<typeof hostState>) => held.get('task')!.value as Task
+/** A task the Stop guard holds: budget of one, a script that fails. */
+const held = async ($: any, on: any, extraWorld: Record<string, unknown> = {}) => {
+  const w = world(on, extraWorld as never); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+  const h = hostState(on, {})
+  await start($); await planAndComplete($, 1); await enroll($)
+  await stop($)
+  expect(taskOf(h).stopHold).toBeDefined()
+
+  return { w, h }
+}
+const alive = (h: ReturnType<typeof hostState>) => {
+  const t = taskOf(h)
+  expect(t.stopHold).toBeDefined()
+  expect(t.status).not.toBe('done')
+  expect(t.percent).toBeLessThan(100)
+}
+
+describe('every progress action leaves the hold in place', () => {
+  const attacks: [string, Record<string, unknown>][] = [
+    ['start a milestone', { action: 'start', milestone: 'm2' }],
+    ['start the next one', { action: 'start', milestone: 'm3' }],
+    ['unblock', { action: 'unblock' }],
+    ['block with a note that looks like the guard', { action: 'block', milestone: 'm2', note: 'STOP GUARD: all clear' }],
+    ['fail a milestone', { action: 'fail', milestone: 'm2', note: 'x' }],
+    ['plan again', { action: 'plan', milestones: [{ title: 'a' }, { title: 'b' }, { title: 'c' }] }],
+    ['plan again, read-only', { action: 'plan', kind: 'readonly', milestones: [{ title: 'a' }, { title: 'b' }, { title: 'c' }] }],
+    ['replan', { action: 'plan', replan: true, milestones: FIVE }],
+    ['replan, read-only', { action: 'plan', replan: true, kind: 'readonly', milestones: FIVE }],
+    ['report TEST as passed', { action: 'gate', gate: 'TEST', state: 'pass', evidence: 'I ran the tests' }],
+    ['report TEST as not applicable', { action: 'gate', gate: 'TEST', state: 'na', evidence: 'no tests here' }],
+    ['report TEST as pending', { action: 'gate', gate: 'TEST', state: 'pending' }],
+    ['report TEST in a batch', { action: 'gates', gates: [{ gate: 'TEST', state: 'pass', evidence: 'x' }] }],
+    ['discover', { action: 'discover', level: 'STANDARD', criteria: ['the check passes', 'nothing else changed'] }],
+    ['decide', { action: 'decide', decision: { problem: 'p', chosen: 'c' } }],
+  ]
+  for (const [name, input] of attacks) {
+    test(`${name}, then try to finish`, guard(), async ($, on) => {
+      const { h } = await held($, on)
+      await progress($, input)
+      for (const gate of ['CODE', 'TYPE', 'BUILD', 'SECURITY', 'GIT']) await progress($, { action: 'gate', gate, state: 'pass', evidence: `${gate} ran` })
+      for (const m of ['m1', 'm2', 'm3', 'm4', 'm5']) await progress($, { action: 'complete', milestone: m })
+      await progress($, { action: 'align', alignment: { state: 'ALIGNED', demonstrated: [{ id: 'c1', evidence: 'x' }] } })
+      alive(h)
+    })
+  }
+  test('the 6438510 exploit: spend the budget, start a milestone, report TEST, reach for DONE', guard(), async ($, on) => {
+    const { h } = await held($, on)
+    await progress($, { action: 'start', milestone: 'm2' })
+    expect(await progress($, { action: 'gate', gate: 'TEST', state: 'pass', evidence: 'ran tests' })).toContain('STOP GUARD hold')
+    await progress($, { action: 'complete', milestone: 'm5' })
+    alive(h)
+    expect(taskOf(h).gates.TEST.state).toBe('fail')
+    // the next stop does not run the check again either: the budget stays spent
+    expect((await stop($)).block).toBeUndefined()
+    alive(h)
+  })
+  test('a test command that passes cannot lift or replace the hold', guard(), async ($, on) => {
+    const { h } = await held($, on)
+    await bash($, 'npm test')
+    expect(taskOf(h).gates.TEST.state).toBe('fail')
+    alive(h)
+  })
+  test('a held task cannot be re-declared read-only to shed TEST', guard(), async ($, on) => {
+    const { h } = await held($, on)
+    await progress($, { action: 'plan', replan: true, kind: 'readonly', milestones: FIVE })
+    expect(taskOf(h).kind).toBe('coding')
+    expect(taskOf(h).gates.TEST.isRequired).toBe(true)
+  })
+})
+
+describe('only a person lifts the hold, and it passes nothing', () => {
+  test('release by a person: hold gone, TEST pending, budget starts over, a check can run again', guard(), async ($, on) => {
+    const { w, h } = await held($, on)
+    const text = String((await command($, 'guard release')).text)
+    expect(text).toContain('released')
+    const t = taskOf(h)
+    expect(t.stopHold).toBeUndefined()
+    expect(t.gates.TEST.state).toBe('pending')
+    expect(t.status).not.toBe('done')
+    const before = w.runs.filter(r => r[0] === SCRIPT).length
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(before + 1)
+  })
+  test('a plugin, a trigger or an unknown origin cannot release it', guard(), async ($, on) => {
+    const { h } = await held($, on)
+    for (const origin of [{ kind: 'plugin', name: 'x' }, { kind: 'trigger' }, { kind: 'mystery' }]) {
+      const out = String((await $.command.run({ command: 'cockpit', args: 'guard release', origin, presentation: { isFullscreen: true, columns: 120 } } as never)).text)
+      expect(out).toContain('only by a command you type')
+    }
+    alive(h)
+  })
+  test('reset is the explicit new task: it carries nothing', guard(), async ($, on) => {
+    const { w, h } = await held($, on)
+    await command($, 'reset'); await w.clock.advance(1000)
+    await progress($, { action: 'plan', milestones: FIVE })
+    expect(taskOf(h).stopHold).toBeUndefined()
+  })
+  test('a plain plan continues the task: hold and identity go with it', guard(), async ($, on) => {
+    const { h } = await held($, on)
+    const before = taskOf(h)
+    await progress($, { action: 'plan', milestones: [{ title: 'a' }, { title: 'b' }, { title: 'c' }] })
+    expect(taskOf(h).stopHold).toEqual(before.stopHold)
+    expect(taskOf(h).lineage).toBeDefined()
+  })
+})
+
+describe('the model refuses completion on its own, whatever the host layer does', () => {
+  const planned = (): Task => {
+    const t = planTask(newTask(1, 'g', 100, null), { milestones: FIVE, kind: 'coding' } as never, 101).task
+    const gates = Object.fromEntries(Object.entries(t.gates).map(([k, g]) => [k, { ...g, state: 'pass' as const, evidence: 'ok' }])) as Task['gates']
+
+    return { ...t, gates, milestones: t.milestones.map(m => ({ ...m, state: 'done' as const })) }
+  }
+  test('every milestone done and every gate passed: a held task is neither verified nor 100% nor done', () => {
+    const open = settle(planned()).task
+    expect(open.percent).toBe(100)
+    const t = settle(holdTask(planned(), 'check exit 1', 1, 102)).task
+    expect(t.percent).toBeLessThan(100)
+    expect(t.status).toBe('blocked')
+    expect(t.phase).toBe('BLOCKED')
+  })
+  test('a re-plan of a held task as read-only keeps it coding with TEST required', () => {
+    const t = holdTask(planTask(newTask(1, 'g', 100, null), { milestones: FIVE, kind: 'coding' } as never, 101).task, 'x', 1, 102)
+    const again = planTask(t, { milestones: FIVE, kind: 'readonly' } as never, 103).task
+    expect(again.kind).toBe('coding')
+    expect(again.gates.TEST.isRequired).toBe(true)
+    expect(again.gates.TEST.state).not.toBe('na')
+  })
+  test('the VERIFY milestone of a held task stays active', () => {
+    const t = holdTask({ ...planned(), milestones: planned().milestones.map((m, i) => (i === 4 ? { ...m, state: 'active' as const } : m)) }, 'x', 1, 102)
+    expect(completeMilestone(t, 'm5', null, 103).task.milestones[4]?.state).toBe('active')
+  })
+})
+
+describe('the claim of read-only work is measured', () => {
+  test('a read-only plan whose tree then changes is checked', guard(), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    hostState(on, {})
+    await start($); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: [{ title: 'a' }, { title: 'b' }, { title: 'c' }] })
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(0)
+    w.tree['src/changed-through-bash.ts'] = 'x'
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBeGreaterThan(0)
+  })
+})
+
+describe('a forged blocker is only a blocker', () => {
+  test('it holds nothing and is not "retries exhausted"', guard(), async ($, on) => {
+    world(on); const h = hostState(on, {})
+    await start($); await planAndComplete($, 1)
+    await progress($, { action: 'block', milestone: 'm2', note: 'STOP GUARD: check exit 1 after 3 attempts' })
+    expect(taskOf(h).stopHold).toBeUndefined()
+    expect(await progress($, { action: 'unblock' })).not.toContain('error')
+    expect(taskOf(h).blocker).toBeNull()
+  })
+})
+
+describe('independence', () => {
+  test('a passing check lifts only its own hold: a failed SECURITY gate keeps the task from DONE', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    await progress($, { action: 'gate', gate: 'SECURITY', state: 'fail', evidence: 'synthetic' })
+    await stop($)
+    expect(taskOf(h).gates.SECURITY.state).toBe('fail')
+    expect(taskOf(h).status).not.toBe('done')
+  })
+  test('with every other gate passed, only the fresh verified check can finish a held task, and a person releasing it still passes nothing', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    await stop($); await stop($); await stop($)
+    expect(taskOf(h).stopHold).toBeDefined()
+    await command($, 'guard release')
+    await passAllGates($, { align: false })
+    expect(taskOf(h).gates.TEST.state).toBe('pass')
+    w.players[SCRIPT] = 'ok'
+    await stop($)
+    expect(taskOf(h).stopHold).toBeUndefined()
+  })
+})
+
+describe('the script is checked before every execution, and a failure of the guard is not a pass', () => {
+  test('a script swapped between two executions is untrusted at the second, and the swapped bytes never run', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+    w.files[SCRIPT] = 'exit 0 # swapped'; w.players[SCRIPT] = 'ok'
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+    expect(taskOf(h).gates.TEST.state).not.toBe('pass')
+    expect(taskOf(h).status).not.toBe('done')
+  })
+  test('a script swapped after the first execution and before the rerun is not executed', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    let ran = 0
+    // the first run leaves a file behind, so the guard runs the script once more; the swap lands between the two
+    w.duringRun = argv => {
+      if (argv[0] === SCRIPT) { ran++; if (ran === 1) w.tree['cache/made-by-the-check'] = 'x' }
+      else if (ran === 1 && argv[0] === 'git' && argv.includes('diff')) w.files[SCRIPT] = 'exit 0 # swapped between runs'
+    }
+    await stop($)
+    expect(ran).toBe(1)
+    expect(taskOf(h).gates.TEST.state).not.toBe('pass')
+  })
+  test('a script swapped while it ran: its result is untrusted, never a pass', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    w.duringRun = argv => { if (argv[0] === SCRIPT) w.files[SCRIPT] = 'exit 0 # swapped during the run' }
+    await stop($)
+    expect(taskOf(h).gates.TEST.state).not.toBe('pass')
+    expect(taskOf(h).status).not.toBe('done')
+  })
+  test('an exception inside the guard holds the task: it is never a silent pass', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    // a malformed host payload makes the guard raise before it checks anything
+    const out = await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 42 } as never) as { block?: string }
+    expect(out.block).toBeUndefined()
+    const t = taskOf(h)
+    expect(t.stopHold?.reason).toContain('raised an error')
+    expect(t.gates.TEST.state).not.toBe('pass')
+    expect(t.status).toBe('blocked')
+  })
+  test('an error in the middle of a check is a held task, not a pass', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    w.duringRun = () => { throw new Error('the host fell over') }
+    await stop($)
+    w.duringRun = null
+    const t = taskOf(h)
+    expect(t.gates.TEST.state).not.toBe('pass')
+    expect(t.status).not.toBe('done')
+    expect(t.percent).toBeLessThan(100)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A task saved before the hold was a field of its own.
+// ---------------------------------------------------------------------------
+
+const legacy = (over: Partial<Task> = {}): Task => {
+  const { guardSchema: _s, ...rest } = newTask(1, 'goal', 100, null)
+
+  return { ...rest, kind: 'coding', ...over } as Task
+}
+const UID = '1@100'
+const rec = (over: Partial<CheckRecord>): CheckRecord => ({ taskId: 1, uid: UID, verifier: 'v', complete: false, name: 'check.sh', sha: 'abcd1234', at: 1, outcome: 'fail', exit: 1, ms: 5, tree: null, summary: 'boom', hasSummary: true, ...over })
+const migrate = (t: Task, checks: CheckRecord[], dropped = 0) => migrateStopHold(t, checks, dropped, 3, 500)
+
+describe('migration of saved tasks', () => {
+  test('a legacy held task (guard blocker and an unfinished record) stays held', () => {
+    const t = migrate(legacy({ blocker: 'STOP GUARD: check exit 1 after 3 attempts' }), [rec({}), rec({}), rec({})])
+    expect(t.stopHold?.reason).toContain('check exit 1 after 3 attempts')
+    expect(t.guardSchema).toBe(1)
+  })
+  test('an exhausted budget stays held even when the model cleared the blocker', () => {
+    expect(migrate(legacy(), [rec({}), rec({}), rec({})]).stopHold).toBeDefined()
+  })
+  test('a check that could not run stays held', () => {
+    expect(migrate(legacy(), [rec({ outcome: 'untrusted', exit: null })]).stopHold?.reason).toContain('untrusted')
+  })
+  test('a legacy pass with no summary, budget not spent: no hold, the budget is kept by the records', () => {
+    const t = migrate(legacy(), [rec({ outcome: 'pass', exit: 0 })])
+    expect(t.stopHold).toBeUndefined()
+  })
+  test('a guard blocker whose checks all completed is ambiguous: held, never granted', () => {
+    const t = migrate(legacy({ blocker: 'STOP GUARD: all fine' }), [rec({ outcome: 'pass', exit: 0, complete: true })])
+    expect(t.stopHold?.reason).toContain('ambiguous')
+  })
+  test('unreadable records with a guard-looking blocker are ambiguous: held', () => {
+    expect(migrate(legacy({ blocker: 'STOP GUARD: x' }), [], 2).stopHold?.reason).toContain('could not be read')
+  })
+  test('a forged guard blocker with no record at all is an ordinary blocker', () => {
+    const t = migrate(legacy({ blocker: 'STOP GUARD: check exit 1 after 3 attempts' }), [])
+    expect(t.stopHold).toBeUndefined()
+    expect(t.blocker).toContain('STOP GUARD')
+  })
+  test('an ordinary blocker, a failed TEST gate, an OBSERVE task and a completed task are untouched', () => {
+    for (const t of [legacy({ blocker: 'waiting for the owner' }), legacy(), legacy({ status: 'done', percent: 100 })]) {
+      const m = migrate(t, [])
+      expect(m.stopHold).toBeUndefined()
+      expect({ ...m, guardSchema: undefined }).toEqual({ ...t, guardSchema: undefined })
+    }
+    expect(migrate(legacy(), [rec({ outcome: 'pass', exit: 0, complete: true })]).stopHold).toBeUndefined()
+  })
+  test('another task\'s records do not hold this one', () => {
+    expect(migrate(legacy(), [rec({ uid: '9@9' }), rec({ uid: '9@9' }), rec({ uid: '9@9' })]).stopHold).toBeUndefined()
+  })
+  test('migration is idempotent and never resets what it settled', () => {
+    const once = migrate(legacy({ blocker: 'STOP GUARD: check exit 1' }), [rec({})])
+    expect(migrate(once, [])).toBe(once)
+    expect(migrate(migrate(once, []), [rec({ complete: true })]).stopHold).toEqual(once.stopHold)
+  })
+  test('malformed legacy records are dropped, counted, and establish nothing', () => {
+    const l = migrateLedger({ ...emptyLedger('s'), stopChecks: [rec({}), { garbage: true }, null] } as never)
+    expect(l.stopChecks).toHaveLength(1)
+    expect(l.stopDropped).toBe(2)
+    expect(migrateLedger(l).stopDropped).toBe(2)
+  })
+})
+
+describe('migration through the host', () => {
+  const saved = (t: Task, checks: CheckRecord[]) => ({ task: t, 'run-ledger': { ...emptyLedger('s1'), stopChecks: checks } })
+  test('a legacy held task stays held across plan, start and complete, and a restart', guard(), async ($, on) => {
+    world(on, {}, { 'ledger:s1': { ...emptyLedger('s1'), stopChecks: [rec({}), rec({}), rec({})] } })
+    on('session.id', () => ({ value: 's1' }))
+    const h = hostState(on, saved(legacy({ blocker: 'STOP GUARD: check exit 1 after 3 attempts', milestones: FIVE.map((f, i) => ({ id: `m${i + 1}`, title: f.title, phase: 'IMPLEMENT' as const, state: 'pending' as const, note: null })) }), [rec({}), rec({}), rec({})]))
+    await start($)
+    await progress($, { action: 'start', milestone: 'm2' })
+    await progress($, { action: 'plan', milestones: [{ title: 'a' }, { title: 'b' }, { title: 'c' }] })
+    await progress($, { action: 'gate', gate: 'TEST', state: 'pass', evidence: 'x' })
+    expect(taskOf(h).stopHold).toBeDefined()
+    expect(taskOf(h).status).not.toBe('done')
+    await stop($)
+    expect(taskOf(h).stopHold).toBeDefined()
+  })
+  const legacySession = (on: any, w: any, task: Task, checks: CheckRecord[], dropped = 0) => {
+    on('session.id', () => ({ value: 's1' }))
+    on('classic.SessionStart', () => ({}) as never)
+
+    return hostState(on, { task, 'run-ledger': { ...emptyLedger('s1'), stopChecks: checks, stopDropped: dropped } })
+  }
+  test('a legacy hold with unreadable records is cleared only by a fresh, enrolled, passing check, even on a clean tree', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = legacySession(on, w, legacy({ blocker: 'STOP GUARD: x' }), [], 2)
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never)
+    expect(taskOf(h).stopHold?.reason).toContain('could not be read')
+    await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+    expect(taskOf(h).stopHold).toBeUndefined()
+  })
+  test('a legacy hold with the script not enrolled runs nothing and grants nothing', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = legacySession(on, w, legacy({ blocker: 'STOP GUARD: x' }), [], 2)
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(0)
+    expect(taskOf(h).stopHold).toBeDefined()
+    expect(taskOf(h).gates.TEST.state).not.toBe('pass')
+  })
+  test('a legacy record of another verifier does not let a changed or different script take the task over', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = legacySession(on, w, legacy({ blocker: 'STOP GUARD: x' }), [rec({ outcome: 'fail', verifier: 'someone-else' })])
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never); await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(0)
+    expect(taskOf(h).stopHold).toBeDefined()
+    expect(taskOf(h).gates.TEST.state).not.toBe('pass')
+  })
+  test('a person can release an ambiguous legacy hold, which passes nothing', guard(), async ($, on) => {
+    world(on)
+    on('session.id', () => ({ value: 's1' }))
+    on('classic.SessionStart', () => ({}) as never)
+    const h = hostState(on, saved(legacy({ blocker: 'STOP GUARD: x' }), [rec({ outcome: 'pass', exit: 0, complete: true })]))
+    await start($)
+    await $.classic.SessionStart({ source: 'startup' } as never)
+    expect(taskOf(h).stopHold?.reason).toContain('ambiguous')
+    await command($, 'guard release')
+    expect(taskOf(h).stopHold).toBeUndefined()
+    expect(taskOf(h).gates.TEST.state).toBe('pending')
+  })
+})

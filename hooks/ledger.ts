@@ -202,7 +202,14 @@ export const classicTelemetry = (l: Ledger, e: { tool_use_id: string; agent_id?:
 }
 
 /** Upgrade retained v1 histories without inventing missing assignments. */
-export const migrateLedger = (l: Ledger): Ledger => ({ ...l, schema: 2, swarm: l.swarm ?? emptySwarm(), decisions: Array.isArray(l.decisions) ? l.decisions : [], discoveries: Array.isArray(l.discoveries) ? l.discoveries : [], ...(l.alerts === undefined ? {} : { alerts: validAlerts(l.alerts) }), ...(l.stopChecks === undefined ? {} : { stopChecks: validChecks(l.stopChecks) }) })
+/** How many stored Stop guard records were unreadable. Sticky, so repeated loads do not forget them. */
+const droppedOf = (l: Ledger): { stopDropped?: number } => {
+  const held = Array.isArray(l.stopChecks) ? l.stopChecks.length : 0
+  const n = Math.max(l.stopDropped ?? 0, held - validChecks(l.stopChecks).length, 0)
+
+  return n > 0 ? { stopDropped: n } : {}
+}
+export const migrateLedger = (l: Ledger): Ledger => ({ ...l, schema: 2, swarm: l.swarm ?? emptySwarm(), decisions: Array.isArray(l.decisions) ? l.decisions : [], discoveries: Array.isArray(l.discoveries) ? l.discoveries : [], ...(l.alerts === undefined ? {} : { alerts: validAlerts(l.alerts) }), ...(l.stopChecks === undefined ? {} : { stopChecks: validChecks(l.stopChecks), ...droppedOf(l) }) })
 const redact = (text: string, max: number): string => redactSecrets(text).replace(/\s+/g, ' ').trim().slice(0, max)
 /** The same record with every free-text field redacted again: nothing reaches storage unredacted, whatever called this. */
 const safeDecision = (d: DecisionRecord): DecisionRecord => ({ ...d, problem: redact(d.problem, 160), chosen: redact(d.chosen, 200), alternatives: d.alternatives.slice(0, 4).map(a => ({ option: redact(a.option, 120), rejectedBecause: redact(a.rejectedBecause, 160) })), tradeoffs: d.tradeoffs === null ? null : redact(d.tradeoffs, 200), evidence: d.evidence.slice(0, 4).map(e => redact(e, 120)) })

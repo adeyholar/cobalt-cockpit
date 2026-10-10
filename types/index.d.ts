@@ -110,13 +110,15 @@ export type StopCheck = {
   name: string
   sha: string | null
   at: number
-  outcome: 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable'
+  outcome: 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable' | 'released'
   exit: number | null
   ms: number | null
   tree: string | null
   summary: string
   hasSummary: boolean
 }
+
+export type StopHold = { reason: string; at: number; refusals: number }
 
 export type TaskKind = 'unplanned' | 'coding' | 'readonly'
 
@@ -163,6 +165,17 @@ export type Task = {
   /** v0.5.1: set once any edit was seen in this task, by the main session or a helper; survives a plan restart. */
   /** The working-tree fingerprint when the passed checks were last observed; the goal check is refused over a different tree. */
   gateTree?: string
+  /**
+   * The Stop guard's hold: authoritative, written only by the guard and a person's release, and never by the progress tool.
+   * While it is present the task cannot read DONE, whatever its milestones, gates or blocker say.
+   */
+  stopHold?: StopHold
+  /** Present (1) once the Stop guard's protected state has been settled for this task. A task saved before it existed carries none, and is migrated once. */
+  guardSchema?: 1
+  /** The task's identity across plans (a plan continues a task; only a person's reset starts a new one). Absent: `id@startedAt`. */
+  lineage?: string
+  /** The working-tree fingerprint when a read-only plan was declared, so a read-only claim can be compared with the tree. */
+  planTree?: string
   edited?: true
   /** v0.5.1: how much discovery this task warrants and what it found. Absent on tasks stored by older versions. */
   discovery?: Discovery
@@ -550,7 +563,7 @@ export type ToolEntry = { id: string; runId: Value<string>; turnId: Value<string
 export type Reading = { at: number; turnId: Value<string>; tokens: Value<number>; window: Value<number>; percent: Value<number> }
 export type Request = { id: string; runId: Value<string>; turnId: string; agentId: Value<string>; requestedModel: Value<string>; requestedEffort: Value<string>; model: Value<string>; effort: Value<string>; effectiveEffort: Value<string>; input: Value<number>; output: Value<number>; cacheRead: Value<number>; cacheWrite: Value<number> }
 export type Checkpoint = { at: number; goal: string; phase: string; completed: string[]; remaining: string[]; latest: string; gates: Record<string, string>; branch: string; startingSha: string; currentSha: string; repo: string; dirty: Value<number>; blockers: string[]; backgroundAgents: string[] }
-export type Ledger = { schema: 1 | 2; observedCompletions?: { agentId: string; reason: string; conclusion: string; at: number; decision?: ReleaseOutcome; /** Later turns of an architect that had already returned: separate information, never the approved answer. */ later?: { at: number; reason: string; conclusion: string; decision?: ReleaseOutcome }[] }[]; swarm?: Swarm; sessionId: string; currentRun: Value<string>; turns: Record<string, string>; runs: Run[]; agents: LedgerAgent[]; tools: ToolEntry[]; requests: Request[]; usage: Reading[]; receipts: NwhoEvent[]; warnings: string[]; replay: ReplayStep[]; checkpoint: Checkpoint | null; /** Opus consultations (SONNET_LED); absent in older ledgers. */ consults?: Consultation[]; /** The session router's decisions, newest last; absent until one is made. */ routing?: RouterDecision[]; /** v0.5.1 decision records, newest last; absent in v0.5.0 ledgers. */ decisions?: DecisionRecord[]; /** v0.5.1: why each task got its discovery level; absent in v0.5.0 ledgers. */ discoveries?: DiscoveryEntry[]; /** v0.5.2 Cobalt Guard: owner alerts raised, newest last, bounded; absent when none. */ alerts?: AlertRecord[]; /** v0.5.2 Stop guard: the verification script runs and their real exit codes, newest last, bounded; absent when none. */ stopChecks?: StopCheck[] }
+export type Ledger = { schema: 1 | 2; observedCompletions?: { agentId: string; reason: string; conclusion: string; at: number; decision?: ReleaseOutcome; /** Later turns of an architect that had already returned: separate information, never the approved answer. */ later?: { at: number; reason: string; conclusion: string; decision?: ReleaseOutcome }[] }[]; swarm?: Swarm; sessionId: string; currentRun: Value<string>; turns: Record<string, string>; runs: Run[]; agents: LedgerAgent[]; tools: ToolEntry[]; requests: Request[]; usage: Reading[]; receipts: NwhoEvent[]; warnings: string[]; replay: ReplayStep[]; checkpoint: Checkpoint | null; /** Opus consultations (SONNET_LED); absent in older ledgers. */ consults?: Consultation[]; /** The session router's decisions, newest last; absent until one is made. */ routing?: RouterDecision[]; /** v0.5.1 decision records, newest last; absent in v0.5.0 ledgers. */ decisions?: DecisionRecord[]; /** v0.5.1: why each task got its discovery level; absent in v0.5.0 ledgers. */ discoveries?: DiscoveryEntry[]; /** v0.5.2 Cobalt Guard: owner alerts raised, newest last, bounded; absent when none. */ alerts?: AlertRecord[]; /** v0.5.2 Stop guard: the verification script runs and their real exit codes, newest last, bounded; absent when none. */ stopChecks?: StopCheck[]; /** Malformed Stop guard records dropped when this Ledger was loaded; they never establish anything, but their absence is not proof that no guard was active. */ stopDropped?: number }
 export type ReplayStep = { id: string; runId: string; turnId: string; agentId: string; file: string; kind: 'Edit' | 'Write'; at: number; before: string; after: string; scope: 'fragment' | 'file'; omitted: boolean }
 export type Cursor = { offset: number; size: number; seen: string[]; primed: boolean }
 

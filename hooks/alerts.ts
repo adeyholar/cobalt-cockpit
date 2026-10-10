@@ -59,8 +59,8 @@ export type Facts = {
   atStop: boolean
 }
 
-/** A blocker is "retries exhausted" only when a check really ran and kept failing; a missing, changed or unstartable script is a blocked run. */
-export const exhaustedBlocker = (blocker: string | null): string | null => (blocker !== null && /^STOP GUARD: check (?:exit|timed out)/.test(blocker) ? blocker : null)
+/** A hold is "retries exhausted" only when a check really ran and kept failing; a missing, changed or unstartable script is a blocked run. */
+export const exhaustedBlocker = (reason: string | null): string | null => (reason !== null && /^check (?:exit|timed out)/.test(reason) ? reason : null)
 
 export const keyOf = (taskUid: string, kind: AlertKind, detail: string): string => `${taskUid}:${kind}:${detail}`
 
@@ -112,7 +112,16 @@ export const labelOf = (cfg: GuardConfig, state: GuardState, kept: readonly Aler
   return last.outcome === 'sent' ? 'SENT' : 'FAILED'
 }
 
-export const bounded = (kept: readonly AlertRecord[], add: AlertRecord): AlertRecord[] => [...kept, add].slice(-ALERT_CAP)
+/** Bounded, and when full it gives up the oldest held-back or silenced record first, so a written one is not pushed out by them. */
+export const bounded = (kept: readonly AlertRecord[], add: AlertRecord): AlertRecord[] => {
+  const all = [...kept, add]
+  while (all.length > ALERT_CAP) {
+    const drop = all.findIndex(a => a.outcome === 'throttled' || a.outcome === 'silenced')
+    all.splice(drop >= 0 && drop < all.length - 1 ? drop : 0, 1)
+  }
+
+  return all
+}
 
 export const guardText = (cfg: GuardConfig, state: GuardState, kept: readonly AlertRecord[]): string => {
   const lines = [`GUARD: ${labelOf(cfg, state, kept)}`]
