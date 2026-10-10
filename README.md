@@ -98,6 +98,10 @@ claude plugin uninstall cobalt-cockpit@cobalt-cockpit
 
 A `--plugin-dir` copy stops loading when you omit the flag next session.
 
+## v0.5.2 additions
+
+`/cockpit stats` (local telemetry), `/cockpit flow` (Neural Flow), `/cockpit doctor` (installation, Auto-mode and cache-policy diagnostics), `/cockpit guard` (owner alerts), the optional Stop-hook verification guard and the hardened `/cockpit reset`. All new capabilities are local, bounded and either read-only or off by default. See [docs/implementation-v0.5.2.md](docs/implementation-v0.5.2.md).
+
 ## Commands
 
 | Command | Action |

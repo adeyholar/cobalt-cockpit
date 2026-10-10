@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.2 — Observability and state integrity
+
+- `/cockpit reset` is refused from any origin that is not the person's (composer, bridge, SDK); an unknown origin fails closed.
+- Local model telemetry (`telemetry`, default on): a bounded, whitelisted record of observed requests, subagents, routing and consultations in per-process sealed segments under `~/.local/state/cobalt-cockpit/telemetry/` (64 KiB segments, 4 MiB total, 13 months). No prompt, code, path or secret is stored; nothing is uploaded. `/cockpit stats 7d|30d|all [--json|--csv]` reads it. Storage is not append-only and file modes are claimed only after a stat read-back.
+- Neural Flow (`flow`, default on): a one-row HUD line, input → discovery → routing → workers → verify → done, drawn only from real task state; the moving marker appears only while work is live; honours reduced motion. `/cockpit flow` prints it in words.
+- `/cockpit doctor`: read-only installation, host, Auto-mode, telemetry-storage and subagent prompt-cache diagnostics. The cache policy is configuration intent and an opt-in recommendation only: Cockpit edits no settings file, sets no variable, makes no extra model call and claims no savings.
+- Optional Stop-hook verification guard (`stopGuard`, default OBSERVE): in ENFORCE it runs the owner's `verifyScript` (argv only, no shell, optional sha-256 pin, hashed at session start) when a changed task tries to finish, refuses the stop with the failure until it exits 0 or the attempt budget is spent, then marks the task BLOCKED and allows the stop. A pass sets only the TEST gate.
+- Cobalt Guard (`guardAlerts`, default off): a terminal notification through the host's own channel when a run needs a person (retries exhausted, security failure, release NO-GO, open mandatory review at stop, blocked run). Deduplicated, throttled, bounded, redacted by construction, recorded in the Run Ledger, shown as `GUARD:` in the HUD and by `/cockpit guard` (`ack`, `silence`). An alert never clears a hold, approves a release or changes a verdict; SENT means the host wrote it to the terminal, not that anyone saw it. No webhook, email or push (deferred).
+- Details and limits: [docs/implementation-v0.5.2.md](docs/implementation-v0.5.2.md).
+
 ## 0.5.1 — Discovery and decision quality
 
 - Adaptive discovery: a deterministic LIGHT, STANDARD or DEEP level per task, from the prompt, the files edited and the existing consultation grounds. LIGHT work gets no added prompt text; STANDARD and DEEP get one short line, once per level. No new model call, router or consultation path.

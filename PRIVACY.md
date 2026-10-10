@@ -101,6 +101,14 @@ What it does not provide: **there is no command that erases saved Run Ledgers or
 
 To remove what is saved, quit Claude Code and delete the `cobalt-cockpit_…` JSON file in the `plugins/store/` folder of your Claude Code configuration directory. That removes every saved ledger, checkpoint and both preferences. A session that is still running holds its own ledger in memory and will write it again, which is why Claude Code should be closed first. Disabling or uninstalling the plugin stops further writes; this page does not promise that doing so removes the file, so check the folder.
 
+## Local model telemetry (0.5.2)
+
+With `telemetry` on (the default) Cockpit keeps a small local record of what it observed: for each model request the tier (Haiku, Sonnet, Opus, other), whether it was a subagent, token counts and latency when the host reported them, the subagent role, the cache policy in force, and the kind and ground of a consultation. It never stores a prompt, code, file path, command, credential or any text from your task, and nothing is sent anywhere. Files live under `~/.local/state/cobalt-cockpit/telemetry/` (or `$XDG_STATE_HOME`), are capped at 4 MiB and 13 months, and each process writes only its own segment. The plugin API has no file-mode argument, so Cockpit asks for 0700/0600 and says "restricted" only after reading the mode back. To delete it, quit Claude Code and remove that directory; set `telemetry` to false to stop recording.
+
+## Owner alerts (0.5.2)
+
+With `guardAlerts` on (off by default) Cockpit asks Claude Code to raise a terminal notification whose text is one fixed sentence and a task number. It contains no prompt, path or code. Alert outcomes (kind, task number, time, sent/failed, channel name) are kept in the Run Ledger. Nothing leaves your machine; the terminal decides what to show.
+
 ## What can reach a model
 
 Cockpit never calls a model. It does add text to requests that Claude Code itself sends to whichever model provider your session uses, and anything in those requests is handled under that provider's terms and Claude Code's settings, not under this policy.
