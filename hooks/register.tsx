@@ -121,8 +121,12 @@ import {
 import type { OrchestraView } from './orchestra'
 import { BLOCK_DENY, BLOCK_LINE, EMPTY_POLICY, FABLE_RULE, answered, blocked, fableConfigured, fableRoute, isFable } from './policy'
 import { isPersonOrigin } from './origin'
-import { dirFor, filesFor, gather, health, healthOf, prepared, queue as teleQueue, secured, setEnabled as setTelemetry } from './telemetry-store'
-import { agentRole, appendBounded, cleanEvent, expiredFiles, isMonthFile, modelTier, monthFile, monthKey, parseWindow, statsCsv, statsJson, statsText } from './telemetry'
+import { agentsOf, readCache } from './cache'
+import type { CacheReading } from './cache'
+import { doctorText } from './doctor'
+import type { DoctorFacts, Install } from './doctor'
+import { dirFor, filesFor, gather, health, healthOf, limits, newSid, prepared, queue as teleQueue, segment, setEnabled as setTelemetry } from './telemetry-store'
+import { agentRole, cleanEvent, encode, expiredFiles, isTelemetryFile, modelTier, monthKey, parseWindow, segmentName, shedFiles, statsCsv, statsJson, statsText, TOTAL_CAP_BYTES } from './telemetry'
 import type { HudInput, Row, Segment } from './view'
 
 const PANE = 'cobalt-cockpit'
@@ -681,6 +685,7 @@ const HELP =
   '/cockpit discovery  show the discovery level, unknowns, decisions and goal check; pin light | standard | deep, or auto\n' +
   '/cockpit router     show this session\'s router, or switch it: off, nobodywho, jev (this session only)\n' +
   '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
+  '/cockpit doctor    read-only checks: installs, profile, telemetry storage, host and prompt-cache policy\n' +
   '/cockpit sound      play both cues'
 
 const isAtLeast = (version: string, floor: readonly number[]): boolean => {
@@ -698,7 +703,7 @@ const isAtLeast = (version: string, floor: readonly number[]): boolean => {
 const healthLine = (): string => {
   const h = healthOf()
 
-  return !h.enabled ? 'TELEMETRY / off (telemetry=false); nothing is being recorded.' : `TELEMETRY / this session wrote ${h.writes} record${h.writes === 1 ? '' : 's'}${h.failures > 0 ? `, ${h.failures} could not be written (incomplete coverage)` : ''} · files ${h.permissions === 'restricted' ? 'restricted to you (0700 dir, 0600 files)' : h.permissions === 'unverified' ? 'permissions could not be set' : 'not yet written'}`
+  return !h.enabled ? 'TELEMETRY / off (telemetry=false); nothing is being recorded.' : `TELEMETRY / this session wrote ${h.writes} record${h.writes === 1 ? '' : 's'}${h.failures > 0 ? `, ${h.failures} could not be written (incomplete coverage)` : ''} · files ${h.permissions === 'verified' ? 'read back as 0700 directory, 0600 files' : h.permissions === 'unverified' ? 'permissions could NOT be confirmed (the host gives plugins no file mode; the directory is only as private as your umask)' : 'not yet written'}`
 }
 
 const countPatch = (patch: unknown): { added: number; removed: number } => {
@@ -962,30 +967,105 @@ let player: Player | null | undefined
 let fieldWalker: Walker = RESTING
 
 /** Runs bookkeeping that must never fail the event it rides on. */
-// --- Local telemetry (what is kept: telemetry.ts). The host follows `$` only into functions declared in this file. ---
+// --- Prompt-cache policy (cache.ts): read, never written. ---
+let cacheReading: CacheReading | null = null
+let seenPermissionMode: string | null = null
+const otherCockpits: { root: string; provenance: string }[] = []
+const cacheFacts = async ($: EngineInterface): Promise<CacheReading> => {
+  const version = await $.session.version().catch(() => null)
+  // only the one setting is taken from the merged settings; nothing else in them is read, kept or shown
+  const settings = await $.settings.read().catch(() => ({} as Record<string, unknown>))
+
+  return readCache({
+    version: version === null ? null : (version.base ?? version.version),
+    forceFiveMinute: await $.env.get('FORCE_PROMPT_CACHING_5M').catch(() => undefined),
+    envTtl: await $.env.get('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL').catch(() => undefined),
+    settingTtl: settings['subagentPromptCacheTtl'],
+    enableOneHour: await $.env.get('ENABLE_PROMPT_CACHING_1H').catch(() => undefined),
+  })
+}
+const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
+  const home = (await $.env.get('HOME').catch(() => undefined)) ?? null
+  const version = await $.session.version().catch(() => null)
+  const host = version === null ? null : (version.base ?? version.version)
+  let manifestVersion: string = UNKNOWN
+  try { manifestVersion = /"version"\s*:\s*"([^"]+)"/.exec(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))?.[1] ?? UNKNOWN } catch { /* unreadable */ }
+  // the install record lists plugin installs; only the cobalt-cockpit entries are taken from it
+  let installs: Install[] | null = null
+  try {
+    const dir = (await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)) ?? (home === null ? null : `${home}/.claude`)
+    if (dir !== null) {
+      const record = JSON.parse(await $.fs.read(`${dir}/plugins/installed_plugins.json`)) as { plugins?: Record<string, unknown> }
+      installs = Object.entries(record.plugins ?? {}).filter(([key]) => key.startsWith('cobalt-cockpit@')).flatMap(([key, value]) => (Array.isArray(value) ? value : [value]).map((v): Install => {
+        const r = (typeof v === 'object' && v !== null ? v : {}) as Record<string, unknown>
+
+        return { key, version: typeof r['version'] === 'string' ? r['version'] : null, path: typeof r['installPath'] === 'string' ? r['installPath'] : null }
+      }))
+    }
+  } catch { installs = null }
+  let enabled: string[] | null = null
+  try {
+    const settings = await $.settings.read()
+    const plugins = (typeof settings['enabledPlugins'] === 'object' && settings['enabledPlugins'] !== null ? settings['enabledPlugins'] : {}) as Record<string, unknown>
+    enabled = Object.entries(plugins).filter(([key, on]) => key.startsWith('cobalt-cockpit@') && on === true).map(([key]) => key)
+  } catch { enabled = null }
+  let listed: { files: number; bytes: number } | null = null
+  const dir = await telemetryDir($)
+  if (dir !== null) {
+    try {
+      const files = (await $.fs.list(dir)).filter(x => x.kind === 'file' && isTelemetryFile(x.name))
+      listed = { files: files.length, bytes: files.reduce((n, x) => n + x.size, 0) }
+    } catch { listed = null }
+  }
+  const ledger = await read($, ledgerAtom)
+  const h = healthOf()
+
+  return {
+    version: manifestVersion, root: $.plugin.root, home, host, hostSupported: host === null ? null : isSupported,
+    profile: config.profile, orchestration: config.hasOrchestration, reasoning: config.reasoningMode, router: (await read($, routerAtom)).mode,
+    permissionMode: seenPermissionMode, installs, enabled, otherRegistrations: [...otherCockpits],
+    telemetry: { enabled: h.enabled, dir, listed, writes: h.writes, failures: h.failures, permissions: h.permissions, shed: h.shed },
+    cache: await cacheFacts($),
+    agents: agentsOf(ledger.agents.map(a => (typeof a.start === 'number' && typeof a.end === 'number' ? a.end - a.start : null))),
+  }
+}
+
+// --- Local telemetry (what is kept and how: telemetry.ts). The host follows `$` only into functions declared in this file. ---
 const telemetryDir = async ($: EngineInterface): Promise<string | null> =>
   dirFor(await $.env.get('XDG_STATE_HOME').catch(() => undefined), await $.env.get('HOME').catch(() => undefined))
 
-const restrictTelemetry = async ($: EngineInterface, dir: string): Promise<void> => {
-  // the host's write has no mode argument: the directories are made 0700 first and each file is narrowed to 0600 after it exists
+/** Reads a mode back with stat, so "restricted" is only ever said of a mode that was seen. A refusal or an error is "unverified"; nothing else is tried. */
+const modeIs = async ($: EngineInterface, path: string, mode: string): Promise<boolean> => {
   try {
-    for (const d of [dir.slice(0, dir.lastIndexOf('/')), dir]) {
-      const r = await $.process.run(['mkdir', '-p', '-m', '700', d], { timeoutMs: 5000 })
-      if (r.exitCode !== 0) throw new Error('mkdir')
-    }
-    health.permissions = 'restricted'
-  } catch { health.permissions = 'unverified' }
+    const r = await $.process.run(['stat', '-c', '%a', path], { timeoutMs: 5000 })
+
+    return r.exitCode === 0 && r.stdout.trim() === mode
+  } catch { return false }
+}
+
+const restrictTelemetry = async ($: EngineInterface, dir: string): Promise<void> => {
+  // the host's write has no mode argument, so the directories are asked to be 0700 first and each file 0600 once it exists
+  let ok = true
+  for (const d of [dir.slice(0, dir.lastIndexOf('/')), dir]) {
+    try { ok = (await $.process.run(['mkdir', '-p', '-m', '700', d], { timeoutMs: 5000 })).exitCode === 0 && ok } catch { ok = false }
+  }
+  // mkdir -m leaves an existing directory as it was, so the mode is read back rather than assumed
+  health.permissions = ok && await modeIs($, dir, '700') ? 'verified' : 'unverified'
 }
 
 const pruneTelemetry = async ($: EngineInterface, dir: string, now: number): Promise<void> => {
   try {
-    const names = (await $.fs.list(dir)).filter(x => x.kind === 'file' && !x.isLink).map(x => x.name)
-    // exact month-file names only, inside our own directory
-    for (const name of expiredFiles(names, now)) await $.process.run(['rm', '-f', '--', `${dir}/${name}`], { timeoutMs: 5000 })
+    const listed = (await $.fs.list(dir)).filter(x => x.kind === 'file' && !x.isLink && isTelemetryFile(x.name))
+    // exact telemetry file names only, inside our own directory; a refusal is final and is not worked around
+    const doomed = new Set([...expiredFiles(listed.map(x => x.name), now), ...shedFiles(listed.filter(x => !expiredFiles([x.name], now).length), TOTAL_CAP_BYTES, new Set())])
+    for (const name of doomed) {
+      const r = await $.process.run(['rm', '-f', '--', `${dir}/${name}`], { timeoutMs: 5000 })
+      if (r.exitCode === 0) health.shed++
+    }
   } catch { /* retention is best effort */ }
 }
 
-/** Records one observed event. Never throws; writes are taken one at a time. */
+/** Records one observed event. Never throws; writes are taken one at a time, and only this process's own segment is ever written. */
 const tele = ($: EngineInterface, event: Record<string, unknown>): Promise<void> => {
   if (!health.enabled) return Promise.resolve()
   teleQueue.tail = teleQueue.tail.then(async () => {
@@ -996,14 +1076,27 @@ const tele = ($: EngineInterface, event: Record<string, unknown>): Promise<void>
       const e = cleanEvent({ v: 1, t: at, ...event })
       if (e === null) { health.failures++; return }
       health.dir = dir
-      if (prepared.dir !== dir) { prepared.dir = dir; await restrictTelemetry($, dir); await pruneTelemetry($, dir, at) }
-      const path = `${dir}/${monthFile(monthKey(at))}`
-      // a file that cannot be read is left alone: it is never overwritten with a single line
-      const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
-      await $.fs.write(path, appendBounded(text, e, at))
-      if (!secured.has(path)) {
-        secured.add(path)
-        await $.process.run(['chmod', '600', path], { timeoutMs: 5000 }).then(r => { if (r.exitCode !== 0) health.permissions = 'unverified' }, () => { health.permissions = 'unverified' })
+      if (prepared.dir !== dir) {
+        prepared.dir = dir
+        // a smaller segment may be asked for (never a larger one); it exists so the sealing can be exercised without writing 64 KiB
+        const asked = Number(await $.env.get('COBALT_TELEMETRY_SEGMENT_BYTES').catch(() => undefined))
+        if (Number.isInteger(asked) && asked >= 512 && asked < limits.segmentCap) limits.segmentCap = asked
+        await restrictTelemetry($, dir); await pruneTelemetry($, dir, at)
+      }
+      const line = encode(e)
+      const month = monthKey(at)
+      segment.sid ??= newSid(at)
+      // a full segment is sealed and never written again; a new month starts a new one
+      if (segment.month !== month || segment.bytes + line.length + 1 > limits.segmentCap) { segment.n = segment.month === null ? 0 : segment.n + 1; segment.month = month; segment.lines = []; segment.bytes = 0 }
+      segment.lines.push(line); segment.bytes += line.length + 1
+      const path = `${dir}/${segmentName(month, segment.sid, segment.n)}`
+      // this process is the only writer of this file, so the whole segment is rewritten from memory with nothing read back
+      await $.fs.write(path, `${segment.lines.join('\n')}\n`)
+      if (!segment.verified.has(path)) {
+        segment.verified.add(path)
+        let ok = false
+        try { ok = (await $.process.run(['chmod', '600', path], { timeoutMs: 5000 })).exitCode === 0 } catch { ok = false }
+        if (!ok || !(await modeIs($, path, '600'))) health.permissions = 'unverified'
       }
       health.writes++
     } catch { health.failures++ }
@@ -1019,7 +1112,7 @@ const readStats = async ($: EngineInterface, win: { label: string; days: number 
   const texts: (string | null)[] = []
   if (dir !== null) {
     let names: string[] = []
-    try { names = (await $.fs.list(dir)).filter(x => x.kind === 'file' && !x.isLink && isMonthFile(x.name)).map(x => x.name) } catch { /* no directory yet */ }
+    try { names = (await $.fs.list(dir)).filter(x => x.kind === 'file' && !x.isLink).map(x => x.name) } catch { /* no directory yet */ }
     for (const name of filesFor(names, now, win)) texts.push(await $.fs.read(`${dir}/${name}`).catch(() => null))
   }
 
@@ -2007,7 +2100,17 @@ export const ledgerRequest = async ($: EngineInterface, e: { turnId: string; ind
   // one observed request, as the ledger now holds it; tokens only when the host reported both figures
   await hush(async () => {
     const r = (await read($, ledgerAtom)).requests.at(-1)
-    if (r !== undefined) await tele($, { k: 'req', tier: modelTier(r.model), sub: e.agentId !== undefined, ...(typeof r.input === 'number' && typeof r.output === 'number' ? { inTok: r.input, outTok: r.output } : {}) })
+    if (r === undefined) return
+    const raw = (typeof actual.usage === 'object' && actual.usage !== null ? actual.usage : {}) as Record<string, unknown>
+    const split = (typeof raw['cache_creation'] === 'object' && raw['cache_creation'] !== null ? raw['cache_creation'] : {}) as Record<string, unknown>
+    await tele($, {
+      k: 'req', tier: modelTier(r.model), sub: e.agentId !== undefined,
+      ...(typeof r.input === 'number' && typeof r.output === 'number' ? { inTok: r.input, outTok: r.output } : {}),
+      ...(typeof r.cacheRead === 'number' && typeof r.cacheWrite === 'number' ? { cr: r.cacheRead, cw: r.cacheWrite } : {}),
+      // the 5m / 1h split exists only if the host passed it through; the typed usage does not carry it
+      ...(typeof split['ephemeral_5m_input_tokens'] === 'number' && typeof split['ephemeral_1h_input_tokens'] === 'number' ? { w5: split['ephemeral_5m_input_tokens'], w1: split['ephemeral_1h_input_tokens'] } : {}),
+      ...(e.agentId !== undefined && cacheReading !== null ? { pol: cacheReading.ttl } : {}),
+    })
   })
   await persist($)
 }
@@ -2196,10 +2299,18 @@ export const register: Register = (on, options) => {
   setTelemetry(options['telemetry'] !== false)
   registerLedger(on)
 
+  // another Cockpit that registers after this one: all the host lets a plugin see of the others
+  on('plugin.register', async ($, e, next) => {
+    if (e.name === 'cobalt-cockpit' && e.root !== $.plugin.root && otherCockpits.length < 8) otherCockpits.push({ root: e.root, provenance: e.provenance })
+
+    return next(e)
+  })
+
   on('session.start', async ($, e, next) => {
     await quiet(async () => {
       const version = await $.session.version()
       isSupported = isAtLeast(version.base ?? version.version, MIN_VERSION)
+      cacheReading = await cacheFacts($)
       hasNativeEffort = isAtLeast(version.base ?? version.version, NATIVE_EFFORT_VERSION)
       if (!isSupported) {
         $.ui.log(`cobalt-cockpit needs Claude Code ${MIN_VERSION.join('.')} or newer (this is ${version.version}); it is standing by.`)
@@ -2216,7 +2327,7 @@ export const register: Register = (on, options) => {
       $.command.register({
         name: 'cockpit',
         description: 'Mission Control: task progress, milestones, verification gates, git and context',
-        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|sound]',
+        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|doctor|sound]',
         immediate: true,
       }),
     )
@@ -2541,6 +2652,7 @@ export const register: Register = (on, options) => {
   })
 
   on('agent.spawn', async ($, e, next) => {
+    if (typeof e.permissionMode === 'string') seenPermissionMode = e.permissionMode
     // Refused before the engine resolves a model: a spawn that names Fable, an
     // agent type that does, or a fork of a parent that is on it.
     if (config.blocksFable && (isFable(e.model) || isFable(e.subagentType) || (e.fork && isFable(e.parentModel)))) {
@@ -3024,6 +3136,8 @@ export const register: Register = (on, options) => {
 
         return { text: [statsText(stats), note, healthLine()].filter(Boolean).join('\n') }
       }
+      case 'doctor':
+        return { text: doctorText(await doctorFacts($)) }
       case 'version':
       case 'source': {
         // What is really loaded, and where from: the manifest on disk, not a

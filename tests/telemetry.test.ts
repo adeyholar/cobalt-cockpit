@@ -1,7 +1,7 @@
 // Telemetry: what is kept, what is never kept, and what /cockpit stats may say.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { MONTH_CAP_BYTES, aggregate, appendBounded, cleanEvent, encode, expiredFiles, latencyOf, parseLines, parseWindow, statsCsv, statsJson, statsText } from '../hooks/telemetry'
+import { SEGMENT_CAP_BYTES, TOTAL_CAP_BYTES, aggregate, cleanEvent, encode, expiredFiles, isTelemetryFile, latencyOf, parseLines, parseWindow, segmentName, shedFiles, statsCsv, statsJson, statsText } from '../hooks/telemetry'
 import type { TEvent } from '../hooks/telemetry'
 import { resetStore } from '../hooks/telemetry-store'
 import { command, planAndComplete, prompt, start, world } from './world'
@@ -48,24 +48,26 @@ describe('reading is tolerant', () => {
 })
 
 describe('storage is bounded', () => {
-  test('a month over its cap drops the oldest lines and says how many', () => {
-    let text = ''
-    for (let i = 0; i < 400; i++) text = appendBounded(text, req(i, 'SONNET'), i, 2000)
-    expect(text.length).toBeLessThanOrEqual(2000)
-    const { events } = parseLines(text)
-    expect(events[0]!.k).toBe('trim')
-    expect(events.at(-1)).toMatchObject({ k: 'req', t: 399 })
-    const trimmed = events.filter(e => e.k === 'trim')
-    expect(trimmed).toHaveLength(1)
-    // nothing is lost without being counted
-    expect((trimmed[0] as { n: number }).n + events.filter(e => e.k === 'req').length).toBe(400)
+  test('only exact telemetry file names are ever read, listed for removal or removed', () => {
+    for (const ok of ['2026-10.jsonl', '2026-10-0a1b2c3d-0.jsonl', segmentName('2026-01', 'deadbeef', 12)]) expect(isTelemetryFile(ok)).toBe(true)
+    for (const bad of ['../2026-10.jsonl', '2026-13.jsonl', '2026-10.jsonl.bak', '2026-10-XYZ-0.jsonl', 'notes.txt', '2026-10-0a1b2c3d-.jsonl', '/etc/passwd', '2026-10-0a1b2c3d-0.jsonl\n']) expect(isTelemetryFile(bad)).toBe(false)
   })
-  test('the real cap is within what the host reads in one piece', () => {
-    expect(MONTH_CAP_BYTES).toBeLessThan(4 * 1024 * 1024)
+  test('files older than 13 months are expired, and nothing else is', () => {
+    const names = ['2026-10.jsonl', '2025-10-0a1b2c3d-0.jsonl', '2025-09-0a1b2c3d-0.jsonl', '2024-01.jsonl', '2024-01.jsonl.bak', '../2024-01.jsonl', 'notes.txt']
+    expect(expiredFiles(names, NOW)).toEqual(['2025-09-0a1b2c3d-0.jsonl', '2024-01.jsonl'])
+    // the boundary: the first day of the 13th month back is kept, the month before it is not
+    expect(expiredFiles(['2025-10.jsonl', '2025-09.jsonl'], Date.UTC(2026, 9, 31))).toEqual(['2025-09.jsonl'])
+    expect(expiredFiles(['2025-11.jsonl', '2025-10.jsonl'], Date.UTC(2026, 10, 1))).toEqual(['2025-10.jsonl'])
   })
-  test('only exact month files older than 13 months are expired', () => {
-    const names = ['2026-10.jsonl', '2025-10.jsonl', '2025-09.jsonl', '2024-01.jsonl', '2024-01.jsonl.bak', '../2024-01.jsonl', 'notes.txt', '2024-13.jsonl']
-    expect(expiredFiles(names, NOW)).toEqual(['2025-09.jsonl', '2024-01.jsonl'])
+  test('the directory is held to its cap by dropping the oldest files, never this process\'s own', () => {
+    const files = [{ name: '2026-08-aaaaaaaa-0.jsonl', size: 60 }, { name: '2026-09-bbbbbbbb-0.jsonl', size: 60 }, { name: '2026-10-cccccccc-0.jsonl', size: 60 }, { name: 'stray.txt', size: 9999 }]
+    expect(shedFiles(files, 100, new Set())).toEqual(['2026-08-aaaaaaaa-0.jsonl', '2026-09-bbbbbbbb-0.jsonl'])
+    expect(shedFiles(files, 100, new Set(['2026-08-aaaaaaaa-0.jsonl']))).toEqual(['2026-09-bbbbbbbb-0.jsonl', '2026-10-cccccccc-0.jsonl'])
+    expect(shedFiles(files, 10_000, new Set())).toEqual([])
+  })
+  test('the caps are within what the host reads and stores', () => {
+    expect(SEGMENT_CAP_BYTES).toBeLessThan(4 * 1024 * 1024)
+    expect(TOTAL_CAP_BYTES).toBeLessThanOrEqual(4 * 1024 * 1024)
   })
 })
 
@@ -126,9 +128,8 @@ describe('statistics', () => {
     expect(s.tasks).toEqual({ completed: 3, withOpus: 1, withoutOpus: 2 })
     expect(statsText(s)).toContain('without 2/3 (67%)')
   })
-  test('a trimmed month is reported as incomplete coverage', () => {
-    const s = aggregate([cleanEvent({ v: 1, t: NOW - 1, k: 'trim', n: 12 })!, req(NOW - 1, 'HAIKU')], 0, NOW, all)
-    expect(statsText(s)).toContain('12 older events dropped')
+  test('coverage is stated: records past the bounds are gone and a long window may be incomplete', () => {
+    expect(statsText(aggregate([req(NOW - 1, 'HAIKU')], 0, NOW, all))).toContain('may be incomplete')
   })
   test('latency is from measured values only', () => {
     expect(latencyOf([])).toEqual({ n: 0, medianMs: null, p90Ms: null })
@@ -144,8 +145,9 @@ describe('statistics', () => {
 describe('through the host', () => {
   const FILE = '/home/tester/.local/state/cobalt-cockpit/telemetry/'
   const files = (w: ReturnType<typeof world>) => Object.entries(w.files).filter(([p]) => p.startsWith(FILE))
+  const lines = (w: ReturnType<typeof world>) => files(w).flatMap(([, text]) => text.split('\n').filter(Boolean))
 
-  test('a finished task is recorded without its prompt, the files are restricted, and stats reads it back', async ($, on) => {
+  test('a finished task is recorded without its prompt, the files are restricted and read back, and stats reads it', async ($, on) => {
     resetStore()
     const w = world(on)
     await start($)
@@ -154,17 +156,76 @@ describe('through the host', () => {
     const written = files(w)
     expect(written).toHaveLength(1)
     const [path, text] = written[0]!
-    expect(path).toMatch(/\/\d{4}-\d{2}\.jsonl$/)
+    expect(path).toMatch(/\/\d{4}-\d{2}-[0-9a-f]{8}-0\.jsonl$/)
     expect(text).not.toMatch(/api03|SECRET|login|\/home\/|fix the/)
     expect(text).toContain('"k":"route"')
     expect(w.telemetryRuns).toContainEqual(['mkdir', '-p', '-m', '700', '/home/tester/.local/state/cobalt-cockpit/telemetry'])
     expect(w.telemetryRuns).toContainEqual(['chmod', '600', path])
+    // the modes are read back, not assumed
+    expect(w.telemetryRuns).toContainEqual(['stat', '-c', '%a', path])
     const out = String((await command($, 'stats 30d')).text)
     expect(out).toContain('COBALT STATS / 30d')
     expect(out).toContain('ROUTING DECISIONS')
-    expect(out).toContain('files restricted to you')
+    expect(out).toContain('read back as 0700 directory, 0600 files')
     expect(JSON.parse(String((await command($, 'stats all --json')).text)).schema).toBe(1)
     expect(String((await command($, 'stats all --csv')).text)).toStartWith('section,metric')
+  })
+  for (const modes of ['denied', 'wide'] as const) {
+    test(`permissions the host ${modes === 'denied' ? 'refuses' : 'does not honour'} are reported as unconfirmed, and nothing else is tried`, async ($, on) => {
+      resetStore()
+      const w = world(on, { telemetryModes: modes }); await start($)
+      await prompt($, 'x')
+      const out = String((await command($, 'stats all')).text)
+      expect(out).toContain('permissions could NOT be confirmed')
+      expect(out).not.toContain('read back as')
+      // the record is still kept; the refused call is not retried by another route
+      expect(files(w)).toHaveLength(1)
+      expect(w.runs.some(r => ['mkdir', 'chmod', 'stat', 'sh', 'bash', 'python3', 'install'].includes(r[0] ?? ''))).toBe(false)
+    })
+  }
+  test('a burst of events all lands, each line whole', async ($, on) => {
+    resetStore()
+    const w = world(on); await start($)
+    await Promise.all(Array.from({ length: 40 }, (_, i) => prompt($, `burst ${i}`)))
+    const all = lines(w)
+    expect(all.length).toBeGreaterThanOrEqual(40)
+    expect(all.every(l => JSON.parse(l).k === 'route')).toBe(true)
+  })
+  test('a full segment is sealed: it stays within its cap and is never written again', async ($, on) => {
+    resetStore()
+    const w = world(on, { env: { COBALT_TELEMETRY_SEGMENT_BYTES: '700' } }); await start($)
+    for (let i = 0; i < 24; i++) await prompt($, `n ${i}`)
+    const names = Object.keys(w.files).filter(p => p.startsWith(FILE)).sort()
+    expect(names.length).toBeGreaterThanOrEqual(2)
+    for (const n of names) expect(w.files[n]!.length).toBeLessThanOrEqual(700)
+    const sealed = w.files[names[0]!]
+    for (let i = 0; i < 10; i++) await prompt($, `more ${i}`)
+    expect(w.files[names[0]!]).toBe(sealed)
+    expect(names.map(n => n.slice(-8))).toContain('-0.jsonl')
+    expect(parseLines(names.map(n => w.files[n]).join('')).corrupt).toBe(0)
+  })
+  test('a write that fails is counted, never raised, and the session carries on', async ($, on) => {
+    resetStore()
+    const w = world(on); await start($)
+    w.failWrites = true
+    await prompt($, 'x'); await planAndComplete($, 2)
+    expect(files(w)).toHaveLength(0)
+    const out = String((await command($, 'stats all')).text)
+    expect(out).toContain('could not be written')
+  })
+  test('two processes write two files and neither reads or rewrites the other\'s', async ($, on) => {
+    resetStore()
+    const w = world(on); await start($)
+    const other = `${FILE}2026-10-0badc0de-3.jsonl`
+    const theirs = `${encode(req(1, 'OPUS'))}\n`
+    w.files[other] = theirs
+    await prompt($, 'x')
+    expect(w.files[other]).toBe(theirs)
+    expect(files(w).length).toBe(2)
+    // both are counted by one reader
+    const stats = JSON.parse(String((await command($, 'stats all --json')).text))
+    expect(stats.requests.byTier.OPUS).toBe(1)
+    expect(stats.events).toBeGreaterThan(1)
   })
   test('bad arguments are refused with usage and read nothing', async ($, on) => {
     resetStore(); world(on); await start($)
@@ -173,7 +234,7 @@ describe('through the host', () => {
   test('with no data the command says so; with a corrupt file it still answers', async ($, on) => {
     resetStore(); const w = world(on); await start($)
     expect(String((await command($, 'stats all')).text)).toContain('No telemetry recorded yet')
-    w.files[`${FILE}2026-10.jsonl`] = '{broken\n\u0000\nnull\n'
+    w.files[`${FILE}2026-10-0badc0de-0.jsonl`] = '{broken\n\u0000\nnull\n'
     const out = String((await command($, 'stats all')).text)
     expect(out).toContain('No telemetry recorded yet')
     expect(out).toContain('3 unreadable lines skipped')

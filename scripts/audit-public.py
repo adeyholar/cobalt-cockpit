@@ -35,6 +35,8 @@ for p in sorted(root.rglob('*')):
  count+=1; total+=p.stat().st_size
  if p.stat().st_size>5*1024*1024: findings.append(f'{rel}: exceeds file limit')
  if p.name in ('AGENTS.md','CLAUDE.md','.DS_Store','Thumbs.db'): findings.append(f'{rel}: excluded release file')
+ # Cockpit never decides the owner's prompt-cache TTL: no agent file may carry one.
+ if rel.parts[:1]==('agents',) and re.search(r'cacheTtl', p.read_text('utf8','ignore'), re.I): findings.append(f'{rel}: sets a cacheTtl (the owner chooses the cache policy)')
  data=p.read_bytes()
  try: text=data.decode('utf8')
  except UnicodeDecodeError:

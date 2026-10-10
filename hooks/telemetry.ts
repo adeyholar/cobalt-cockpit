@@ -17,16 +17,28 @@
 // end. Tokens are summed only over requests whose host report carried both
 // figures; nothing is estimated from text, and no dollar figure is ever made.
 //
-// The host gives a plugin `$.fs.write` (whole file) and no append, so a write
-// reads the month's file, adds one line and writes it back. That is serialised
-// in this process, capped per month (MONTH_CAP_BYTES, oldest lines dropped with
-// a `trim` marker so the loss is visible) and kept for KEEP_MONTHS months.
+// Storage, as the runtime really allows it: a hooks module has no Node and no
+// `require`; `$.fs` writes a whole file (no append, no file mode, no rename)
+// and `$.store` is one shared JSON file of 4 MiB for everything the plugin
+// keeps. So nothing here is a true append, and nothing is called one. Each
+// process owns its own segment files (month, a random id, a number) and is the
+// only writer of them, which is what makes several Claude sessions safe
+// without a lock: no file is ever written by two processes. A segment is
+// rewritten whole by its owner until it holds SEGMENT_CAP bytes, then it is
+// sealed and never touched again and the next one starts. A torn write can
+// therefore damage at most one segment, and the reader skips damaged lines.
+// Directory and file modes are requested with mkdir -m 700 / chmod 600 and then
+// read back with stat; they are reported as verified only when the read-back
+// says so. The whole directory is bounded by TOTAL_CAP and KEEP_MONTHS.
 
 export const SCHEMA = 1
-export const MONTH_CAP_BYTES = 512 * 1024
+export const SEGMENT_CAP_BYTES = 64 * 1024
+export const TOTAL_CAP_BYTES = 4 * 1024 * 1024
 export const KEEP_MONTHS = 13
 export const DAY_MS = 86_400_000
 
+/** The prompt-cache TTL the session was configured to ask of subagents: an intent, not an observed effect. */
+export type CachePolicy = '5m' | '1h' | 'auto'
 export type Tier = 'HAIKU' | 'SONNET' | 'OPUS' | 'OTHER'
 export const TIERS: readonly Tier[] = ['HAIKU', 'SONNET', 'OPUS', 'OTHER']
 export type Ground = 'architecture' | 'security' | 'repeated-failure' | 'asked' | 'release'
@@ -37,13 +49,12 @@ const OUTCOMES = ['accepted', 'rejected', 'fallback', 'none'] as const
 const CONSULT_EVENTS = ['refused', 'admitted', 'returned', 'verified'] as const
 
 export type TEvent =
-  | { v: 1; t: number; k: 'req'; tier: Tier; sub: boolean; inTok?: number; outTok?: number }
+  | { v: 1; t: number; k: 'req'; tier: Tier; sub: boolean; inTok?: number; outTok?: number; cr?: number; cw?: number; w5?: number; w1?: number; pol?: CachePolicy }
   | { v: 1; t: number; k: 'agent'; tier: Tier; role: string; ok: boolean | null; ms: number | null }
   | { v: 1; t: number; k: 'route'; mode: typeof MODES[number]; path: 'off' | 'rules' | 'router'; provider: string | null; calls: number; answered: number; outcome: typeof OUTCOMES[number]; ms: number | null }
   | { v: 1; t: number; k: 'nwho'; op: 'decision' | 'prune'; tier: string; ms: number | null }
   | { v: 1; t: number; k: 'consult'; ground: Ground; ev: typeof CONSULT_EVENTS[number]; mandatory?: boolean; state?: 'pass' | 'fail'; rel?: 'go' | 'no-go'; ms?: number }
   | { v: 1; t: number; k: 'task'; opus: boolean }
-  | { v: 1; t: number; k: 'trim'; n: number }
 
 const isNum = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 1e15
 const word = (x: unknown): string | null => (typeof x === 'string' && /^[a-z0-9][a-z0-9._-]{0,39}$/i.test(x) ? x.toLowerCase() : null)
@@ -76,7 +87,11 @@ export const cleanEvent = (raw: unknown): TEvent | null => {
       // tokens count only when the host reported both figures
       const both = isNum(r['inTok']) && isNum(r['outTok'])
 
-      return { ...base, k: 'req', tier, sub: r['sub'], ...(both ? { inTok: Math.round(r['inTok'] as number), outTok: Math.round(r['outTok'] as number) } : {}) }
+      const cache = isNum(r['cr']) && isNum(r['cw'])
+      const split = cache && isNum(r['w5']) && isNum(r['w1'])
+      const pol = oneOf(r['pol'], ['5m', '1h', 'auto'] as const)
+
+      return { ...base, k: 'req', tier, sub: r['sub'], ...(both ? { inTok: Math.round(r['inTok'] as number), outTok: Math.round(r['outTok'] as number) } : {}), ...(cache ? { cr: Math.round(r['cr'] as number), cw: Math.round(r['cw'] as number) } : {}), ...(split ? { w5: Math.round(r['w5'] as number), w1: Math.round(r['w1'] as number) } : {}), ...(pol === null ? {} : { pol }) }
     }
     case 'agent': {
       const tier = oneOf(r['tier'], TIERS)
@@ -112,8 +127,6 @@ export const cleanEvent = (raw: unknown): TEvent | null => {
     }
     case 'task':
       return typeof r['opus'] === 'boolean' ? { ...base, k: 'task', opus: r['opus'] } : null
-    case 'trim':
-      return isNum(r['n']) ? { ...base, k: 'trim', n: Math.round(r['n'] as number) } : null
     default:
       return null
   }
@@ -137,30 +150,29 @@ export const parseLines = (text: string): { events: TEvent[]; corrupt: number } 
   return { events, corrupt }
 }
 
-/** Adds one line to a month's text and keeps it within `cap` bytes by dropping the oldest lines, leaving one visible `trim` marker with the running count. */
-export const appendBounded = (text: string, e: TEvent, at: number, cap = MONTH_CAP_BYTES): string => {
-  const lines = [...text.split('\n').filter(l => l !== ''), encode(e)]
-  const size = (ls: readonly string[]) => ls.reduce((n, l) => n + l.length + 1, 0)
-  if (size(lines) <= cap) return `${lines.join('\n')}\n`
-  // the newest line always stays; trim to three quarters so a write does not trim every time
-  let dropped = 0
-  while (lines.length > 1 && size(lines) > cap * 0.75) { const gone = lines.shift()!; const m = cleanEvent(safe(gone)); dropped += m?.k === 'trim' ? m.n : 1 }
-  const kept: string[] = []
-  for (const l of lines) { const m = cleanEvent(safe(l)); if (m?.k === 'trim') dropped += m.n; else kept.push(l) }
-
-  return `${[encode({ v: 1, t: Math.round(at), k: 'trim', n: dropped }), ...kept].join('\n')}\n`
-}
-const safe = (line: string): unknown => { try { return JSON.parse(line) } catch { return null } }
-
 export const monthKey = (at: number): string => new Date(at).toISOString().slice(0, 7)
-export const monthFile = (key: string): string => `${key}.jsonl`
-export const isMonthFile = (name: string): boolean => /^\d{4}-(0[1-9]|1[0-2])\.jsonl$/.test(name)
-/** Month files older than the retention window, by name. */
+/** A segment's file name: month, the writing process's random id, and the segment's number. */
+export const segmentName = (month: string, sid: string, n: number): string => `${month}-${sid}-${n}.jsonl`
+/** Only these names are ever read, listed for deletion or deleted; `YYYY-MM.jsonl` is the single-file form of an earlier build. */
+export const isTelemetryFile = (name: string): boolean => /^\d{4}-(0[1-9]|1[0-2])(-[0-9a-f]{8}-\d{1,5})?\.jsonl$/.test(name)
+export const monthOfFile = (name: string): string => name.slice(0, 7)
+/** Files older than the retention window, by name. */
 export const expiredFiles = (names: readonly string[], now: number): string[] => {
   const d = new Date(now)
   const cutoff = d.getUTCFullYear() * 12 + d.getUTCMonth() - (KEEP_MONTHS - 1)
 
-  return names.filter(n => isMonthFile(n) && Number(n.slice(0, 4)) * 12 + Number(n.slice(5, 7)) - 1 < cutoff)
+  return names.filter(n => isTelemetryFile(n) && Number(n.slice(0, 4)) * 12 + Number(n.slice(5, 7)) - 1 < cutoff)
+}
+/** The oldest files to delete so the directory fits `cap`; a file in `keep` (this process's own) is never chosen. */
+export const shedFiles = (files: readonly { name: string; size: number }[], cap: number, keep: ReadonlySet<string>): string[] => {
+  let total = files.filter(f => isTelemetryFile(f.name)).reduce((n, f) => n + f.size, 0)
+  const out: string[] = []
+  for (const f of [...files].filter(f => isTelemetryFile(f.name) && !keep.has(f.name)).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (total <= cap) break
+    out.push(f.name); total -= f.size
+  }
+
+  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -175,9 +187,9 @@ export type Stats = {
   until: number
   events: number
   corruptLines: number
-  trimmedEvents: number
   firstEvent: number | null
   requests: { total: number; main: number; subagent: number; byTier: Record<Tier, number>; tokens: { reported: number; unreported: number; input: number; output: number }; cost: 'UNKNOWN' }
+  cache: { subagentRequests: number; byPolicy: Record<string, { requests: number; reported: number; read: number; written: number; split: number; written5m: number; written1h: number }> }
   agents: { total: number; byTier: Record<Tier, { count: number; succeeded: number; failed: number; unknownStatus: number; latency: Latency }> }
   routing: { total: number; byMode: Record<string, number>; byPath: Record<string, number>; byProvider: Record<string, number>; byOutcome: Record<string, number>; latency: Latency }
   nobodywho: { total: number; byOp: Record<string, number>; byTier: Record<string, number>; latency: Latency }
@@ -200,9 +212,10 @@ export const parseWindow = (word: string): { label: string; days: number | null 
 
 export const aggregate = (events: readonly TEvent[], corruptLines: number, now: number, win: { label: string; days: number | null }): Stats => {
   const since = win.days === null ? null : now - win.days * DAY_MS
-  const inside = events.filter(e => e.k !== 'trim' && (since === null || e.t >= since) && e.t <= now + DAY_MS)
+  const inside = events.filter(e => (since === null || e.t >= since) && e.t <= now + DAY_MS)
   const zero = (): Record<Tier, number> => ({ HAIKU: 0, SONNET: 0, OPUS: 0, OTHER: 0 })
   const requests = { total: 0, main: 0, subagent: 0, byTier: zero(), tokens: { reported: 0, unreported: 0, input: 0, output: 0 }, cost: 'UNKNOWN' as const }
+  const cache: Stats['cache'] = { subagentRequests: 0, byPolicy: {} }
   const agentLat: Record<Tier, number[]> = { HAIKU: [], SONNET: [], OPUS: [], OTHER: [] }
   const agents: Stats['agents'] = { total: 0, byTier: Object.fromEntries(TIERS.map(t => [t, { count: 0, succeeded: 0, failed: 0, unknownStatus: 0, latency: blank() }])) as Stats['agents']['byTier'] }
   const routing: Stats['routing'] = { total: 0, byMode: {}, byPath: {}, byProvider: {}, byOutcome: {}, latency: blank() }
@@ -216,6 +229,13 @@ export const aggregate = (events: readonly TEvent[], corruptLines: number, now: 
     if (e.k === 'req') {
       requests.total++; requests.byTier[e.tier]++
       if (e.sub) requests.subagent++; else requests.main++
+      if (e.sub) {
+        cache.subagentRequests++
+        const c = cache.byPolicy[e.pol ?? 'unknown'] ??= { requests: 0, reported: 0, read: 0, written: 0, split: 0, written5m: 0, written1h: 0 }
+        c.requests++
+        if (e.cr !== undefined && e.cw !== undefined) { c.reported++; c.read += e.cr; c.written += e.cw }
+        if (e.w5 !== undefined && e.w1 !== undefined) { c.split++; c.written5m += e.w5; c.written1h += e.w1 }
+      }
       if (e.inTok !== undefined && e.outTok !== undefined) { requests.tokens.reported++; requests.tokens.input += e.inTok; requests.tokens.output += e.outTok } else requests.tokens.unreported++
     } else if (e.k === 'agent') {
       agents.total++
@@ -248,12 +268,11 @@ export const aggregate = (events: readonly TEvent[], corruptLines: number, now: 
     g.latency = latencyOf(consultLat[ground] ?? [])
     consultations.attempts += g.refused + g.admitted; consultations.admitted += g.admitted; consultations.returned += g.returned
   }
-  const trimmed = events.filter((e): e is Extract<TEvent, { k: 'trim' }> => e.k === 'trim' && (since === null || e.t >= since)).reduce((n, e) => n + e.n, 0)
 
   return {
-    schema: 1, window: win.label, since, until: now, events: inside.length, corruptLines, trimmedEvents: trimmed,
+    schema: 1, window: win.label, since, until: now, events: inside.length, corruptLines,
     firstEvent: events.length === 0 ? null : Math.min(...events.map(e => e.t)),
-    requests, agents, routing, nobodywho: nwho, consultations, tasks,
+    requests, cache, agents, routing, nobodywho: nwho, consultations, tasks,
   }
 }
 
@@ -277,7 +296,7 @@ export const statsText = (s: Stats): string => {
 
     return out.join('\n')
   }
-  out.push(`${s.events} events in the window · recording began ${s.firstEvent === null ? 'UNKNOWN' : day(s.firstEvent)} · ${s.corruptLines} unreadable line${s.corruptLines === 1 ? '' : 's'} skipped${s.trimmedEvents > 0 ? ` · ${s.trimmedEvents} older events dropped by the size bound (incomplete coverage)` : ''}`)
+  out.push(`${s.events} events in the window · recording began ${s.firstEvent === null ? 'UNKNOWN' : day(s.firstEvent)} · ${s.corruptLines} unreadable line${s.corruptLines === 1 ? '' : 's'} skipped · older records past the retention or size bound are gone, so a long window may be incomplete`)
   const r = s.requests
   out.push('', `MODEL REQUESTS / observed by the host's request hook · ${r.total} total (${r.main} main loop, ${r.subagent} subagent)`)
   if (r.total === 0) out.push('  none observed')
@@ -289,6 +308,12 @@ export const statsText = (s: Stats): string => {
     const a = s.agents.byTier[t]
     if (a.count > 0) out.push(`  ${t.padEnd(6)} ${a.count} (${pct(a.count, s.agents.total)} of subagents) · ok ${a.succeeded} · failed ${a.failed} · status unknown ${a.unknownStatus} · ${lat(a.latency)}`)
   }
+  out.push('', `PROMPT CACHE / subagent requests only; the policy is what the session was configured to ask, not proof of what the host did · ${s.cache.subagentRequests} requests`)
+  if (s.cache.subagentRequests === 0) out.push('  none observed')
+  for (const [policy, c] of Object.entries(s.cache.byPolicy)) {
+    out.push(`  policy ${policy.padEnd(7)} ${c.requests} requests · cache read/write reported for ${pct(c.reported, c.requests)} · read ${c.reported === 0 ? 'UNKNOWN' : c.read} · written ${c.reported === 0 ? 'UNKNOWN' : c.written} · 5m/1h write split ${c.split === 0 ? 'UNKNOWN (the host does not report it)' : `5m ${c.written5m} · 1h ${c.written1h} (${pct(c.split, c.requests)} of requests)`}`)
+  }
+  if (Object.keys(s.cache.byPolicy).length > 1) out.push('  Different policies cover different sessions and workloads: compare them as an observation, not as a measured saving.')
   const g = s.routing
   out.push('', `ROUTING DECISIONS / which router was asked at the start of a task, not which model did the work · ${g.total} total`)
   if (g.total === 0) out.push('  none observed')
@@ -317,11 +342,12 @@ const csvCell = (v: string | number | null): string => { const t = v === null ? 
 export const statsCsv = (s: Stats): string => {
   const rows: (string | number | null)[][] = [['section', 'metric', 'key', 'value', 'denominator']]
   const add = (section: string, metric: string, key: string, value: number | null, denominator: number | null = null) => rows.push([section, metric, key, value, denominator])
-  add('window', 'events', s.window, s.events); add('window', 'corrupt_lines', s.window, s.corruptLines); add('window', 'trimmed_events', s.window, s.trimmedEvents)
+  add('window', 'events', s.window, s.events); add('window', 'corrupt_lines', s.window, s.corruptLines)
   for (const t of TIERS) add('requests', 'count', t, s.requests.byTier[t], s.requests.total)
   add('requests', 'tokens_reported_requests', 'all', s.requests.tokens.reported, s.requests.total)
   add('requests', 'input_tokens', 'reported_only', s.requests.tokens.reported === 0 ? null : s.requests.tokens.input)
   add('requests', 'output_tokens', 'reported_only', s.requests.tokens.reported === 0 ? null : s.requests.tokens.output)
+  for (const [k, c] of Object.entries(s.cache.byPolicy)) { add('cache', 'subagent_requests', k, c.requests); add('cache', 'read_tokens', k, c.reported === 0 ? null : c.read, c.reported); add('cache', 'written_tokens', k, c.reported === 0 ? null : c.written, c.reported) }
   for (const t of TIERS) { const a = s.agents.byTier[t]; add('agents', 'count', t, a.count, s.agents.total); add('agents', 'median_ms', t, a.latency.medianMs, a.latency.n); add('agents', 'p90_ms', t, a.latency.p90Ms, a.latency.n) }
   for (const [k, v] of Object.entries(s.routing.byMode)) add('routing', 'mode', k, v, s.routing.total)
   for (const [k, v] of Object.entries(s.routing.byPath)) add('routing', 'path', k, v, s.routing.total)

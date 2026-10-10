@@ -18,6 +18,10 @@ export type World = {
   runs: string[][]
   /** The mkdir, chmod and rm the plugin ran on its own telemetry directory; kept apart so `runs` stays the commands a test is about. */
   telemetryRuns: string[][]
+  /** What the plugin's telemetry mkdir, chmod and stat get back: they work, are refused, or read back a wider mode than asked. */
+  telemetryModes: 'ok' | 'denied' | 'wide'
+  /** Every $.fs.write fails, as a full disk would. */
+  failWrites: boolean
   /** The environment each process was started with over the host's own, in the order of `runs`; undefined when none was given. */
   runEnvs: (Readonly<Record<string, string>> | undefined)[]
   /** The tool calls that reached the engine, in order: what actually ran. */
@@ -107,6 +111,8 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     clock: mock.clock(on, { now: 1_000_000 }),
     runs: [],
     telemetryRuns: [],
+    telemetryModes: 'ok',
+    failWrites: false,
     runEnvs: [],
     ran: [],
     asked: [],
@@ -260,7 +266,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   })
 
   // writes land in the same map the reads come from, so a test reads back what the plugin kept
-  on('fs.write', ($, e) => { w.files[e.path] = e.text; return { value: undefined } })
+  on('fs.write', ($, e) => { if (w.failWrites) throw new Error('ENOSPC: no space left on device'); w.files[e.path] = e.text; return { value: undefined } })
   on('fs.list', ($, e) => {
     const dir = `${e.path ?? ''}/`
     const names = Object.keys(w.files).filter(f => f.startsWith(dir) && !f.slice(dir.length).includes('/')).map(f => f.slice(dir.length))
@@ -269,7 +275,13 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   })
 
   on('process.run', async ($, e) => {
-    if (['mkdir', 'chmod', 'rm'].includes(e.argv[0] ?? '') && e.argv.some(a => a.includes('/cobalt-cockpit/telemetry') || a.endsWith('/.local/state/cobalt-cockpit'))) { w.telemetryRuns.push([...e.argv]); return ran(0) }
+    if (['mkdir', 'chmod', 'rm', 'stat'].includes(e.argv[0] ?? '') && e.argv.some(a => a.includes('/cobalt-cockpit/telemetry') || a.endsWith('/.local/state/cobalt-cockpit'))) {
+      w.telemetryRuns.push([...e.argv])
+      if (w.telemetryModes === 'denied') throw new Error('refused by the host')
+      if (e.argv[0] === 'stat') return ran(0, `${w.telemetryModes === 'wide' ? '755' : String(e.argv.at(-1)).endsWith('.jsonl') ? '600' : '700'}\n`)
+
+      return ran(0)
+    }
     w.runs.push([...e.argv])
     w.runEnvs.push(e.init?.env)
     if (w.duringRun !== null) await w.duringRun(e.argv)
