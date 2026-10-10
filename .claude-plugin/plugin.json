@@ -90,6 +90,24 @@
       "description": "How many refused stops one task may take before it is marked BLOCKED and the stop is allowed. Default 3, maximum 10.",
       "default": 3
     },
+    "guardAlerts": {
+      "type": "boolean",
+      "title": "Cobalt Guard owner alerts",
+      "description": "Off by default. When on, a terminal notification (through Claude Code's own notification channel) tells you when a run needs a person: verification retries exhausted, a security check failed, a release NO-GO, an open mandatory review, or a blocked run. It never approves, releases or clears anything, and it cannot confirm that you saw it. No webhook, email or push.",
+      "default": false
+    },
+    "guardCooldownSec": {
+      "type": "number",
+      "title": "Guard cooldown (seconds)",
+      "description": "Minimum time between alerts. Default 300, minimum 30.",
+      "default": 300
+    },
+    "guardMaxAlerts": {
+      "type": "number",
+      "title": "Guard alerts per session",
+      "description": "Most alerts one session may raise. Default 5, maximum 20.",
+      "default": 5
+    },
     "telemetry": {
       "type": "boolean",
       "title": "Local model telemetry",

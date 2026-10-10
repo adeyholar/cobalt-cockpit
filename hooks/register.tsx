@@ -57,6 +57,8 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
+import { EMPTY_GUARD, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
+import type { GuardConfig } from './alerts'
 import { attemptsOf, boundedChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, verdictOf, BLOCKER_PREFIX, type CheckRecord, type StopConfig } from './stopguard'
 import { applyAction, blockMilestone, unblock, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
@@ -691,6 +693,7 @@ const HELP =
   '/cockpit router     show this session\'s router, or switch it: off, nobodywho, jev (this session only)\n' +
   '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
   '/cockpit flow      the Neural Flow in words: which of input, discovery, routing, workers, verify and done are verified\n' +
+  '/cockpit guard     Cobalt Guard owner alerts: status; ack or silence (an alert never changes a verdict)\n' +
   '/cockpit doctor    read-only checks: installs, profile, telemetry storage, host and prompt-cache policy\n' +
   '/cockpit sound      play both cues'
 
@@ -1054,6 +1057,7 @@ const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
     cache: await cacheFacts($),
     agents: agentsOf(ledger.agents.map(a => (typeof a.start === 'number' && typeof a.end === 'number' ? a.end - a.start : null))),
     stop: await stopFacts($),
+    guard: await (async () => { const v = await guardView($); return { enabled: guardCfg.enabled, label: guardLabel(guardCfg, v.state, v.kept), used: v.state.count, max: guardCfg.maxPerSession, cooldownSec: Math.round(guardCfg.cooldownMs / 1000) } })(),
   }
 }
 
@@ -2261,6 +2265,8 @@ export const registerLedger = (on: On): void => {
   }).catch(($, e, next) => next(e))
   on('classic.Stop', async ($, e, next) => {
     const reason = await stopGuard($, e).catch(() => null)
+    // a stop that is about to be allowed is when an unfinished run needs a person
+    if (reason === null) await raiseAlerts($, true)
     if (reason !== null) return { block: reason }
 
     return next(e)
@@ -2308,6 +2314,55 @@ export const resumeLine = async ($: EngineInterface): Promise<string | null> => 
   const c = (await read($, ledgerAtom)).checkpoint
   return c ? `COBALT / RESUME · ${c.phase} · ${c.completed.length} complete · ${c.remaining.length} remaining · /ledger` : null
 }
+
+
+// --- Cobalt Guard: opt-in owner alerts (policy and wording: guard.ts). Reads verification state; changes none of it. ---
+const guardAtom = atom({ plugin: 'cobalt-cockpit', key: 'guard-state' } as const, EMPTY_GUARD)
+let guardCfg: GuardConfig = guardConfigOf({})
+let guarding = false
+
+/** Raises whatever alert is due. Never throws, never loops, and never touches a gate, a review or an approval. */
+const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> => {
+  if (!guardCfg.enabled || guarding) return
+  guarding = true
+  try {
+    const task = await read($, taskAtom)
+    if (task === null) return
+    const history = await releaseHistorySoft($)
+    const latest = [...history].sort((a, b) => b.at - a.at)[0]
+    const review = task.review
+    const due = dueOf({
+      taskId: task.id,
+      securityFailed: task.gates.SECURITY.state === 'fail',
+      stopBlocker: task.blocker !== null && task.blocker.startsWith(BLOCKER_PREFIX) ? task.blocker : null,
+      blocker: task.blocker,
+      releaseNoGo: review !== undefined && review.grounds.includes('release') && !(review.cleared ?? []).some(c => c.ground === 'release') && latest?.outcome === 'no-go',
+      reviewOpen: review !== undefined && review.state !== 'adjudicated',
+      atStop,
+    })
+    for (const one of due) {
+      const now = await $.clock.now()
+      const state = await read($, guardAtom)
+      const kept = (await read($, ledgerAtom)).alerts ?? []
+      const decision = decideAlert(guardCfg, state, kept, one.key, now)
+      if (!decision.send) continue
+      await update($, guardAtom, old => ({ ...old, pending: true }))
+      let outcome: 'sent' | 'failed' | 'refused' = 'failed'
+      let channel: string | null = null
+      try {
+        const r = await $.ui.notify(alertMessage(one.kind, task.id), { title: 'Cobalt Guard' })
+        if (r.isSent) { outcome = 'sent'; channel = r.channel } else outcome = r.reason === 'refused' ? 'refused' : 'failed'
+      } catch { outcome = 'failed' }
+      await update($, guardAtom, old => ({ ...old, pending: false, sentAt: now, count: old.count + 1 }))
+      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome, attempts: 1, channel }) }))
+    }
+  } catch { /* an alert that cannot be raised never fails the work */ } finally {
+    guarding = false
+    await update($, guardAtom, old => (old.pending ? { ...old, pending: false } : old)).catch(() => undefined)
+  }
+}
+
+const guardView = async ($: EngineInterface) => ({ state: await read($, guardAtom), kept: (await read($, ledgerAtom)).alerts ?? [] })
 
 
 // --- Optional Stop-hook verification guard (policy and wording: stopguard.ts). ---
@@ -2431,6 +2486,7 @@ export const register: Register = (on, options) => {
 
   setTelemetry(options['telemetry'] !== false)
   stopOptions = options
+  guardCfg = guardConfigOf(options)
   stopCfg = stopConfigOf(options, null)
   stopTrust = { sha: null, seen: false }
   registerLedger(on)
@@ -2464,7 +2520,7 @@ export const register: Register = (on, options) => {
       $.command.register({
         name: 'cockpit',
         description: 'Mission Control: task progress, milestones, verification gates, git and context',
-        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|flow|doctor|sound]',
+        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|flow|guard|doctor|sound]',
         immediate: true,
       }),
     )
@@ -2705,10 +2761,10 @@ export const register: Register = (on, options) => {
     if (effect) commanderEffects.add(effectToken)
     try {
     await ledgerToolStart($, call)
-    if (String(e.tool) === SWARM_TOOL_NAME) { const r = await serveSwarm($, call); await ledgerToolEnd($, call, r); return r }
+    if (String(e.tool) === SWARM_TOOL_NAME) { const r = await serveSwarm($, call); await ledgerToolEnd($, call, r); await raiseAlerts($, false); return r }
     const swarmRefusal = await guardSwarm($, call)
     if (swarmRefusal) { await ledgerToolEnd($, call, { deny: swarmRefusal }); return { deny: swarmRefusal } }
-    if (e.tool === TOOL) { const r = await serveProgress($, call as ProgressInput & { agentId?: string }); await ledgerToolEnd($, call, r); return r }
+    if (e.tool === TOOL) { const r = await serveProgress($, call as ProgressInput & { agentId?: string }); await ledgerToolEnd($, call, r); await raiseAlerts($, false); return r }
 
     // a guard that fails must not take every tool call down with it
     const refusal = await guard($, call).catch(() => null)
@@ -3280,6 +3336,17 @@ export const register: Register = (on, options) => {
 
         return { text: flowText(flowOf(flowInputOf({ ...input, task }, session.agents, input.isWorking))) }
       }
+      case 'guard': {
+        const arg = value
+        if ((arg === 'ack' || arg === 'silence') && !isPersonOrigin(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
+        if (arg === 'ack' || arg === 'silence') {
+          await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
+          if (arg === 'silence') await update($, guardAtom, old => ({ ...old, all: true }))
+        } else if (arg !== '') return { text: 'Usage: /cockpit guard | /cockpit guard ack | /cockpit guard silence' }
+        const view = await guardView($)
+
+        return { text: guardText(guardCfg, view.state, view.kept) + (arg === 'ack' || arg === 'silence' ? '\nThe verification verdict was not changed.' : '') }
+      }
       case 'doctor':
         return { text: doctorText(await doctorFacts($)) }
       case 'version':
@@ -3462,6 +3529,8 @@ export const register: Register = (on, options) => {
     const startup = startupOf(await read($, startupAtom), false)
     const resumed = await resumeLine($)
     const modelWarning = runLedger.warnings.at(-1) ?? null
+    const guardNow = await guardView($)
+    const guardLine = guardCfg.enabled ? `GUARD: ${guardLabel(guardCfg, guardNow.state, guardNow.kept)}` : null
     const startupRows: Row[] = startup.active && layout.columns >= 44 ? [[{ text: startup.line, color: COLORS.steel, isBold: true }]] : []
     let rail: RenderElement
     if (e.surface === 'terminal' && Raster) {
@@ -3519,6 +3588,7 @@ export const register: Register = (on, options) => {
             </Text>
           ))}
           {flowEl}
+          {guardLine ? <Text dimColor wrap="truncate-end">{guardLine}</Text> : null}
         </Box>
       )
     }
@@ -3541,6 +3611,7 @@ export const register: Register = (on, options) => {
         </Box>
         {secondary && e.props.maxRows > 1 ? <Text dimColor wrap="truncate-end">{secondary}</Text> : null}
         {flowEl}
+        {guardLine ? <Text dimColor wrap="truncate-end">{guardLine}</Text> : null}
         {startupRows.map((row, at) => (
           <Text key={`startup-${at}`} wrap="truncate-end">
             {row.map((segment, n) => (

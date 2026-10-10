@@ -96,6 +96,11 @@ export type Milestone = {
  */
 export type TaskStatus = 'idle' | 'active' | 'unverified' | 'blocked' | 'done'
 
+/** One owner alert as the Run Ledger keeps it: a closed vocabulary and numbers, never text from the task. */
+export type AlertRecord = { key: string; kind: 'verification-exhausted' | 'security-failure' | 'release-no-go' | 'review-hold' | 'run-blocked'; taskId: number; at: number; outcome: 'sent' | 'failed' | 'refused' | 'throttled' | 'silenced'; attempts: number; channel: string | null; acked?: true }
+/** Cobalt Guard's session state: when the last alert was attempted, how many, and what the owner silenced. */
+export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean }
+
 /** One run of the owner's verification script at Stop: identity, real exit code, outcome, fingerprint and a redacted tail. */
 export type StopCheck = {
   taskId: number
@@ -472,6 +477,7 @@ declare module 'claude-code' {
       'discovery-pin': DiscoveryLevel | null
       /** The Stop guard's bounded record of check runs; this session only. */
       'stop-checks': StopCheck[]
+      'guard-state': GuardState
     }
   }
 }
@@ -543,7 +549,7 @@ export type ToolEntry = { id: string; runId: Value<string>; turnId: Value<string
 export type Reading = { at: number; turnId: Value<string>; tokens: Value<number>; window: Value<number>; percent: Value<number> }
 export type Request = { id: string; runId: Value<string>; turnId: string; agentId: Value<string>; requestedModel: Value<string>; requestedEffort: Value<string>; model: Value<string>; effort: Value<string>; effectiveEffort: Value<string>; input: Value<number>; output: Value<number>; cacheRead: Value<number>; cacheWrite: Value<number> }
 export type Checkpoint = { at: number; goal: string; phase: string; completed: string[]; remaining: string[]; latest: string; gates: Record<string, string>; branch: string; startingSha: string; currentSha: string; repo: string; dirty: Value<number>; blockers: string[]; backgroundAgents: string[] }
-export type Ledger = { schema: 1 | 2; observedCompletions?: { agentId: string; reason: string; conclusion: string; at: number; decision?: ReleaseOutcome; /** Later turns of an architect that had already returned: separate information, never the approved answer. */ later?: { at: number; reason: string; conclusion: string; decision?: ReleaseOutcome }[] }[]; swarm?: Swarm; sessionId: string; currentRun: Value<string>; turns: Record<string, string>; runs: Run[]; agents: LedgerAgent[]; tools: ToolEntry[]; requests: Request[]; usage: Reading[]; receipts: NwhoEvent[]; warnings: string[]; replay: ReplayStep[]; checkpoint: Checkpoint | null; /** Opus consultations (SONNET_LED); absent in older ledgers. */ consults?: Consultation[]; /** The session router's decisions, newest last; absent until one is made. */ routing?: RouterDecision[]; /** v0.5.1 decision records, newest last; absent in v0.5.0 ledgers. */ decisions?: DecisionRecord[]; /** v0.5.1: why each task got its discovery level; absent in v0.5.0 ledgers. */ discoveries?: DiscoveryEntry[] }
+export type Ledger = { schema: 1 | 2; observedCompletions?: { agentId: string; reason: string; conclusion: string; at: number; decision?: ReleaseOutcome; /** Later turns of an architect that had already returned: separate information, never the approved answer. */ later?: { at: number; reason: string; conclusion: string; decision?: ReleaseOutcome }[] }[]; swarm?: Swarm; sessionId: string; currentRun: Value<string>; turns: Record<string, string>; runs: Run[]; agents: LedgerAgent[]; tools: ToolEntry[]; requests: Request[]; usage: Reading[]; receipts: NwhoEvent[]; warnings: string[]; replay: ReplayStep[]; checkpoint: Checkpoint | null; /** Opus consultations (SONNET_LED); absent in older ledgers. */ consults?: Consultation[]; /** The session router's decisions, newest last; absent until one is made. */ routing?: RouterDecision[]; /** v0.5.1 decision records, newest last; absent in v0.5.0 ledgers. */ decisions?: DecisionRecord[]; /** v0.5.1: why each task got its discovery level; absent in v0.5.0 ledgers. */ discoveries?: DiscoveryEntry[]; /** v0.5.2 Cobalt Guard: owner alerts raised, newest last, bounded; absent when none. */ alerts?: AlertRecord[] }
 export type ReplayStep = { id: string; runId: string; turnId: string; agentId: string; file: string; kind: 'Edit' | 'Write'; at: number; before: string; after: string; scope: 'fragment' | 'file'; omitted: boolean }
 export type Cursor = { offset: number; size: number; seen: string[]; primed: boolean }
 

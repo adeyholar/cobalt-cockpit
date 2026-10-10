@@ -29,6 +29,7 @@ export type DoctorFacts = {
   cache: CacheReading
   agents: Agents
   stop: StopFacts
+  guard: { enabled: boolean; label: string; used: number; max: number; cooldownSec: number }
 }
 
 export type StopFacts = {
@@ -109,6 +110,8 @@ export const doctorText = (f: DoctorFacts): string => {
     out.push(line('INFO', g.last === null ? 'no check run yet this session' : `last check: ${g.last.outcome}${g.last.exit === null ? '' : ` (exit ${g.last.exit})`}`))
     out.push(line('INFO', 'a pass sets the TEST gate only; it does not clear a required Opus review or any release approval. Exhausted attempts, a missing, changed or refused script mark the task BLOCKED and the stop is allowed.'))
   }
+  out.push('', 'COBALT GUARD · owner alerts')
+  out.push(line('INFO', f.guard.enabled ? `ARMED (${f.guard.label}) · ${f.guard.used} of ${f.guard.max} alerts used · one per ${f.guard.cooldownSec}s at most · delivery is the host's terminal notification; it cannot confirm that you saw it` : 'OFF (guardAlerts=false); nothing is sent'))
   out.push('', 'Cockpit edits no settings file and sets no variable; any cache change is yours to make.')
 
   return out.join('\n')

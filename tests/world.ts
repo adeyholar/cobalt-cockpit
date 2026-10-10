@@ -22,6 +22,10 @@ export type World = {
   telemetryModes: 'ok' | 'denied' | 'wide'
   /** Every $.fs.write fails, as a full disk would. */
   failWrites: boolean
+  /** Every `$.ui.notify` the plugin made. */
+  notified: { text: string; title: string | undefined }[]
+  /** What the host's notification channel does with one. */
+  notifyMode: 'sent' | 'throws' | 'disabled'
   /** The environment each process was started with over the host's own, in the order of `runs`; undefined when none was given. */
   runEnvs: (Readonly<Record<string, string>> | undefined)[]
   /** The tool calls that reached the engine, in order: what actually ran. */
@@ -113,6 +117,8 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     telemetryRuns: [],
     telemetryModes: 'ok',
     failWrites: false,
+    notified: [],
+    notifyMode: 'sent',
     runEnvs: [],
     ran: [],
     asked: [],
@@ -339,6 +345,12 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   on('command.run', () => ({ text: '' }))
   on('classic.PostToolUse', () => ({}))
   on('classic.Stop', () => ({}))
+  on('ui.notify', ($, e) => {
+    w.notified.push({ text: e.text, title: e.title })
+    if (w.notifyMode === 'throws') throw new Error('notification write failed')
+
+    return { value: w.notifyMode === 'disabled' ? { isSent: false as const, reason: 'disabled' as const } : { isSent: true as const, channel: 'kitty' as const } }
+  })
 
   on('tool.call', async ($, e) => {
     const call = e as unknown as Record<string, unknown>
