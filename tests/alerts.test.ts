@@ -3,13 +3,18 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { EMPTY_GUARD, bounded, decide, dueOf, guardConfigOf, guardText, labelOf, messageOf } from '../hooks/alerts'
 import type { AlertRecord, Facts } from '../hooks/alerts'
-import { command, planAndComplete, progress, start, world } from './world'
+import { emptyLedger, migrateLedger } from '../hooks/ledger'
+import { command, hostState, planAndComplete, progress, start, world } from './world'
 
 const SCRIPT = '/work/check.sh'
 const SUMMARY = 'Changed the parser to reject empty input and added a regression test for the empty case.'
 const armed = (extra: Record<string, unknown> = {}) => ({ options: { guardAlerts: true, stopGuard: 'ENFORCE', verifyScript: SCRIPT, stopMaxContinuations: 2, guardCooldownSec: 30, ...extra } })
 const stop = ($: any) => $.classic.Stop({ stop_hook_active: false, last_assistant_message: SUMMARY }) as Promise<{ block?: string }>
-const facts = (over: Partial<Facts> = {}): Facts => ({ taskId: 1, securityFailed: false, stopBlocker: null, blocker: null, releaseNoGo: false, reviewOpen: false, atStop: false, ...over })
+const facts = (over: Partial<Facts> = {}): Facts => ({ taskUid: '1@0', securityFailed: false, stopBlocker: null, blocker: null, releaseNoGo: false, reviewOpen: false, atStop: false, ...over })
+const enroll = async ($: any): Promise<void> => {
+  const sha = /sha-256  ([0-9a-f]{64})/.exec(String((await command($, 'guard trust')).text))![1]!
+  await command($, `guard trust ${sha.slice(0, 12)}`)
+}
 const on1 = guardConfigOf({ guardAlerts: true })
 const sent = (key: string, outcome: AlertRecord['outcome'] = 'sent'): AlertRecord => ({ key, kind: 'run-blocked', taskId: 1, at: 1, outcome, attempts: 1, channel: 'kitty' })
 
@@ -28,12 +33,15 @@ describe('policy', () => {
     expect(dueOf(facts({ reviewOpen: true, atStop: true })).map(d => d.kind)).toEqual(['review-hold'])
   })
   test('deduplicated, throttled, budgeted and silenced', () => {
-    const key = '1:run-blocked:task'
+    const key = '1@0:run-blocked:task'
     expect(decide(on1, EMPTY_GUARD, [sent(key)], key, 5)).toMatchObject({ why: 'duplicate' })
     expect(decide(on1, { ...EMPTY_GUARD, sentAt: 1000, count: 1 }, [], key, 2000)).toMatchObject({ why: 'throttled' })
     expect(decide(on1, { ...EMPTY_GUARD, count: 5 }, [], key, 9e9)).toMatchObject({ why: 'budget' })
     expect(decide(on1, { ...EMPTY_GUARD, all: true }, [], key, 9e9)).toMatchObject({ why: 'silenced' })
-    expect(decide(on1, EMPTY_GUARD, [sent(key, 'failed')], key, 9e9)).toMatchObject({ why: 'duplicate' })
+    // a failed or refused notification may be tried again, a bounded number of times; only a written one ends the matter
+    expect(decide(on1, EMPTY_GUARD, [sent(key, 'failed')], key, 9e9)).toMatchObject({ send: true, attempts: 2 })
+    expect(decide(on1, EMPTY_GUARD, [sent(key, 'failed'), sent(key, 'refused'), sent(key, 'failed')], key, 9e9)).toMatchObject({ why: 'gave-up' })
+    expect(decide(on1, EMPTY_GUARD, [sent(key, 'failed'), sent(key, 'sent')], key, 9e9)).toMatchObject({ why: 'duplicate' })
   })
   test('the message is a closed vocabulary and the ledger list is bounded', () => {
     expect(messageOf('security-failure', 3)).not.toMatch(/\/home|sk-|password/)
@@ -52,12 +60,12 @@ describe('policy', () => {
 describe('in a run', () => {
   test('off: a blocked run notifies nobody', { options: { stopGuard: 'ENFORCE', verifyScript: SCRIPT, stopMaxContinuations: 1 } }, async ($, on) => {
     const w = world(on); w.files[SCRIPT] = 'x'; w.players[SCRIPT] = 'fails'
-    await start($); await planAndComplete($, 1); await stop($)
+    await start($); await planAndComplete($, 1); await enroll($); await stop($)
     expect(w.notified).toEqual([])
   })
   test('a recoverable failure sends nothing; exhausting the budget sends exactly one', armed(), async ($, on) => {
     const w = world(on); w.files[SCRIPT] = 'x'; w.players[SCRIPT] = 'fails'
-    await start($); await planAndComplete($, 1)
+    await start($); await planAndComplete($, 1); await enroll($)
     expect((await stop($)).block).toBeDefined()
     expect(w.notified.length).toBe(0)
     expect((await stop($)).block).toBeUndefined()
@@ -116,5 +124,44 @@ describe('in a run', () => {
   test('doctor names the guard', armed(), async ($, on) => {
     world(on); await start($)
     expect(String((await command($, 'doctor')).text)).toContain('COBALT GUARD')
+  })
+})
+
+describe('identity, retry and held-back alerts', () => {
+  test('a reset and a new task do not reuse the dedupe identity', armed(), async ($, on) => {
+    const w = world(on)
+    await start($); await planAndComplete($, 1)
+    await progress($, { action: 'gate', gate: 'SECURITY', state: 'fail', evidence: 'x' })
+    expect(w.notified.length).toBe(1)
+    await command($, 'reset'); await w.clock.advance(60_000)
+    await planAndComplete($, 1)
+    await progress($, { action: 'gate', gate: 'SECURITY', state: 'fail', evidence: 'x' })
+    expect(w.notified.length).toBe(2)
+  })
+  test('a failed notification is tried again after the cooldown, and a written one is not repeated', armed(), async ($, on) => {
+    const w = world(on); w.notifyMode = 'throws'
+    await start($); await planAndComplete($, 1)
+    await progress($, { action: 'gate', gate: 'SECURITY', state: 'fail', evidence: 'x' })
+    expect(w.notified.length).toBe(1)
+    w.notifyMode = 'sent'; await w.clock.advance(31_000)
+    await progress($, { action: 'status' })
+    expect(w.notified.length).toBe(2)
+    await w.clock.advance(31_000); await progress($, { action: 'status' })
+    expect(w.notified.length).toBe(2)
+  })
+  test('an alert held back by the cooldown is recorded with its reason, not lost', armed(), async ($, on) => {
+    world(on); const held = hostState(on, {})
+    await start($); await planAndComplete($, 1)
+    await progress($, { action: 'gate', gate: 'SECURITY', state: 'fail', evidence: 'x' })
+    await progress($, { action: 'block', milestone: 'm2', note: 'needs the owner' })
+    const alerts = (held.get('run-ledger')!.value as { alerts: { kind: string; outcome: string; why?: string }[] }).alerts
+    expect(alerts.map(a => [a.kind, a.outcome, a.why ?? null])).toEqual([['security-failure', 'sent', null], ['run-blocked', 'throttled', 'cooldown']])
+  })
+  test('malformed stored alerts and checks are dropped when an older Ledger loads', () => {
+    const good = { key: 'k', kind: 'run-blocked', taskId: 1, at: 1, outcome: 'sent', attempts: 1, channel: null }
+    const l = migrateLedger({ ...emptyLedger('s'), alerts: [good, { kind: 'nope' }, null, 7], stopChecks: [{ outcome: 'pass' }, 'x'] } as never)
+    expect(l.alerts).toEqual([good])
+    expect(l.stopChecks).toEqual([])
+    expect(migrateLedger(emptyLedger('s')).alerts).toBeUndefined()
   })
 })

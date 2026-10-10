@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 import { emptyLedger } from '../hooks/ledger'
+import { applyAction, newTask, setGate, settle } from '../hooks/model'
 import type { AlertRecord, Ledger, Task } from '../types'
 import { FIVE, GATE_NAMES, command, hostState, progress, prompt, start, world } from './world'
 
@@ -19,6 +20,10 @@ const releaseTask = async ($: Engine) => {
   await progress($, { action: 'plan', milestones: FIVE })
   for (const m of ['m1', 'm2', 'm3', 'm4']) await progress($, { action: 'complete', milestone: m })
   for (const g of GATE_NAMES) await progress($, { action: 'gate', gate: g, state: 'na', evidence: 'fixture' })
+}
+const enroll = async ($: any): Promise<void> => {
+  const sha = /sha-256  ([0-9a-f]{64})/.exec(String((await command($, 'guard trust')).text))![1]!
+  await command($, `guard trust ${sha.slice(0, 12)}`)
 }
 const stop = ($: any) => $.classic.Stop({ stop_hook_active: false, last_assistant_message: SUMMARY }) as Promise<{ block?: string }>
 
@@ -40,7 +45,7 @@ describe('an open mandatory review', () => {
   })
   test('a passing Stop-guard check sets TEST and nothing else: the review and release stay open', { options: { ...OPTS, stopGuard: 'ENFORCE', verifyScript: SCRIPT } }, async ($, on) => {
     const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
-    const held = hostState(on, {}); await releaseTask($)
+    const held = hostState(on, {}); await releaseTask($); await enroll($)
     expect((await stop($)).block).toBeUndefined()
     expect(w.runs.some(r => r[0] === SCRIPT)).toBe(true)
     expect(task(held).review).toMatchObject({ grounds: ['release'], state: 'required' })
@@ -61,15 +66,18 @@ describe('a release NO-GO', () => {
 })
 
 describe('restart', () => {
-  test('a retained alert for the same condition is not sent again', { options: OPTS }, async ($, on) => {
-    const kept: AlertRecord = { key: '1:review-hold:review', kind: 'review-hold', taskId: 1, at: 1, outcome: 'sent', attempts: 1, channel: 'kitty' }
+  test('the same task, found again after a restart, does not repeat an alert that was written', { options: OPTS }, async ($, on) => {
+    let t = newTask(1, 'goal', 100, null)
+    t = settle(applyAction(t, { action: 'plan', milestones: FIVE.slice(0, 3) } as never, 101, null).task).task
+    t = setGate(t, 'SECURITY', 'fail', 'synthetic', 'model', 102)
+    const kept: AlertRecord = { key: `${t.id}@${t.startedAt}:security-failure:SECURITY`, kind: 'security-failure', taskId: 1, at: 1, outcome: 'sent', attempts: 1, channel: 'kitty' }
     const w = world(on, {}, { 'ledger:s1': { ...emptyLedger('s1'), alerts: [kept] } })
     on('session.id', () => ({ value: 's1' }))
-    const held = hostState(on, {}); await releaseTask($)
-    await stop($)
+    const held = hostState(on, { task: t })
+    await start($); await progress($, { action: 'status' })
     expect(w.notified).toEqual([])
-    expect(ledger(held).alerts).toHaveLength(1)
-    expect(task(held).review).toMatchObject({ state: 'required' })
+    expect((ledger(held).alerts ?? []).filter(a => a.kind === 'security-failure')).toHaveLength(1)
+    expect(task(held).gates.SECURITY.state).toBe('fail')
   })
 })
 
@@ -82,7 +90,7 @@ describe('script trust and configuration', () => {
   })
   test('a check is run as an argv of exactly one element, with no shell', { options: { orchestration: true, stopGuard: 'ENFORCE', verifyScript: SCRIPT } }, async ($, on) => {
     const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
-    await start($); await progress($, { action: 'plan', milestones: FIVE })
+    await start($); await progress($, { action: 'plan', milestones: FIVE }); await enroll($)
     await stop($)
     expect(w.runs.filter(r => r.includes(SCRIPT))).toEqual([[SCRIPT]])
     expect(w.runs.some(r => ['sh', 'bash', '-c'].includes(r[0] ?? ''))).toBe(false)

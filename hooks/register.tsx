@@ -59,7 +59,7 @@ import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
 import { EMPTY_GUARD, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
 import type { GuardConfig } from './alerts'
-import { attemptsOf, boundedChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, verdictOf, BLOCKER_PREFIX, type CheckRecord, type StopConfig } from './stopguard'
+import { uidOf, attemptsOf, boundedChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, verdictOf, BLOCKER_PREFIX, type CheckRecord, type StopConfig } from './stopguard'
 import { applyAction, blockMilestone, unblock, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
 import { basename, parseShell, unwrap } from './shell'
@@ -127,7 +127,7 @@ import { BLOCK_DENY, BLOCK_LINE, EMPTY_POLICY, FABLE_RULE, answered, blocked, fa
 import { isPersonOrigin } from './origin'
 import { agentsOf, readCache } from './cache'
 import type { CacheReading } from './cache'
-import { doctorText } from './doctor'
+import { doctorText, shown as shownPath } from './doctor'
 import type { DoctorFacts, Install, StopFacts } from './doctor'
 import { dirFor, filesFor, gather, health, healthOf, limits, newSid, prepared, queue as teleQueue, segment, setEnabled as setTelemetry } from './telemetry-store'
 import { flowGrid, flowOf, flowRow, flowText, layoutOf as flowLayout } from './flow'
@@ -1004,11 +1004,11 @@ const flowInputOf = (input: HudInput, agents: readonly AgentStrip[], isWorking: 
 })
 const stopFacts = async ($: EngineInterface): Promise<StopFacts> => {
   const c = await loadStopCfg($)
-  const last = (await read($, stopAtom)).at(-1)
+  const last = ((await read($, ledgerAtom)).stopChecks ?? []).at(-1)
 
   return {
     policy: c.policy, script: c.script === null ? null : c.script.slice(c.script.lastIndexOf('/') + 1), pinned: c.pin !== null,
-    timeoutSec: Math.round(c.timeoutMs / 1000), maxAttempts: c.maxAttempts, problems: c.problems, hashed: stopTrust.seen && stopTrust.sha !== null,
+    timeoutSec: Math.round(c.timeoutMs / 1000), maxAttempts: c.maxAttempts, problems: c.problems, trust: c.script === null ? 'no script' : TRUST_WORDS[(await trustState($, c)).state],
     last: last === undefined ? null : { outcome: last.outcome, exit: last.exit, at: last.at },
   }
 }
@@ -2259,7 +2259,6 @@ export const registerLedger = (on: On): void => {
   on('classic.SessionStart', async ($, e, next) => {
     const ran = await next(e)
     if (e.source === 'resume') await hush(() => restore($))
-    await hush(() => trustStopScript($))
 
     return ran
   }).catch(($, e, next) => next(e))
@@ -2332,7 +2331,7 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
     const latest = [...history].sort((a, b) => b.at - a.at)[0]
     const review = task.review
     const due = dueOf({
-      taskId: task.id,
+      taskUid: uidOf(task),
       securityFailed: task.gates.SECURITY.state === 'fail',
       // only a check that really ran and kept failing is "retries exhausted"; a missing, changed or unstartable script is a blocked run
       stopBlocker: exhaustedBlocker(task.blocker),
@@ -2346,7 +2345,15 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
       const state = await read($, guardAtom)
       const kept = (await read($, ledgerAtom)).alerts ?? []
       const decision = decideAlert(guardCfg, state, kept, one.key, now)
-      if (!decision.send) continue
+      if (!decision.send) {
+        // an alert that is due but held back is recorded once, with the reason, so a final blocked-run alert is never lost silently
+        const last = [...kept].reverse().find(a => a.key === one.key)
+        if ((decision.why === 'throttled' || decision.why === 'budget') && !(last?.outcome === 'throttled' && last.why === (decision.why === 'throttled' ? 'cooldown' : 'budget'))) {
+          await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome: 'throttled', attempts: 0, channel: null, why: decision.why === 'throttled' ? 'cooldown' : 'budget' }) }))
+          await hush(() => persist($))
+        }
+        continue
+      }
       await update($, guardAtom, old => ({ ...old, pending: true }))
       let outcome: 'sent' | 'failed' | 'refused' = 'failed'
       let channel: string | null = null
@@ -2356,7 +2363,8 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
         if (r.isSent) { outcome = 'sent'; channel = r.channel } else { outcome = r.reason === 'refused' ? 'refused' : 'failed'; why = r.reason as AlertRecord['why'] }
       } catch { outcome = 'failed'; why = 'error' }
       await update($, guardAtom, old => ({ ...old, pending: false, sentAt: now, count: old.count + 1 }))
-      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome, attempts: 1, channel, ...(why === undefined ? {} : { why }) }) }))
+      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome, attempts: decision.attempts, channel, ...(why === undefined ? {} : { why }) }) }))
+      await hush(() => persist($))
     }
   } catch { /* an alert that cannot be raised never fails the work */ } finally {
     guarding = false
@@ -2368,7 +2376,6 @@ const guardView = async ($: EngineInterface) => ({ state: await read($, guardAto
 
 
 // --- Optional Stop-hook verification guard (policy and wording: stopguard.ts). ---
-const stopAtom = atom({ plugin: 'cobalt-cockpit', key: 'stop-checks' } as const, [] as CheckRecord[])
 let stopOptions: Readonly<Record<string, unknown>> = {}
 let stopCfg: StopConfig = stopConfigOf({}, null)
 /** The guard's settings with ~ resolved against HOME; refreshed whenever the guard is consulted. */
@@ -2377,50 +2384,84 @@ const loadStopCfg = async ($: EngineInterface): Promise<StopConfig> => {
 
   return stopCfg
 }
-/** The check script's sha-256 as first seen this session; null until then. A later difference is untrusted. */
-let stopTrust: { sha: string | null; seen: boolean } = { sha: null, seen: false }
 
-const shaOf = async (text: string): Promise<string> => {
-  const bytes = new TextEncoder().encode(text)
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+const hex = (bytes: ArrayBuffer): string => [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, '0')).join('')
+const sha256Text = async (text: string): Promise<string> => hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))
 
-  return [...digest].map(b => b.toString(16).padStart(2, '0')).join('')
+/** The script's sha-256 over its raw bytes; null when it cannot be read. */
+const rawSha = async ($: EngineInterface, path: string): Promise<string | null> => {
+  try {
+    const { base64 } = await $.fs.read(path, { as: 'bytes' })
+    const bin = atob(base64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+
+    return hex(await crypto.subtle.digest('SHA-256', bytes))
+  } catch { return null }
 }
 
-const stopScriptSha = async ($: EngineInterface): Promise<string | null> => {
-  if (stopCfg.script === null) return null
-  try { return await shaOf(await $.fs.read(stopCfg.script)) } catch { return null }
+const TRUST_KEY = 'stop-trust'
+type TrustRecord = { sha: string; at: number }
+const trustMap = async ($: EngineInterface): Promise<Record<string, TrustRecord>> => {
+  const held = await $.store.get(TRUST_KEY).catch(() => undefined)
+  const out: Record<string, TrustRecord> = {}
+  if (held !== null && typeof held === 'object') {
+    for (const [k, v] of Object.entries(held as Record<string, unknown>).slice(0, 32)) {
+      const r = v as Partial<TrustRecord> | null
+      if (typeof k === 'string' && r !== null && typeof r === 'object' && typeof r.sha === 'string' && /^[0-9a-f]{64}$/.test(r.sha) && typeof r.at === 'number') out[k] = { sha: r.sha, at: r.at }
+    }
+  }
+
+  return out
+}
+/** Trust is per project and per script path, so it follows neither a task reset nor another repository. */
+const trustScope = async ($: EngineInterface, script: string): Promise<{ key: string; verifier: string }> => {
+  const cwd = (await $.session.cwd().catch(() => '')) || ''
+  const key = `${cwd}\0${script}`
+
+  return { key, verifier: (await sha256Text(key)).slice(0, 12) }
 }
 
-/** Hashes the owner's script when the session begins, so a change made later by the checked agent is seen. */
-const trustStopScript = async ($: EngineInterface): Promise<void> => {
-  await loadStopCfg($)
-  if (stopCfg.policy !== 'ENFORCE' || stopCfg.script === null || stopTrust.seen) return
-  stopTrust = { sha: await stopScriptSha($), seen: true }
-}
+type TrustState = { state: 'enrolled' | 'not-enrolled' | 'changed' | 'pin-mismatch' | 'missing'; sha: string | null; verifier: string }
+const trustState = async ($: EngineInterface, c: StopConfig): Promise<TrustState> => {
+  const script = c.script as string
+  const scope = await trustScope($, script)
+  const sha = await rawSha($, script)
+  if (sha === null) return { state: 'missing', sha, verifier: scope.verifier }
+  if (c.pin !== null && sha !== c.pin) return { state: 'pin-mismatch', sha, verifier: scope.verifier }
+  const enrolled = (await trustMap($))[scope.key]
+  if (enrolled === undefined) return { state: 'not-enrolled', sha, verifier: scope.verifier }
 
-/** Runs the owner's check once. Argv only, never a shell; a refusal or failure to start is final and is not retried another way. */
-const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean): Promise<CheckRecord> => {
+  return { state: enrolled.sha === sha ? 'enrolled' : 'changed', sha, verifier: scope.verifier }
+}
+const TRUST_WORDS: Record<TrustState['state'], string> = { enrolled: 'enrolled', 'not-enrolled': 'not enrolled', changed: 'changed since it was enrolled', 'pin-mismatch': 'does not match its pin', missing: 'missing' }
+
+/** Runs the owner's check once, on a tree that must not move. Argv only, never a shell; a refusal or failure to start is final. */
+const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean, prior: readonly CheckRecord[]): Promise<CheckRecord> => {
   const script = stopCfg.script as string
   const at = await $.clock.now()
   const name = script.slice(script.lastIndexOf('/') + 1)
-  const rec = (r: Partial<CheckRecord> & Pick<CheckRecord, 'outcome'>): CheckRecord => ({ taskId: task.id, name, sha: null, at, exit: null, ms: null, tree: null, summary: '', hasSummary, ...r })
-  let present = false
-  try { present = await $.fs.exists(script) } catch { present = false }
-  if (!present) return rec({ outcome: 'missing' })
-  const sha = await stopScriptSha($)
-  if (sha === null) return rec({ outcome: 'missing' })
-  const short = sha.slice(0, 8)
-  if (stopCfg.pin !== null ? sha !== stopCfg.pin : !stopTrust.seen || sha !== stopTrust.sha) return rec({ outcome: 'untrusted', sha: short })
+  const uid = uidOf(task)
+  const trust = await trustState($, stopCfg)
+  const rec = (r: Partial<CheckRecord> & Pick<CheckRecord, 'outcome'>): CheckRecord => ({ taskId: task.id, uid, verifier: trust.verifier, complete: false, name, sha: null, at, exit: null, ms: null, tree: null, summary: '', hasSummary, ...r })
+  if (trust.state === 'missing') return rec({ outcome: 'missing' })
+  const short = (trust.sha as string).slice(0, 8)
+  if (trust.state !== 'enrolled') return rec({ outcome: 'untrusted', sha: short, summary: TRUST_WORDS[trust.state] })
+  // a task keeps the verifier it started with: another script or project cannot take over its verdict
+  const first = prior.find(c => c.uid === uid)
+  if (first !== undefined && first.verifier !== trust.verifier) return rec({ outcome: 'untrusted', sha: short, summary: 'another verifier than the one this task started with' })
   const cwd = await $.session.cwd().catch(() => undefined)
   try {
+    const before = await treeStamp($)
     const r = await $.process.run([script], { timeoutMs: stopCfg.timeoutMs, ...(cwd === undefined ? {} : { cwd }) })
     const ms = (await $.clock.now()) - at
-    const tree = await treeStamp($)
+    const after = await treeStamp($)
     const summary = outputTail(redactSecrets(`${r.stderr}\n${r.stdout}`))
-    if (r.exitCode === 0) return rec({ outcome: 'pass', sha: short, exit: 0, ms, tree, summary })
+    // two fingerprints are not an atomic snapshot, but a tree seen to move while the check ran is not what was checked
+    if (before !== null && after !== null && before !== after) return rec({ outcome: 'unstable', sha: short, exit: r.exitCode, ms, tree: after, summary })
+    if (r.exitCode === 0) return rec({ outcome: 'pass', sha: short, exit: 0, ms, tree: after, summary })
 
-    return rec({ outcome: ms >= stopCfg.timeoutMs ? 'timeout' : 'fail', sha: short, exit: r.exitCode, ms, tree, summary })
+    return rec({ outcome: ms >= stopCfg.timeoutMs ? 'timeout' : 'fail', sha: short, exit: r.exitCode, ms, tree: after, summary })
   } catch (error) {
     const text = String((error as { message?: unknown })?.message ?? '')
 
@@ -2431,24 +2472,30 @@ const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean)
 const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; last_assistant_message?: string }): Promise<string | null> => {
   await loadStopCfg($)
   const task = await read($, taskAtom)
-  if (stopCfg.policy !== 'ENFORCE' || stopCfg.problems.length > 0 || stopCfg.script === null || !hasChanges(task) || task === null) return null
-  const checks = await read($, stopAtom)
-  const spent = attemptsOf(checks, task.id)
+  if (stopCfg.policy !== 'ENFORCE' || stopCfg.problems.length > 0 || stopCfg.script === null || task === null) return null
+  // changes the tool hooks did not see (an MCP tool, a Bash command with no edit diff) still show in the repository
+  const dirty = (await read($, gitAtom))?.dirty ?? 0
+  if (!hasChanges(task) && !(dirty > 0 && task.kind !== 'readonly')) return null
+  const uid = uidOf(task)
+  // the Ledger is where the attempts are kept, so a resumed session finds the budget as it was left
+  const checks = (await read($, ledgerAtom)).stopChecks ?? []
+  const spent = attemptsOf(checks, uid)
   const hasSummary = hasChangeSummary(e.last_assistant_message)
-  // a budget already spent allows the stop; the guard never loops, whatever the host's own stop_hook_active says
+  // every check since the last one that completed the task is an attempt, whatever it said: the budget cannot be reset by a pass
   if (spent >= stopCfg.maxAttempts) return null
   // a refusal or a script that cannot start is final for this task: it is not asked again
-  const lastRun = [...checks].reverse().find(c => c.taskId === task.id)
+  const lastRun = [...checks].reverse().find(c => c.uid === uid)
   if (lastRun !== undefined && (lastRun.outcome === 'error' || lastRun.outcome === 'untrusted')) return null
-  const run = await runStopCheck($, task, hasSummary)
-  await update($, stopAtom, old => boundedChecks(old, run))
-  await update($, ledgerAtom, old => ({ ...old, stopChecks: boundedChecks(old.stopChecks ?? [], run) }))
+  const run = await runStopCheck($, task, hasSummary, checks)
   const verdict = verdictOf({ cfg: stopCfg, spent, run, hasSummary })
+  const done: CheckRecord = { ...run, complete: verdict.action === 'allow' && verdict.state === 'VERIFIED' }
+  await update($, ledgerAtom, old => ({ ...old, stopChecks: boundedChecks(old.stopChecks ?? [], done) }))
+  await hush(() => persist($))
   const detail = run.exit === null ? run.outcome : `${run.outcome} (exit ${run.exit})`
   await change($, (t, now) => {
     let chain = t
     if (run.outcome === 'pass' && run.tree !== null) chain = checkedAt(chain, run.tree)
-    if (run.outcome === 'pass' || run.outcome === 'fail' || run.outcome === 'timeout') chain = setGate(chain, 'TEST', run.outcome === 'pass' ? 'pass' : 'fail', `stop check ${run.name} ${detail}`, 'auto', now)
+    if (run.outcome === 'pass' || run.outcome === 'fail' || run.outcome === 'timeout') chain = setGate(chain, 'TEST', run.outcome === 'pass' ? 'pass' : 'fail', `stop check ${run.name} ${detail}${run.tree === null && run.outcome === 'pass' ? ' (tree state unknown)' : ''}`, 'auto', now)
     if (run.outcome === 'pass' && run.tree !== null) chain = stampGates(chain, run.tree)
     if (verdict.action === 'allow' && verdict.state === 'BLOCKED') chain = blockMilestone(chain, null, BLOCKER_PREFIX + oneLine(verdict.reason, 200), now).task
     else if (verdict.action === 'allow' && verdict.state === 'VERIFIED' && chain.blocker?.startsWith(BLOCKER_PREFIX)) chain = unblock(chain, now).task
@@ -2491,7 +2538,6 @@ export const register: Register = (on, options) => {
   stopOptions = options
   guardCfg = guardConfigOf(options)
   stopCfg = stopConfigOf(options, null)
-  stopTrust = { sha: null, seen: false }
   registerLedger(on)
 
   // another Cockpit that registers after this one: all the host lets a plugin see of the others
@@ -2502,7 +2548,6 @@ export const register: Register = (on, options) => {
   })
 
   on('session.start', async ($, e, next) => {
-    await hush(() => trustStopScript($))
     await quiet(async () => {
       const version = await $.session.version()
       isSupported = isAtLeast(version.base ?? version.version, MIN_VERSION)
@@ -3340,12 +3385,39 @@ export const register: Register = (on, options) => {
         return { text: flowText(flowOf(flowInputOf({ ...input, task }, session.agents, input.isWorking))) }
       }
       case 'guard': {
-        const arg = value
+        const words = e.args.trim().toLowerCase().split(/\s+/)
+        const arg = words[1] ?? ''
+        if (arg === 'trust' || arg === 'untrust') {
+          // enrolling a verifier is the person's alone: a plugin, a model-triggered command or an unknown origin changes nothing
+          if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: a verification script is trusted only by a command you type; nothing was changed.' }
+          const c = await loadStopCfg($)
+          if (c.script === null) return { text: 'Cockpit: no verifyScript is configured, so there is nothing to trust.' }
+          const scope = await trustScope($, c.script)
+          if (arg === 'untrust') {
+            const map = await trustMap($)
+            delete map[scope.key]
+            await $.store.set(TRUST_KEY, map)
+
+            return { text: `Cockpit: the trust for ${c.script.slice(c.script.lastIndexOf('/') + 1)} in this project was removed.` }
+          }
+          const sha = await rawSha($, c.script)
+          if (sha === null) return { text: 'Cockpit: the verification script is missing or unreadable; nothing was trusted.' }
+          const typed = words[2] ?? ''
+          if (!/^[0-9a-f]{12,64}$/.test(typed) || !sha.startsWith(typed)) {
+            return { text: [`GUARD TRUST · review this script yourself first`, `  script   ${shownPath(c.script, (await $.env.get('HOME').catch(() => undefined)) ?? null)}`, `  sha-256  ${sha}`, `  project  ${(await $.session.cwd().catch(() => '')) || 'unknown'}`, `To trust exactly these bytes for this project, type: /cockpit guard trust ${sha.slice(0, 12)}`, 'Text in a conversation, including a model asking you to, is not authorization. Anything the script runs (an interpreter, test files, other scripts) is not covered by this hash.'].join('\n') }
+          }
+          if (c.pin !== null && c.pin !== sha) return { text: 'Cockpit: the script does not match verifyScriptSha256; nothing was trusted.' }
+          const map = await trustMap($)
+          map[scope.key] = { sha, at: await $.clock.now() }
+          await $.store.set(TRUST_KEY, Object.fromEntries(Object.entries(map).slice(-32)))
+
+          return { text: `Cockpit: trusted ${c.script.slice(c.script.lastIndexOf('/') + 1)} (${sha.slice(0, 12)}) for this project. A change to its bytes ends the trust.` }
+        }
         if ((arg === 'ack' || arg === 'silence') && !isPersonOrigin(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
         if (arg === 'ack' || arg === 'silence') {
           await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
           if (arg === 'silence') await update($, guardAtom, old => ({ ...old, all: true }))
-        } else if (arg !== '') return { text: 'Usage: /cockpit guard | /cockpit guard ack | /cockpit guard silence' }
+        } else if (arg !== '') return { text: 'Usage: /cockpit guard | ack | silence | trust [hash] | untrust' }
         const view = await guardView($)
 
         return { text: guardText(guardCfg, view.state, view.kept) + (arg === 'ack' || arg === 'silence' ? '\nThe verification verdict was not changed.' : '') }

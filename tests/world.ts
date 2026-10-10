@@ -24,6 +24,8 @@ export type World = {
   failWrites: boolean
   /** Every `$.ui.notify` the plugin made. */
   notified: { text: string; title: string | undefined }[]
+  /** What `$.session.cwd()` answers. */
+  cwd: string
   /** What the host's notification channel does with one. */
   notifyMode: 'sent' | 'throws' | 'disabled'
   /** The environment each process was started with over the host's own, in the order of `runs`; undefined when none was given. */
@@ -118,6 +120,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     telemetryModes: 'ok',
     failWrites: false,
     notified: [],
+    cwd: '/work/example',
     notifyMode: 'sent',
     runEnvs: [],
     ran: [],
@@ -235,7 +238,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage } as never
   })
-  on('session.cwd', () => ({ value: '/work/example' }))
+  on('session.cwd', () => ({ value: w.cwd }))
   on('tool.register', ($, e) => { w.registered.push({ ...e }); return { value: { tool: `mcp__${PLUGIN}__${e.name}` } } })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.log', ($, e) => {
@@ -267,6 +270,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   on('fs.read', ($, e) => {
     const text = w.files[e.path]
     if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
+    if ((e as { as?: string }).as === 'bytes') return { value: { base64: btoa(String.fromCharCode(...new TextEncoder().encode(text))) } }
 
     return { value: text }
   })

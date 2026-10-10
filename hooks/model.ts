@@ -79,6 +79,10 @@ export const oneLine = (text: string, max: number): string => {
 }
 
 /** A task as a prompt starts it: no milestones, so no progress to claim. */
+/** What the Stop guard writes in a task's blocker. Only the guard clears or replaces it: the progress tool cannot. */
+export const STOP_GUARD_PREFIX = 'STOP GUARD: '
+export const isGuardHeld = (task: Task): boolean => task.blocker !== null && task.blocker.startsWith(STOP_GUARD_PREFIX)
+
 export const newTask = (id: number, goal: string, now: number, startSha: string | null): Task => ({
   id,
   lifecycle: 1,
@@ -642,8 +646,12 @@ export const applyAction = (task: Task, given: ProgressInput, now: number, sha: 
     case 'fail':
       return failMilestone(task, input.milestone, note, now)
     case 'block':
+      if (isGuardHeld(task)) return { task, error: 'STOP GUARD hold: the task is held by the Stop guard and only a person can release it (/cockpit reset); nothing was changed' }
+
       return blockMilestone(task, input.milestone, note, now)
     case 'unblock':
+      if (isGuardHeld(task)) return { task, error: 'STOP GUARD hold: the Stop guard blocked this task and the progress tool cannot unblock it; nothing was changed' }
+
       return unblock(task, now)
     case 'gate': {
       if (Array.isArray(input.gates) && input.gates.length > 0) {
@@ -660,6 +668,8 @@ export const applyAction = (task: Task, given: ProgressInput, now: number, sha: 
       if (!isGateName(input.gate)) return { task, error: `"gate" must be one of ${GATES.join(', ')}` }
       const state = input.state as GateState
       if (!REPORTABLE.includes(state)) return { task, error: '"state" must be pass, fail, na or pending' }
+      // a held task's TEST result belongs to the check the owner configured, not to a report
+      if (isGuardHeld(task) && input.gate === 'TEST') return { task, error: 'STOP GUARD hold: the TEST gate is set by the owner\'s verification script while the task is held; nothing was changed' }
       const evidence = optionalText(input.evidence) ?? note
       if (evidence === null && (state === 'pass' || state === 'na')) {
         return {

@@ -40,8 +40,8 @@ export type StopFacts = {
   timeoutSec: number
   maxAttempts: number
   problems: string[]
-  /** Whether the script was hashed at session start. */
-  hashed: boolean
+  /** Whether this script's raw bytes are enrolled for this project, as words. */
+  trust: string
   last: { outcome: string; exit: number | null; at: number } | null
 }
 
@@ -105,7 +105,7 @@ export const doctorText = (f: DoctorFacts): string => {
   const g = f.stop
   if (g.policy === 'OBSERVE') out.push(line('INFO', 'OBSERVE (default): nothing runs at Stop; no check, no block, no model call'))
   else {
-    out.push(line(g.problems.length > 0 || g.script === null ? 'WARN' : 'OK', `ENFORCE · script ${g.script ?? 'NOT SET'} · ${g.pinned ? 'sha-256 pinned' : g.hashed ? 'hashed at session start' : 'not yet hashed (untrusted until a session starts)'} · timeout ${g.timeoutSec}s · ${g.maxAttempts} attempt${g.maxAttempts === 1 ? '' : 's'} per task`))
+    out.push(line(g.problems.length > 0 || g.script === null ? 'WARN' : 'OK', `ENFORCE · script ${g.script ?? 'NOT SET'} · ${g.pinned ? 'sha-256 pinned · ' : ''}trust: ${g.trust}${g.trust === 'enrolled' ? '' : ' (a person must run /cockpit guard trust)'} · timeout ${g.timeoutSec}s · ${g.maxAttempts} attempt${g.maxAttempts === 1 ? '' : 's'} per task`))
     for (const p of g.problems) out.push(line('WARN', p))
     out.push(line('INFO', g.last === null ? 'no check run yet this session' : `last check: ${g.last.outcome}${g.last.exit === null ? '' : ` (exit ${g.last.exit})`}`))
     out.push(line('INFO', 'a pass sets the TEST gate only; it does not clear a required Opus review or any release approval. Exhausted attempts, a missing, changed or refused script mark the task BLOCKED and the stop is allowed.'))

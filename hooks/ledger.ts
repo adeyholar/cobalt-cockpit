@@ -9,6 +9,8 @@ import { decisionLine } from './router'
 import { roleOf } from './orchestra'
 import { activityOf } from './classify'
 import { redactSecrets } from './secrets'
+import { validAlerts } from './alerts'
+import { validChecks } from './stopguard'
 import { alignmentShown, needsAlignment } from './discovery'
 export const UNKNOWN = 'unknown' as const
 export const LIMITS = { runs: 32, agents: 96, tools: 512, requests: 512, usage: 64, receipts: 256, warnings: 32, decisions: 64, discoveries: 16 }
@@ -200,7 +202,7 @@ export const classicTelemetry = (l: Ledger, e: { tool_use_id: string; agent_id?:
 }
 
 /** Upgrade retained v1 histories without inventing missing assignments. */
-export const migrateLedger = (l: Ledger): Ledger => ({ ...l, schema: 2, swarm: l.swarm ?? emptySwarm(), decisions: Array.isArray(l.decisions) ? l.decisions : [], discoveries: Array.isArray(l.discoveries) ? l.discoveries : [] })
+export const migrateLedger = (l: Ledger): Ledger => ({ ...l, schema: 2, swarm: l.swarm ?? emptySwarm(), decisions: Array.isArray(l.decisions) ? l.decisions : [], discoveries: Array.isArray(l.discoveries) ? l.discoveries : [], ...(l.alerts === undefined ? {} : { alerts: validAlerts(l.alerts) }), ...(l.stopChecks === undefined ? {} : { stopChecks: validChecks(l.stopChecks) }) })
 const redact = (text: string, max: number): string => redactSecrets(text).replace(/\s+/g, ' ').trim().slice(0, max)
 /** The same record with every free-text field redacted again: nothing reaches storage unredacted, whatever called this. */
 const safeDecision = (d: DecisionRecord): DecisionRecord => ({ ...d, problem: redact(d.problem, 160), chosen: redact(d.chosen, 200), alternatives: d.alternatives.slice(0, 4).map(a => ({ option: redact(a.option, 120), rejectedBecause: redact(a.rejectedBecause, 160) })), tradeoffs: d.tradeoffs === null ? null : redact(d.tradeoffs, 200), evidence: d.evidence.slice(0, 4).map(e => redact(e, 120)) })

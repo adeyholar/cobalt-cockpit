@@ -34,14 +34,17 @@ export const guardConfigOf = (options: Readonly<Record<string, unknown>>): Guard
 })
 
 /** One alert as the Run Ledger keeps it: closed vocabulary and numbers only. */
-export type AlertRecord = { key: string; kind: AlertKind; taskId: number; at: number; outcome: AlertOutcome; attempts: number; channel: string | null; why?: 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error'; acked?: true }
+export type AlertRecord = { key: string; kind: AlertKind; taskId: number; at: number; outcome: AlertOutcome; attempts: number; channel: string | null; why?: Why; acked?: true }
+export type Why = 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error' | 'cooldown' | 'budget'
+export const RETRY_CAP = 3
 
 export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean }
 export const EMPTY_GUARD: GuardState = { sentAt: null, count: 0, silenced: [], all: false, pending: false }
 
 /** The facts the policy reads, all of them already observed elsewhere. */
 export type Facts = {
-  taskId: number
+  /** The task's identity across resets and restarts; task numbers start again at 1 and must not repeat a dedupe key. */
+  taskUid: string
   /** The TEST/SECURITY gates as the task holds them. */
   securityFailed: boolean
   /** The Stop guard exhausted its attempts or could not run its check. */
@@ -59,31 +62,34 @@ export type Facts = {
 /** A blocker is "retries exhausted" only when a check really ran and kept failing; a missing, changed or unstartable script is a blocked run. */
 export const exhaustedBlocker = (blocker: string | null): string | null => (blocker !== null && /^STOP GUARD: check (?:exit|timed out)/.test(blocker) ? blocker : null)
 
-export const keyOf = (taskId: number, kind: AlertKind, detail: string): string => `${taskId}:${kind}:${detail}`
+export const keyOf = (taskUid: string, kind: AlertKind, detail: string): string => `${taskUid}:${kind}:${detail}`
 
 /** The conditions that call for a person, in the order they are told. A recoverable failure is not among them. */
 export const dueOf = (f: Facts): { kind: AlertKind; key: string }[] => {
   const out: { kind: AlertKind; key: string }[] = []
-  if (f.securityFailed) out.push({ kind: 'security-failure', key: keyOf(f.taskId, 'security-failure', 'SECURITY') })
-  if (f.releaseNoGo) out.push({ kind: 'release-no-go', key: keyOf(f.taskId, 'release-no-go', 'release') })
-  if (f.stopBlocker !== null) out.push({ kind: 'verification-exhausted', key: keyOf(f.taskId, 'verification-exhausted', 'TEST') })
-  else if (f.blocker !== null) out.push({ kind: 'run-blocked', key: keyOf(f.taskId, 'run-blocked', 'task') })
-  if (f.atStop && f.reviewOpen) out.push({ kind: 'review-hold', key: keyOf(f.taskId, 'review-hold', 'review') })
+  if (f.securityFailed) out.push({ kind: 'security-failure', key: keyOf(f.taskUid, 'security-failure', 'SECURITY') })
+  if (f.releaseNoGo) out.push({ kind: 'release-no-go', key: keyOf(f.taskUid, 'release-no-go', 'release') })
+  if (f.stopBlocker !== null) out.push({ kind: 'verification-exhausted', key: keyOf(f.taskUid, 'verification-exhausted', 'TEST') })
+  else if (f.blocker !== null) out.push({ kind: 'run-blocked', key: keyOf(f.taskUid, 'run-blocked', 'task') })
+  if (f.atStop && f.reviewOpen) out.push({ kind: 'review-hold', key: keyOf(f.taskUid, 'review-hold', 'review') })
 
   return out
 }
 
-export type Decision = { send: true } | { send: false; why: 'off' | 'duplicate' | 'silenced' | 'throttled' | 'budget' }
+export type Decision = { send: true; attempts: number } | { send: false; why: 'off' | 'duplicate' | 'silenced' | 'throttled' | 'budget' | 'gave-up' }
 
 /** Whether this one alert is sent now. Pure: the caller keeps the state. */
 export const decide = (cfg: GuardConfig, state: GuardState, kept: readonly AlertRecord[], key: string, now: number): Decision => {
   if (!cfg.enabled) return { send: false, why: 'off' }
   if (state.all || state.silenced.includes(key)) return { send: false, why: 'silenced' }
-  if (kept.some(a => a.key === key && a.outcome !== 'throttled' && a.outcome !== 'silenced')) return { send: false, why: 'duplicate' }
+  // only a notification the host wrote ends the matter; a failed or refused one may be tried again, a bounded number of times
+  if (kept.some(a => a.key === key && a.outcome === 'sent')) return { send: false, why: 'duplicate' }
+  const failed = kept.filter(a => a.key === key && (a.outcome === 'failed' || a.outcome === 'refused')).length
+  if (failed >= RETRY_CAP) return { send: false, why: 'gave-up' }
   if (state.count >= cfg.maxPerSession) return { send: false, why: 'budget' }
   if (state.sentAt !== null && now - state.sentAt < cfg.cooldownMs) return { send: false, why: 'throttled' }
 
-  return { send: true }
+  return { send: true, attempts: failed + 1 }
 }
 
 const HEAD: Record<AlertKind, string> = {
@@ -120,3 +126,16 @@ export const guardText = (cfg: GuardConfig, state: GuardState, kept: readonly Al
 
   return lines.join('\n')
 }
+
+const OUTCOME_SET: readonly string[] = ['sent', 'failed', 'refused', 'throttled', 'silenced']
+const WHY_SET: readonly string[] = ['disabled', 'no-channel', 'no-surface', 'refused', 'error', 'cooldown', 'budget']
+/** Whether a stored alert has exactly the shape this build writes. A malformed one is dropped, never believed. */
+export const isAlertRecord = (x: unknown): x is AlertRecord => {
+  if (x === null || typeof x !== 'object') return false
+  const r = x as Record<string, unknown>
+
+  return typeof r['key'] === 'string' && r['key'].length <= 120 && KINDS.includes(r['kind'] as AlertKind) && Number.isSafeInteger(r['taskId']) && typeof r['at'] === 'number'
+    && OUTCOME_SET.includes(r['outcome'] as string) && Number.isSafeInteger(r['attempts']) && (r['channel'] === null || (typeof r['channel'] === 'string' && r['channel'].length <= 32))
+    && (r['why'] === undefined || WHY_SET.includes(r['why'] as string)) && (r['acked'] === undefined || r['acked'] === true)
+}
+export const validAlerts = (x: unknown): AlertRecord[] => (Array.isArray(x) ? x.filter(isAlertRecord).slice(-ALERT_CAP) : [])

@@ -10,9 +10,11 @@
 //                      cannot run at all.
 //
 // What counts as proof: the script's real exit code, 0, run now against this
-// working tree, from a script whose content is unchanged since the session
-// began (the agent that is being checked must not be able to edit its own
-// judge). Never a model's sentence and never a prompt: the script is named
+// working tree, from a script whose raw bytes match what a person enrolled with
+// `/cockpit guard trust` (kept in the plugin store, per project and path, across
+// sessions; never enrolled by a model, a plugin or a configuration alone) and,
+// when set, the pinned hash. The tree must not have moved while it ran. The
+// agent that is being checked must not be able to edit its own judge. Never a model's sentence and never a prompt: the script is named
 // only in the plugin's own options and is run as an argv, not through a shell.
 // Whether a project-scoped settings file can supply plugin options is a host
 // property this plugin does not control; pin the hash when the repository is
@@ -25,13 +27,13 @@
 // reason, never DONE.
 
 import type { Task } from '../types'
-import { oneLine } from './model'
+import { STOP_GUARD_PREFIX, oneLine } from './model'
 
 export type Policy = 'OBSERVE' | 'ENFORCE'
 export const MAX_ATTEMPTS_CEILING = 10
 export const TIMEOUT_CEILING_MS = 900_000
 export const MIN_SUMMARY_CHARS = 60
-export const BLOCKER_PREFIX = 'STOP GUARD: '
+export const BLOCKER_PREFIX = STOP_GUARD_PREFIX
 
 export type StopConfig = {
   policy: Policy
@@ -78,9 +80,16 @@ export const configOf = (options: Readonly<Record<string, unknown>>, home: strin
   }
 }
 
-export type Outcome = 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted'
+export type Outcome = 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable'
+export const OUTCOMES: readonly Outcome[] = ['pass', 'fail', 'timeout', 'error', 'missing', 'untrusted', 'unstable']
 export type CheckRecord = {
   taskId: number
+  /** Which task, across resets and restarts: task numbers start again at 1, this does not. */
+  uid: string
+  /** Which verifier ran: a short hash of the project and script path. A task keeps the verifier it started with. */
+  verifier: string
+  /** The check passed AND completion was allowed (a summary was given). Only this ends a run of attempts. */
+  complete: boolean
   /** The script's file name only; the path is not kept. */
   name: string
   /** First 8 hex of the sha-256 of the script as run; null when it could not be read. */
@@ -98,22 +107,42 @@ export type CheckRecord = {
   hasSummary: boolean
 }
 
+/** The task's identity across resets and restarts. Its number starts again at 1 after a reset; its start time does not repeat. */
+export const uidOf = (task: Task): string => `${task.id}@${task.startedAt}`
+
 /** Whether this task changed anything a check could be about. */
 export const hasChanges = (task: Task | null): boolean => task !== null && (task.edited === true || task.files.length > 0 || task.kind === 'coding')
 
-/** The attempts already spent on this task: failing records since its last pass. */
-export const attemptsOf = (checks: readonly CheckRecord[], taskId: number): number => {
+/**
+ * The attempts already spent on this task: every check since the last one that completed it. A passing check that
+ * still left completion refused (no summary) is an attempt like any other; it never resets the budget.
+ */
+export const attemptsOf = (checks: readonly CheckRecord[], uid: string): number => {
   let n = 0
   for (const c of [...checks].reverse()) {
-    if (c.taskId !== taskId) continue
-    if (c.outcome === 'pass') break
+    if (c.uid !== uid) continue
+    if (c.complete) break
     n++
   }
 
   return n
 }
 
-export const hasChangeSummary = (message: string | undefined): boolean => (message ?? '').trim().length >= MIN_SUMMARY_CHARS
+/** A closing message of useful length. When the host did not give the message at all, nothing is known and nothing is required. */
+export const hasChangeSummary = (message: string | undefined): boolean => message === undefined || message.trim().length >= MIN_SUMMARY_CHARS
+
+const isText = (x: unknown, max: number): x is string => typeof x === 'string' && x.length <= max
+/** Whether a stored record has exactly the shape this build writes. A malformed one is dropped, never believed. */
+export const isCheckRecord = (x: unknown): x is CheckRecord => {
+  if (x === null || typeof x !== 'object') return false
+  const r = x as Record<string, unknown>
+
+  return Number.isSafeInteger(r['taskId']) && isText(r['uid'], 64) && isText(r['verifier'], 32) && typeof r['complete'] === 'boolean' && isText(r['name'], 160)
+    && (r['sha'] === null || isText(r['sha'], 16)) && typeof r['at'] === 'number' && OUTCOMES.includes(r['outcome'] as Outcome)
+    && (r['exit'] === null || Number.isSafeInteger(r['exit'])) && (r['ms'] === null || typeof r['ms'] === 'number') && (r['tree'] === null || isText(r['tree'], 96))
+    && isText(r['summary'], 700) && typeof r['hasSummary'] === 'boolean'
+}
+export const validChecks = (x: unknown): CheckRecord[] => (Array.isArray(x) ? x.filter(isCheckRecord).slice(-24) : [])
 
 /** The tail of a check's output, one line, bounded; the caller redacts secrets first. */
 export const outputTail = (output: string): string => {
@@ -161,8 +190,12 @@ export const verdictOf = (v: VerdictInput): Verdict => {
 
       return { action: 'allow', state: 'BLOCKED', reason: `${run.outcome === 'timeout' ? 'check timed out' : `check exit ${run.exit}`} after ${cfg.maxAttempts} attempt${cfg.maxAttempts === 1 ? '' : 's'}${run.summary === '' ? '' : `: ${run.summary}`}` }
     }
+    case 'unstable':
+      return left > 0
+        ? { action: 'block', attempt, reason: `Files changed while the verification check "${run.name}" ran, so its result says nothing about the final state. Make your changes first, then finish again so it can run on a still tree. (attempt ${attempt} of ${cfg.maxAttempts})` }
+        : { action: 'allow', state: 'BLOCKED', reason: `files kept changing while the check ran, after ${cfg.maxAttempts} attempt${cfg.maxAttempts === 1 ? '' : 's'}` }
     case 'untrusted':
-      return { action: 'allow', state: 'BLOCKED', reason: 'the check script changed during this session or does not match its pin, so its result is not trusted; the owner must review and re-trust it' }
+      return { action: 'allow', state: 'BLOCKED', reason: `the check script is not trusted${run.summary === '' ? '' : ` (${run.summary})`}; a person must review it and run /cockpit guard trust` }
     case 'missing':
       return { action: 'allow', state: 'BLOCKED', reason: 'the configured check script is missing or not runnable' }
     default:
