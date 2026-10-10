@@ -17,7 +17,7 @@ import type { SubagentTier, Profile } from './model-policy'
 import { discoveryRows, guidanceFor, markGuided, needsAlignment, unpin, withDiscovery } from './discovery'
 import { addConsult, advanceReview, briefOf, clearReview, consultVerdict, factsOf, hasReturned, isCandidate, isGround, promptOrigin, releaseDecision, revalidateRelease, withRelease, mandatoryGrounds, packetOf, promptGroundsOf, readScopeOf, requireReview, CONSULT_EFFORT, GROUNDS } from './consult'
 import type { Consultation } from './consult'
-import type { ReleaseOutcome, ReleaseRecord } from '../types'
+import type { ReleaseOutcome, ReleaseRecord, AlertRecord } from '../types'
 import { addDecision, adjudicate, adviceLine, answerOf, callsFor, carriesCredential, decisionOf, deterministicRoute, operatorNotice, readAnswers, routerArgv, routerLabel, routerLine, routerModeOf, routerStateOf, switchRouter, withDecision, AVAILABILITY_STATE, CALL_TIMEOUT_MS, EMPTY_ROUTER, PROVIDER, ROUTER_MODES } from './router'
 import type { ActiveMode, RouterAnswer, RouterMode, RouterPolicy, RouterState } from './router'
 import {
@@ -2349,12 +2349,13 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
       await update($, guardAtom, old => ({ ...old, pending: true }))
       let outcome: 'sent' | 'failed' | 'refused' = 'failed'
       let channel: string | null = null
+      let why: AlertRecord['why']
       try {
         const r = await $.ui.notify(alertMessage(one.kind, task.id), { title: 'Cobalt Guard' })
-        if (r.isSent) { outcome = 'sent'; channel = r.channel } else outcome = r.reason === 'refused' ? 'refused' : 'failed'
-      } catch { outcome = 'failed' }
+        if (r.isSent) { outcome = 'sent'; channel = r.channel } else { outcome = r.reason === 'refused' ? 'refused' : 'failed'; why = r.reason as AlertRecord['why'] }
+      } catch { outcome = 'failed'; why = 'error' }
       await update($, guardAtom, old => ({ ...old, pending: false, sentAt: now, count: old.count + 1 }))
-      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome, attempts: 1, channel }) }))
+      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome, attempts: 1, channel, ...(why === undefined ? {} : { why }) }) }))
     }
   } catch { /* an alert that cannot be raised never fails the work */ } finally {
     guarding = false

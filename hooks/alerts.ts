@@ -34,7 +34,7 @@ export const guardConfigOf = (options: Readonly<Record<string, unknown>>): Guard
 })
 
 /** One alert as the Run Ledger keeps it: closed vocabulary and numbers only. */
-export type AlertRecord = { key: string; kind: AlertKind; taskId: number; at: number; outcome: AlertOutcome; attempts: number; channel: string | null; acked?: true }
+export type AlertRecord = { key: string; kind: AlertKind; taskId: number; at: number; outcome: AlertOutcome; attempts: number; channel: string | null; why?: 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error'; acked?: true }
 
 export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean }
 export const EMPTY_GUARD: GuardState = { sentAt: null, count: 0, silenced: [], all: false, pending: false }
@@ -112,7 +112,7 @@ export const guardText = (cfg: GuardConfig, state: GuardState, kept: readonly Al
     lines.push(`Armed · ${state.count} of ${cfg.maxPerSession} alerts used this session · at most one every ${Math.round(cfg.cooldownMs / 1000)}s · same condition never twice.`)
     lines.push('Delivery: your terminal notification channel, through the host. SENT means the host wrote it to your terminal; it cannot confirm that you saw it. No webhook, email or push exists in this version.')
   }
-  for (const a of kept.slice(-5)) lines.push(`  ${a.kind} · task ${a.taskId} · ${a.outcome}${a.channel === null ? '' : ` via ${a.channel}`}${a.acked === true ? ' · acknowledged' : ''}`)
+  for (const a of kept.slice(-5)) lines.push(`  ${a.kind} · task ${a.taskId} · ${a.outcome}${a.channel === null ? (a.why === undefined ? '' : ` (${a.why})`) : ` via ${a.channel}`}${a.acked === true ? ' · acknowledged' : ''}`)
   lines.push('An alert never clears a review hold, approves a release or changes a verdict. /cockpit guard ack acknowledges; /cockpit guard silence mutes this session.')
 
   return lines.join('\n')
