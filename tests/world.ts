@@ -501,7 +501,25 @@ export const rowsOf = async (ui: { drawn: () => Promise<unknown> }): Promise<str
   const tree = (await ui.drawn()) as Exclude<Node, string>
   const children = tree.children ?? (tree.props?.['children'] as unknown[] | undefined) ?? []
 
-  return (Array.isArray(children) ? children : [children]).filter(child => !isEngineSentinel(child)).map(textOfNode)
+  return (Array.isArray(children) ? children : [children]).filter(child => !isEngineSentinel(child) && !isFlowRow(child)).map(textOfNode)
+}
+
+/** The Neural Flow row, a Raster on a terminal and a text row elsewhere: read apart from the rows the older tests were written about. */
+const isFlowRow = (node: unknown): boolean => {
+  if (typeof node !== 'object' || node === null) return false
+  const element = node as { key?: unknown; props?: Record<string, unknown> }
+  if (['neural-flow', 'flow-text'].includes(String(element.props?.['key'] ?? element.key))) return true
+
+  // a row of text carries no key the mock keeps: it is known by what it draws, a node glyph first and the braille edge after it
+  const text = textOfNode(node)
+
+  return /^[●○◉◎✕⊘] /.test(text) && /[⠶⠤]/.test(text)
+}
+export const flowRowsOf = async (ui: { drawn: () => Promise<unknown> }): Promise<string[]> => {
+  const tree = (await ui.drawn()) as Exclude<Node, string>
+  const children = tree.children ?? (tree.props?.['children'] as unknown[] | undefined) ?? []
+
+  return (Array.isArray(children) ? children : [children]).filter(isFlowRow).map(textOfNode)
 }
 
 /**

@@ -1,12 +1,14 @@
 // COBALT NEURAL FLOW: states come from real task state, motion only from real activity.
 
+import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import { align, discover } from '../hooks/discovery'
 import { GLYPH, NODES, flowCells, flowGrid, flowOf, flowRow, flowText, layoutOf } from '../hooks/flow'
 import type { FlowInput } from '../hooks/flow'
 import { applyAction, newTask, settle } from '../hooks/model'
 import type { Task } from '../types'
-import { command, planAndComplete, prompt, start, world } from './world'
+import { command, flowRowsOf, mountHud, planAndComplete, prompt, start, world } from './world'
 
 const NOW = 5_000
 const quiet: FlowInput = { task: null, isWorking: false, agents: [], mainTier: null }
@@ -17,6 +19,13 @@ const planned = (done = 0): Task => {
   for (let n = 1; n <= done; n++) t = settle(applyAction(t, { action: 'complete', milestone: `m${n}` } as never, 2, null).task).task
 
   return t
+}
+/** Every milestone done and every gate settled, in the order the task model allows: the checks first, then the last milestone. */
+const verified = (): Task => {
+  let t = planned(4)
+  for (const gate of ['CODE', 'TEST', 'TYPE', 'BUILD', 'SECURITY', 'GIT']) t = settle(applyAction(t, { action: 'gate', gate, state: 'na', evidence: 'fixture' } as never, 4, null).task).task
+
+  return settle(applyAction(t, { action: 'complete', milestone: 'm5' } as never, 5, null).task).task
 }
 const text = (i: Partial<FlowInput>, width = 90, motion = false) => flowCells(flowOf({ ...quiet, ...i }), width, { now: NOW, motion })!.map(c => c.ch).join('')
 
@@ -51,21 +60,19 @@ describe('states are derived from real state', () => {
     const t = planned(5)
     expect(states({ task: t }).slice(3)).toEqual(['verified', 'active', 'pending'])
   })
-  test('a mandatory review still owed blocks DONE even when everything else is verified', () => {
-    let t = planned(5)
-    for (const gate of ['CODE', 'TEST', 'TYPE', 'BUILD', 'SECURITY', 'GIT']) t = settle(applyAction(t, { action: 'gate', gate, state: 'na', evidence: 'fixture' } as never, 4, null).task).task
-    const owed = { ...t, review: { state: 'required', grounds: ['release'], ids: [] } as never }
-    expect(states({ task: owed })[4]).toBe('verified')
-    expect(states({ task: owed })[5]).toBe('blocked')
+  test('everything verified reads DONE; a mandatory review still owed blocks it instead', () => {
+    const t = verified()
+    expect(t.status).toBe('done')
+    expect(states({ task: t })).toEqual(Array(6).fill('verified'))
+    const owed = { ...t, status: 'unverified' as const, percent: 90, review: { state: 'required', grounds: ['release'], ids: [] } as never }
+    expect(states({ task: owed }).slice(4)).toEqual(['verified', 'blocked'])
   })
-  test('stale evidence regresses the flow: passed checks taken back reopen VERIFY and DONE', () => {
-    let t = planned(5)
-    for (const gate of ['CODE', 'TEST', 'TYPE', 'BUILD', 'SECURITY', 'GIT']) t = settle(applyAction(t, { action: 'gate', gate, state: 'na', evidence: 'fixture' } as never, 4, null).task).task
-    const before = states({ task: t })
-    t = settle(applyAction(t, { action: 'gate', gate: 'TEST', state: 'pending', evidence: 'files changed' } as never, 5, null).task).task
+  test('stale evidence regresses the flow: a check taken back reopens VERIFY and DONE', () => {
+    let t = verified()
+    expect(states({ task: t })[5]).toBe('verified')
+    t = settle(applyAction(t, { action: 'gate', gate: 'TEST', state: 'pending', evidence: 'files changed' } as never, 6, null).task).task
     const after = states({ task: t })
-    expect(before[4]).not.toBe('active')
-    expect(after[4]).toBe('active')
+    expect(after[4]).not.toBe('verified')
     expect(after[5]).toBe('pending')
   })
   test('a blocked task marks the stage it is stopping', () => {
@@ -172,5 +179,58 @@ describe('through the host', () => {
     await prompt($, 'x'); await planAndComplete($, 2)
     const out = String((await command($, 'flow')).text)
     expect(out).toContain('FLOW  ● INPUT → ● DISCOVERY → ● ROUTING → ◉ WORKERS')
+  })
+})
+
+describe('in the HUD', () => {
+  const working = async ($: Engine, on: On) => {
+    const w = world(on); await start($); await prompt($, 'Add rate limiting'); await planAndComplete($, 1)
+    await $.turn.start({ text: 'x', turnId: 't1' })
+
+    return w
+  }
+  test('a terminal gets a Raster flow row, drawn from the real task, below the established rows', async ($, on) => {
+    await working($, on)
+    const hud = await mountHud($, 'terminal', 120, true)
+    const flow = await flowRowsOf(hud)
+    expect(flow).toHaveLength(1)
+    expect(flow[0]).toContain('WORKERS')
+    expect(flow[0]).toContain('INPUT')
+  })
+  test('a desktop gets the same reading as text', async ($, on) => {
+    await working($, on)
+    const flow = await flowRowsOf(await mountHud($, 'desktop', 120, true))
+    expect(flow[0]).toContain('DISCOVERY')
+  })
+  test('no task, no flow; and a width that cannot carry it draws none', async ($, on) => {
+    world(on); await start($)
+    expect(await flowRowsOf(await mountHud($, 'terminal', 120, true))).toHaveLength(0)
+    await prompt($, 'x'); await planAndComplete($, 1)
+    expect(await flowRowsOf(await mountHud($, 'terminal', 18, true))).toHaveLength(0)
+    expect((await flowRowsOf(await mountHud($, 'terminal', 60, true)))[0]).toContain('WRK')
+  })
+  test('flow=false removes it', { options: { flow: false } }, async ($, on) => {
+    await working($, on)
+    expect(await flowRowsOf(await mountHud($, 'terminal', 120, true))).toHaveLength(0)
+  })
+  test('the marker is drawn while work is live and not when it is idle', async ($, on) => {
+    await working($, on)
+    expect((await flowRowsOf(await mountHud($, 'terminal', 120, true)))[0]).toContain('◆')
+    expect((await flowRowsOf(await mountHud($, 'terminal', 120, false)))[0]).not.toContain('◆')
+  })
+  test('animation animates only while live, at most once a frame, and stops with the turn', async ($, on) => {
+    const w = await working($, on)
+    await mountHud($, 'terminal', 120, true)
+    await w.clock.advance(1000)
+    const live = w.blits
+    expect(live).toBeGreaterThan(0)
+    expect(live).toBeLessThanOrEqual(2 * Math.ceil(1000 / 60) + 2)
+  })
+  test('reduced motion rests the marker: no flow blits, still drawn once', { options: { reducedMotion: true } }, async ($, on) => {
+    const w = await working($, on)
+    const flow = await flowRowsOf(await mountHud($, 'terminal', 120, true))
+    expect(flow[0]).toContain('◆')
+    await w.clock.advance(2000)
+    expect(w.blits).toBe(0)
   })
 })

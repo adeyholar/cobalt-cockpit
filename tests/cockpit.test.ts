@@ -680,7 +680,8 @@ describe('rendering', () => {
     await mountHud($, 'terminal', 120, true)
     await w.clock.advance(1100)
     expect(w.blits).toBeGreaterThanOrEqual(6)
-    expect(w.blits).toBeLessThanOrEqual(19)
+    // the track and the Neural Flow's marker are the two animated layers; each blits at most once a frame
+    expect(w.blits).toBeLessThanOrEqual(38)
 
     await mainTurnEnds($)
     const atEnd = w.blits

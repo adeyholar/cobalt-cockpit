@@ -992,7 +992,8 @@ const cacheFacts = async ($: EngineInterface): Promise<CacheReading> => {
 const flowTierOf = (model: string | null | undefined): FlowTier | null => { const t = modelTier(model); return t === 'OTHER' ? null : t }
 const flowInputOf = (input: HudInput, agents: readonly AgentStrip[], isWorking: boolean): FlowInput => ({
   task: input.task,
-  isWorking,
+  // the same two witnesses as the HUD's own state: the engine says a turn runs and Cockpit saw the activity
+  isWorking: isWorking && input.activity.isWorking,
   agents: agents.map(a => ({ tier: flowTierOf(a.model), running: a.state === 'running' })),
   mainTier: flowTierOf(input.meter.model),
 })
