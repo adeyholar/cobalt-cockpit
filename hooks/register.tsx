@@ -2440,6 +2440,7 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
   if (lastRun !== undefined && (lastRun.outcome === 'error' || lastRun.outcome === 'untrusted')) return null
   const run = await runStopCheck($, task, hasSummary)
   await update($, stopAtom, old => boundedChecks(old, run))
+  await update($, ledgerAtom, old => ({ ...old, stopChecks: boundedChecks(old.stopChecks ?? [], run) }))
   const verdict = verdictOf({ cfg: stopCfg, spent, run, hasSummary })
   const detail = run.exit === null ? run.outcome : `${run.outcome} (exit ${run.exit})`
   await change($, (t, now) => {
