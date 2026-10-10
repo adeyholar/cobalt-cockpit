@@ -2452,10 +2452,17 @@ const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean,
   if (first !== undefined && first.verifier !== trust.verifier) return rec({ outcome: 'untrusted', sha: short, summary: 'another verifier than the one this task started with' })
   const cwd = await $.session.cwd().catch(() => undefined)
   try {
-    const before = await treeStamp($)
-    const r = await $.process.run([script], { timeoutMs: stopCfg.timeoutMs, ...(cwd === undefined ? {} : { cwd }) })
+    // A check that leaves artifacts behind (a cache directory, build output) moves the tree itself. It is run once more from
+    // the tree it left, and only a tree that still moves is unstable. At most two runs; a check cannot loop here.
+    let before = await treeStamp($)
+    let r = await $.process.run([script], { timeoutMs: stopCfg.timeoutMs, ...(cwd === undefined ? {} : { cwd }) })
+    let after = await treeStamp($)
+    if (before !== null && after !== null && before !== after) {
+      before = after
+      r = await $.process.run([script], { timeoutMs: stopCfg.timeoutMs, ...(cwd === undefined ? {} : { cwd }) })
+      after = await treeStamp($)
+    }
     const ms = (await $.clock.now()) - at
-    const after = await treeStamp($)
     const summary = outputTail(redactSecrets(`${r.stderr}\n${r.stdout}`))
     // two fingerprints are not an atomic snapshot, but a tree seen to move while the check ran is not what was checked
     if (before !== null && after !== null && before !== after) return rec({ outcome: 'unstable', sha: short, exit: r.exitCode, ms, tree: after, summary })

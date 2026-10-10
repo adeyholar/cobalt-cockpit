@@ -245,10 +245,18 @@ describe('script trust', () => {
 describe('completion integrity', () => {
   test('files changing while the check runs are not verification', guard(), async ($, on) => {
     const { w, held } = await armed($, on)
-    w.duringRun = argv => { if (argv[0] === SCRIPT) w.tree['src/new.ts'] = 'changed during the check' }
+    let n = 0
+    w.duringRun = argv => { if (argv[0] === SCRIPT) w.tree['src/new.ts'] = `changed during the check ${++n}` }
     const out = await stop($)
     expect(out.block).toContain('Files changed while')
     expect((held.get('task')!.value as any).gates.TEST.state).not.toBe('pass')
+  })
+  test('a check that only leaves artifacts behind is run once more and then counts', guard(), async ($, on) => {
+    const { w } = await armed($, on)
+    let first = true
+    w.duringRun = argv => { if (argv[0] === SCRIPT && first) { first = false; w.tree['__pycache__/x.pyc'] = 'artifact' } }
+    expect((await stop($)).block).toBeUndefined()
+    expect(runs(w)).toBe(2)
   })
   test('a held task cannot be released or re-passed through the progress tool', guard({ stopMaxContinuations: 1 }), async ($, on) => {
     const { held } = await armed($, on, 'fails')
