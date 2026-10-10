@@ -126,6 +126,8 @@ import type { CacheReading } from './cache'
 import { doctorText } from './doctor'
 import type { DoctorFacts, Install } from './doctor'
 import { dirFor, filesFor, gather, health, healthOf, limits, newSid, prepared, queue as teleQueue, segment, setEnabled as setTelemetry } from './telemetry-store'
+import { flowGrid, flowOf, flowRow, flowText, layoutOf as flowLayout } from './flow'
+import type { FlowInput, FlowTier } from './flow'
 import { agentRole, cleanEvent, encode, expiredFiles, isTelemetryFile, modelTier, monthKey, parseWindow, segmentName, shedFiles, statsCsv, statsJson, statsText, TOTAL_CAP_BYTES } from './telemetry'
 import type { HudInput, Row, Segment } from './view'
 
@@ -141,6 +143,7 @@ const GIT_TIMEOUT_MS = 6_000
 const TRACK_KEY = 'progress-track'
 /** The Activity Field's Raster, blitted from the same loop as the track. */
 const FIELD_KEY = 'activity-field'
+const FLOW_KEY = 'neural-flow'
 const GUARD_HEADER = 'Blast radius'
 const PROCEED = 'Proceed'
 const CANCEL = 'Cancel'
@@ -685,6 +688,7 @@ const HELP =
   '/cockpit discovery  show the discovery level, unknowns, decisions and goal check; pin light | standard | deep, or auto\n' +
   '/cockpit router     show this session\'s router, or switch it: off, nobodywho, jev (this session only)\n' +
   '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
+  '/cockpit flow      the Neural Flow in words: which of input, discovery, routing, workers, verify and done are verified\n' +
   '/cockpit doctor    read-only checks: installs, profile, telemetry storage, host and prompt-cache policy\n' +
   '/cockpit sound      play both cues'
 
@@ -741,6 +745,7 @@ const styleOf = (segment: Segment) => ({
 
 type Config = {
   hasHud: boolean
+  hasFlow: boolean
   isAnimated: boolean
   hasSounds: boolean
   hasGuard: boolean
@@ -793,7 +798,7 @@ const capabilityOf = (model: string, known: Readonly<Record<string, readonly Eff
 
 // Set by register(); the rest is rebuilt as events arrive after a reload.
 // Nothing a drawing depends on lives here: that is all in `$.state`.
-let config: Config = { hasHud: true, isAnimated: true, hasSounds: true, hasGuard: true, hasAttributionGuard: true, volume: 0.6, hasLocalControl: true, ledgerPath: '', blocksFable: false, isStrict: false, hasOrchestration: false, maxSubagents: 16, maxSonnet: 'AUTO', maxHaiku: 'AUTO', isSubscriptionOnly: false, reasoningMode: 'AUTO', maxEffort: DEFAULT_CEILING, modelEffort: {}, profile: DEFAULT_PROFILE, routerConfigDir: '' }
+let config: Config = { hasHud: true, hasFlow: true, isAnimated: true, hasSounds: true, hasGuard: true, hasAttributionGuard: true, volume: 0.6, hasLocalControl: true, ledgerPath: '', blocksFable: false, isStrict: false, hasOrchestration: false, maxSubagents: 16, maxSonnet: 'AUTO', maxHaiku: 'AUTO', isSubscriptionOnly: false, reasoningMode: 'AUTO', maxEffort: DEFAULT_CEILING, modelEffort: {}, profile: DEFAULT_PROFILE, routerConfigDir: '' }
 let isSupported = true
 /** True once the engine is known to take `effort` on an Agent call. */
 let hasNativeEffort = false
@@ -817,7 +822,7 @@ let effortCommand: string | null = null
 let hostSignalsAt: { turnId: string; signals: HostEffortSignals } | null = null
 let ticker: Timer | null = null
 let gitTimer: Timer | null = null
-type MountedBand = { requestId: string; width: number; input: HudInput; visual: Visual; agents: AgentStrip[]; glide: Glide; motion: boolean; lastCells: Map<string, string>; waiting: boolean; field: { tape: Tape; state: string; rows: number; width: number; graph: Graph | null } | null }
+type MountedBand = { requestId: string; width: number; input: HudInput; visual: Visual; agents: AgentStrip[]; glide: Glide; motion: boolean; lastCells: Map<string, string>; waiting: boolean; field: { tape: Tape; state: string; rows: number; width: number; graph: Graph | null } | null; flow: { input: FlowInput; width: number } | null }
 let band: MountedBand | null = null
 let head: { id: string; glide: Glide } | null = null
 let isLight = false
@@ -984,6 +989,13 @@ const cacheFacts = async ($: EngineInterface): Promise<CacheReading> => {
     enableOneHour: await $.env.get('ENABLE_PROMPT_CACHING_1H').catch(() => undefined),
   })
 }
+const flowTierOf = (model: string | null | undefined): FlowTier | null => { const t = modelTier(model); return t === 'OTHER' ? null : t }
+const flowInputOf = (input: HudInput, agents: readonly AgentStrip[], isWorking: boolean): FlowInput => ({
+  task: input.task,
+  isWorking,
+  agents: agents.map(a => ({ tier: flowTierOf(a.model), running: a.state === 'running' })),
+  mainTier: flowTierOf(input.meter.model),
+})
 const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
   const home = (await $.env.get('HOME').catch(() => undefined)) ?? null
   const version = await $.session.version().catch(() => null)
@@ -1148,7 +1160,7 @@ const stopTicker = () => {
 
 /** Whether anything on the band is genuinely animating right now. */
 const bandBusy = (mounted: MountedBand): boolean =>
-  mounted.visual.active || mounted.agents.some(a => a.state === 'running') || mounted.field !== null
+  mounted.visual.active || mounted.agents.some(a => a.state === 'running') || mounted.field !== null || (mounted.flow !== null && flowOf(mounted.flow.input).live)
 
 const startTicker = ($: EngineInterface) => {
   if (!config.isAnimated || reducedMotion || ticker !== null || band === null || !band.motion) return
@@ -1181,6 +1193,12 @@ const startTicker = ($: EngineInterface) => {
     // field is repainted, because the creature moves through the tape rather
     // than sitting on it. The per-key diff still suppresses the blit whenever a
     // frame is byte-identical, so a settled crawler costs nothing at all.
+    // The Neural Flow: the marker moves only while the flow's input says work is live; the per-key diff drops identical frames.
+    if (mounted.flow !== null) {
+      const f = flowOf(mounted.flow.input)
+      const grid = f.live ? flowGrid(f, mounted.flow.width, { now, motion: true, light: isLight }) : null
+      if (grid !== null) await blit(FLOW_KEY, grid.encode(), 1, mounted.flow.width)
+    }
     if (mounted.field !== null && mounted.field.tape.anchors.length > 0) {
       fieldWalker = advance(fieldWalker, mounted.field.tape, mounted.field.state, { now, reducedMotion: false })
       await blit(FIELD_KEY, fieldGrid(mounted.field.tape, fieldWalker, mounted.field.state, mounted.field.width, mounted.field.rows).encode(), mounted.field.rows, mounted.field.width)
@@ -2274,6 +2292,7 @@ export const register: Register = (on, options) => {
   const isLed = profile === 'SONNET_LED'
   config = {
     hasHud: options['hud'] !== false,
+    hasFlow: options['flow'] !== false,
     isAnimated: options['animation'] !== false,
     hasSounds: options['sounds'] !== false,
     hasGuard: options['blastRadiusGuard'] !== false,
@@ -2327,7 +2346,7 @@ export const register: Register = (on, options) => {
       $.command.register({
         name: 'cockpit',
         description: 'Mission Control: task progress, milestones, verification gates, git and context',
-        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|doctor|sound]',
+        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|flow|doctor|sound]',
         immediate: true,
       }),
     )
@@ -3136,6 +3155,13 @@ export const register: Register = (on, options) => {
 
         return { text: [statsText(stats), note, healthLine()].filter(Boolean).join('\n') }
       }
+      case 'flow': {
+        const task = await read($, taskAtom)
+        const session = await read($, visualAtom)
+        const input = await hudInput($, (await read($, activityAtom)).isWorking)
+
+        return { text: flowText(flowOf(flowInputOf({ ...input, task }, session.agents, input.isWorking))) }
+      }
       case 'doctor':
         return { text: doctorText(await doctorFacts($)) }
       case 'version':
@@ -3218,7 +3244,11 @@ export const register: Register = (on, options) => {
     const t = $.ui.resolve(e)
     const Raster = 'Raster' in t ? t.Raster : null
     const Svg = 'Svg' in t ? t.Svg : null
-    const room = Math.max(0, e.props.maxRows - 1 - (layout.columns >= 44 ? 1 : 0))
+    // The Neural Flow takes one row, paid for out of the strips' rows like the orchestration line; it is not drawn when the band is short.
+    const flowInput = flowInputOf(input, session.agents, e.props.isWorking)
+    const flowWidth = e.props.bodyColumns
+    const flowWanted = config.hasFlow && input.task !== null && e.props.maxRows >= 4 && flowLayout(flowWidth) !== null
+    const room = Math.max(0, e.props.maxRows - 1 - (layout.columns >= 44 ? 1 : 0) - (flowWanted ? 1 : 0))
     // The orchestration line sits above the strips and is paid for out of their
     // rows, so the band is never taller for it; with one row to spare the strips
     // keep it and the line is left out.
@@ -3299,6 +3329,12 @@ export const register: Register = (on, options) => {
         : Svg
           ? <Svg key={FIELD_KEY} source={fieldVector.svg} alt={fieldVector.alt} width={fieldColumns * 8} height={14} />
           : fieldText
+    const flowDraw = { now, motion, light: isLight }
+    const flowCellsNow = flowWanted ? flowGrid(flowOf(flowInput), flowWidth, flowDraw)?.encode() ?? null : null
+    const flowTextRow = flowWanted ? flowRow(flowOf(flowInput), flowWidth, flowDraw) : null
+    const flowEl = flowCellsNow !== null && e.surface === 'terminal' && Raster
+      ? <Raster key={FLOW_KEY} columns={flowWidth} rows={1} cells={flowCellsNow} />
+      : flowTextRow === null ? null : <Text key="flow-text" wrap="truncate-end">{flowTextRow.map((segment, n) => <Text key={`flow-${n}`} {...styleOf(segment)}>{segment.text}</Text>)}</Text>
     // NobodyWho, only while a real receipt is fresh. An empty list draws no row,
     // so a session with no receipts looks exactly as it always did.
     const flashRows = stripRows(await read($, flashAtom), now, layout.columns, reducedMotion)
@@ -3315,7 +3351,8 @@ export const register: Register = (on, options) => {
       // The field's own Raster is blitted from the same loop, so the crawler
       // keeps walking the tape between full redraws.
       if (field !== null) lastCells.set(FIELD_KEY, fieldCells)
-      band = { requestId: e.requestId, width: trackWidth, input, visual: v, agents: agents.shown, glide, motion, lastCells, waiting, field: field === null ? null : { tape, state: crawler.crawler.state, rows: Math.min(2, fieldRowsWanted), width: fieldColumns, graph } }
+      if (flowCellsNow !== null) lastCells.set(FLOW_KEY, flowCellsNow)
+      band = { requestId: e.requestId, width: trackWidth, input, visual: v, agents: agents.shown, glide, motion, lastCells, waiting, field: field === null ? null : { tape, state: crawler.crawler.state, rows: Math.min(2, fieldRowsWanted), width: fieldColumns, graph }, flow: flowCellsNow === null ? null : { input: flowInput, width: flowWidth } }
       rail = <Raster key={TRACK_KEY} columns={trackWidth} rows={1} cells={cells} />
       startTicker($)
       if (!v.active && !agents.shown.some(a => a.state === 'running') && field === null) stopTicker()
@@ -3363,6 +3400,7 @@ export const register: Register = (on, options) => {
               ))}
             </Text>
           ))}
+          {flowEl}
         </Box>
       )
     }
@@ -3384,6 +3422,7 @@ export const register: Register = (on, options) => {
           {layout.percentWidth > 0 ? <Text color={STATE_COLOR[v.state]}>{` ${v.percentText.slice(0, layout.percentWidth)}`}</Text> : null}
         </Box>
         {secondary && e.props.maxRows > 1 ? <Text dimColor wrap="truncate-end">{secondary}</Text> : null}
+        {flowEl}
         {startupRows.map((row, at) => (
           <Text key={`startup-${at}`} wrap="truncate-end">
             {row.map((segment, n) => (

@@ -23,6 +23,12 @@
       "description": "Draw the compact particle progress band above the prompt.",
       "default": true
     },
+    "flow": {
+      "type": "boolean",
+      "title": "Neural Flow",
+      "description": "Draw the INPUT, DISCOVERY, ROUTING, WORKERS, VERIFY, DONE flow in the HUD. Every state comes from the task's real milestones and gates and the agents the host reported; the moving marker is drawn only while work is live. Reduced motion and narrow terminals are honoured.",
+      "default": true
+    },
     "animation": {
       "type": "boolean",
       "title": "Animate progress particles",
