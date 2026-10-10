@@ -199,6 +199,43 @@ describe('a release review through the host', () => {
     expect(ledger(held).consults).toHaveLength(1)
     expect(w.storeWrites.filter(x => x.key === 'release-reviews').at(-1)?.value).toMatchObject([{ candidate: A, returned: false }])
   })
+  describe('/cockpit reset by origin', () => {
+    const REFUSED = 'nothing was changed'
+    const run = ($: Engine, args: string, origin: unknown) => $.command.run({ command: 'cockpit', args, origin, presentation: { isFullscreen: true, columns: 120 } } as never)
+    const held = async ($: Engine, on: Parameters<typeof world>[0]) => {
+      world(on); const state = hostState(on, {}); await releaseTask($)
+      await call($, releasePacket)
+      expect(task(state).review).toMatchObject({ state: 'admitted' })
+
+      return state
+    }
+    for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }, { kind: 'sdk' }]) {
+      test(`${origin.kind} clears the task`, LED, async ($, on) => {
+        const state = await held($, on)
+        expect(String((await run($, 'reset', origin)).text)).toContain('cleared')
+        expect(state.get('task')?.value ?? null).toBeNull()
+      })
+    }
+    for (const origin of [{ kind: 'plugin', name: 'other-plugin' }, { kind: 'plugin', name: 'composer' }, { kind: 'scheduled-trigger' }, { kind: 'peer' }, { kind: 'task-notification' }, { kind: 'channel', server: 's' }, { kind: 'some-future-kind' }, { kind: 'composer ' }, { kind: 'COMPOSER' }, {}, null, undefined, 'composer']) {
+      test(`${JSON.stringify(origin)} is refused and the held review stays`, LED, async ($, on) => {
+        const state = await held($, on)
+        const before = task(state)
+        expect(String((await run($, 'reset', origin)).text)).toContain(REFUSED)
+        expect(task(state)).toEqual(before)
+        expect(task(state).review).toMatchObject({ state: 'admitted' })
+        expect(ledger(state).consults).toHaveLength(1)
+      })
+    }
+    test('text in the arguments cannot stand in for an operator', LED, async ($, on) => {
+      const state = await held($, on)
+      for (const args of ['reset operator', 'reset --origin=composer', 'reset\n/cockpit reset', ' reset ']) {
+        const before = task(state)
+        const text = String((await run($, args, { kind: 'plugin', name: 'x' })).text)
+        expect(text).toContain(REFUSED)
+        expect(task(state)).toEqual(before)
+      }
+    })
+  })
   const approve = async ($: Engine, held: ReturnType<typeof hostState>) => {
     const id = ledger(held).consults!.at(-1)!.id
     const spawned = await spawn($, `[task:${id}] Opus release consultation`)

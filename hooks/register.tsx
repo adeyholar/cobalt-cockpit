@@ -120,6 +120,7 @@ import {
 } from './orchestra'
 import type { OrchestraView } from './orchestra'
 import { BLOCK_DENY, BLOCK_LINE, EMPTY_POLICY, FABLE_RULE, answered, blocked, fableConfigured, fableRoute, isFable } from './policy'
+import { isPersonOrigin } from './origin'
 import type { HudInput, Row, Segment } from './view'
 
 const PANE = 'cobalt-cockpit'
@@ -2210,7 +2211,7 @@ export const register: Register = (on, options) => {
     await dismissStartup($)
     const added: string[] = []
     await quiet(async () => {
-      const isPerson = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
+      const isPerson = isPersonOrigin(e.origin)
       if (!isPerson) return
       const now = await $.clock.now()
       const sha = (await read($, gitAtom))?.sha ?? null
@@ -2861,6 +2862,9 @@ export const register: Register = (on, options) => {
       case 'status':
         return { text: summaryOf(await read($, taskAtom)) }
       case 'reset':
+        // Clearing the task also clears a held mandatory review, so it is the person's alone: a command another plugin ran,
+        // a trigger, a peer or an origin this build does not know is refused, and nothing is changed.
+        if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: the task is cleared only by a command you type; nothing was changed.' }
         await update($, taskAtom, () => null)
 
         return { text: 'Cockpit: task cleared.' }
@@ -2878,7 +2882,7 @@ export const register: Register = (on, options) => {
       }
       case 'discovery': {
         const pinned = value === '' ? undefined : value === 'auto' ? null : (['light', 'standard', 'deep'].includes(value) ? value.toUpperCase() as DiscoveryLevel : undefined)
-        const isPerson = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
+        const isPerson = isPersonOrigin(e.origin)
         if (value !== '' && pinned === undefined) return { text: `Cockpit: "${value}" is not a level. Use /cockpit discovery light | standard | deep | auto.` }
         // Only the person pins a level; a command another plugin ran may look.
         if (pinned !== undefined && !isPerson) return { text: 'Cockpit: the discovery level is pinned only by a command you type; nothing was changed.' }
@@ -2896,7 +2900,7 @@ export const register: Register = (on, options) => {
         const held = await read($, routerAtom)
         let target = value === '' ? null : routerModeOf(value)
         // Only the person switches a router: a command another plugin or a trigger ran may look, not choose.
-        const isPerson = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
+        const isPerson = isPersonOrigin(e.origin)
         if (target !== null && target !== held.mode && !isPerson) return { text: `ROUTER / ${routerLine(held)}\nCockpit: the router is switched only by a command you type; nothing was changed.` }
         if (value !== '' && target === null) return { text: `Cockpit: "${value}" is not a router. Use /cockpit router off | nobodywho | jev.\nROUTER / ${routerLine(held)}` }
         // no word given: the engine's own dialog, where there is someone to ask
