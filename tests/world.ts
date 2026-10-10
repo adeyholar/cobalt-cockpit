@@ -338,6 +338,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   on('attribution.text', ($, e) => ({ text: e.text }))
   on('command.run', () => ({ text: '' }))
   on('classic.PostToolUse', () => ({}))
+  on('classic.Stop', () => ({}))
 
   on('tool.call', async ($, e) => {
     const call = e as unknown as Record<string, unknown>

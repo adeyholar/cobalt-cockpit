@@ -456,6 +456,7 @@ declare module 'claude-code' {
       router: RouterState
       /** The operator's discovery level pin; this session only. */
       'discovery-pin': DiscoveryLevel | null
+      'stop-checks': import('../hooks/stopguard').CheckRecord[]
     }
   }
 }

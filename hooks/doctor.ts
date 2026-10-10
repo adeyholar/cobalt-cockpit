@@ -28,6 +28,20 @@ export type DoctorFacts = {
   telemetry: { enabled: boolean; dir: string | null; listed: { files: number; bytes: number } | null; writes: number; failures: number; permissions: 'unchecked' | 'verified' | 'unverified'; shed: number }
   cache: CacheReading
   agents: Agents
+  stop: StopFacts
+}
+
+export type StopFacts = {
+  policy: 'OBSERVE' | 'ENFORCE'
+  /** The script's file name only. */
+  script: string | null
+  pinned: boolean
+  timeoutSec: number
+  maxAttempts: number
+  problems: string[]
+  /** Whether the script was hashed at session start. */
+  hashed: boolean
+  last: { outcome: string; exit: number | null; at: number } | null
 }
 
 type Level = 'OK' | 'WARN' | 'INFO'
@@ -86,6 +100,15 @@ export const doctorText = (f: DoctorFacts): string => {
   const advice = recommendation(c, f.agents)
   if (advice !== null) out.push(line('INFO', advice))
   out.push(line('INFO', RESTART_TEXT))
+  out.push('', 'STOP-HOOK VERIFICATION GUARD')
+  const g = f.stop
+  if (g.policy === 'OBSERVE') out.push(line('INFO', 'OBSERVE (default): nothing runs at Stop; no check, no block, no model call'))
+  else {
+    out.push(line(g.problems.length > 0 || g.script === null ? 'WARN' : 'OK', `ENFORCE · script ${g.script ?? 'NOT SET'} · ${g.pinned ? 'sha-256 pinned' : g.hashed ? 'hashed at session start' : 'not yet hashed (untrusted until a session starts)'} · timeout ${g.timeoutSec}s · ${g.maxAttempts} attempt${g.maxAttempts === 1 ? '' : 's'} per task`))
+    for (const p of g.problems) out.push(line('WARN', p))
+    out.push(line('INFO', g.last === null ? 'no check run yet this session' : `last check: ${g.last.outcome}${g.last.exit === null ? '' : ` (exit ${g.last.exit})`}`))
+    out.push(line('INFO', 'a pass sets the TEST gate only; it does not clear a required Opus review or any release approval. Exhausted attempts, a missing, changed or refused script mark the task BLOCKED and the stop is allowed.'))
+  }
   out.push('', 'Cockpit edits no settings file and sets no variable; any cache change is yours to make.')
 
   return out.join('\n')

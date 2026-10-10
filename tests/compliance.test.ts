@@ -84,6 +84,7 @@ describe('every hook that can refuse carries a handler that refuses for it', () 
     ['config.set'],
     ['command.run', 'cockpit'],
     ['classic.PostToolUse'],
+    ['classic.Stop'],
   ]
 
   test('every hook that can answer or refuse has one', () => {

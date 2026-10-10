@@ -59,6 +59,37 @@
       "description": "Keep AI attribution out of commits, pull requests and files, and ask before CLAUDE.md or AGENTS.md is created unasked.",
       "default": true
     },
+    "stopGuard": {
+      "type": "string",
+      "title": "Stop-hook verification guard",
+      "description": "OBSERVE (default) does nothing. ENFORCE runs your verifyScript when the agent tries to finish a task that changed files, and refuses the stop (up to the attempt limit) until the script exits 0. Needs verifyScript. Cockpit makes no model call; a refused stop makes the agent continue with its normal turns.",
+      "options": ["OBSERVE", "ENFORCE"],
+      "default": "OBSERVE"
+    },
+    "verifyScript": {
+      "type": "string",
+      "title": "Verification script (absolute path)",
+      "description": "Your own check script, run directly (no shell) in the project directory. Exit 0 means verified. It is hashed when the session starts and a later change is not trusted. Leave empty to disable the guard.",
+      "default": ""
+    },
+    "verifyScriptSha256": {
+      "type": "string",
+      "title": "Pinned script sha-256 (optional)",
+      "description": "If set, the script must match this 64-hex sha-256 exactly or its result is not trusted.",
+      "default": ""
+    },
+    "verifyTimeoutSec": {
+      "type": "number",
+      "title": "Check timeout (seconds)",
+      "description": "Default 120, maximum 900. A timed-out check counts as failed.",
+      "default": 120
+    },
+    "stopMaxContinuations": {
+      "type": "number",
+      "title": "Stop-guard attempts",
+      "description": "How many refused stops one task may take before it is marked BLOCKED and the stop is allowed. Default 3, maximum 10.",
+      "default": 3
+    },
     "telemetry": {
       "type": "boolean",
       "title": "Local model telemetry",
