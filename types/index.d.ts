@@ -96,6 +96,20 @@ export type Milestone = {
  */
 export type TaskStatus = 'idle' | 'active' | 'unverified' | 'blocked' | 'done'
 
+/** One run of the owner's verification script at Stop: identity, real exit code, outcome, fingerprint and a redacted tail. */
+export type StopCheck = {
+  taskId: number
+  name: string
+  sha: string | null
+  at: number
+  outcome: 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted'
+  exit: number | null
+  ms: number | null
+  tree: string | null
+  summary: string
+  hasSummary: boolean
+}
+
 export type TaskKind = 'unplanned' | 'coding' | 'readonly'
 
 export type TouchedFile = { path: string; added: number; removed: number }
@@ -456,7 +470,8 @@ declare module 'claude-code' {
       router: RouterState
       /** The operator's discovery level pin; this session only. */
       'discovery-pin': DiscoveryLevel | null
-      'stop-checks': import('../hooks/stopguard').CheckRecord[]
+      /** The Stop guard's bounded record of check runs; this session only. */
+      'stop-checks': StopCheck[]
     }
   }
 }
