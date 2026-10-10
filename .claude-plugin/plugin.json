@@ -53,6 +53,12 @@
       "description": "Keep AI attribution out of commits, pull requests and files, and ask before CLAUDE.md or AGENTS.md is created unasked.",
       "default": true
     },
+    "telemetry": {
+      "type": "boolean",
+      "title": "Local model telemetry",
+      "description": "Keep a bounded local record of observed model requests, subagents, router calls and Opus consultations under ~/.local/state/cobalt-cockpit/telemetry/ for /cockpit stats. No prompt, code, path or secret is stored and nothing is uploaded.",
+      "default": true
+    },
     "reducedMotion": {
       "type": "boolean",
       "title": "Reduced motion",

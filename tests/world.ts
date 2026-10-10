@@ -16,6 +16,8 @@ export type World = {
   clock: MockClock
   /** Every `$.process.run`, as its argv. */
   runs: string[][]
+  /** The mkdir, chmod and rm the plugin ran on its own telemetry directory; kept apart so `runs` stays the commands a test is about. */
+  telemetryRuns: string[][]
   /** The environment each process was started with over the host's own, in the order of `runs`; undefined when none was given. */
   runEnvs: (Readonly<Record<string, string>> | undefined)[]
   /** The tool calls that reached the engine, in order: what actually ran. */
@@ -104,6 +106,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   const w: World = {
     clock: mock.clock(on, { now: 1_000_000 }),
     runs: [],
+    telemetryRuns: [],
     runEnvs: [],
     ran: [],
     asked: [],
@@ -256,7 +259,17 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     return { value: text }
   })
 
+  // writes land in the same map the reads come from, so a test reads back what the plugin kept
+  on('fs.write', ($, e) => { w.files[e.path] = e.text; return { value: undefined } })
+  on('fs.list', ($, e) => {
+    const dir = `${e.path ?? ''}/`
+    const names = Object.keys(w.files).filter(f => f.startsWith(dir) && !f.slice(dir.length).includes('/')).map(f => f.slice(dir.length))
+
+    return { value: names.map(name => ({ name, kind: 'file' as const, size: w.files[`${dir}${name}`]!.length, mtimeMs: 0, isLink: false })) }
+  })
+
   on('process.run', async ($, e) => {
+    if (['mkdir', 'chmod', 'rm'].includes(e.argv[0] ?? '') && e.argv.some(a => a.includes('/cobalt-cockpit/telemetry') || a.endsWith('/.local/state/cobalt-cockpit'))) { w.telemetryRuns.push([...e.argv]); return ran(0) }
     w.runs.push([...e.argv])
     w.runEnvs.push(e.init?.env)
     if (w.duringRun !== null) await w.duringRun(e.argv)

@@ -121,6 +121,8 @@ import {
 import type { OrchestraView } from './orchestra'
 import { BLOCK_DENY, BLOCK_LINE, EMPTY_POLICY, FABLE_RULE, answered, blocked, fableConfigured, fableRoute, isFable } from './policy'
 import { isPersonOrigin } from './origin'
+import { dirFor, filesFor, gather, health, healthOf, prepared, queue as teleQueue, secured, setEnabled as setTelemetry } from './telemetry-store'
+import { agentRole, appendBounded, cleanEvent, expiredFiles, isMonthFile, modelTier, monthFile, monthKey, parseWindow, statsCsv, statsJson, statsText } from './telemetry'
 import type { HudInput, Row, Segment } from './view'
 
 const PANE = 'cobalt-cockpit'
@@ -352,6 +354,7 @@ const serveConsultNow = async ($: EngineInterface, e: Record<string, unknown>, a
   const verdict = consultVerdict({ profile: config.hasOrchestration ? config.profile : 'OPUS_LED', ground, packet: made.packet, facts, consults, swarm: swarmState(ledger), progressTask: task?.id ?? null, candidate, history })
   if (!verdict.ok) {
     await quiet(() => mutateLedger($, l => warn(l, `${verdict.reason.split('.')[0]} (${ground})`)))
+    await tele($, { k: 'consult', ground, ev: 'refused' })
     throw new Error(verdict.reason)
   }
   // The architect reads the files the packet names (line references dropped),
@@ -368,7 +371,7 @@ const serveConsultNow = async ($: EngineInterface, e: Record<string, unknown>, a
   const nowCandidate = ground === 'release' ? (await candidateOf($)).sha : null
   const fresher = ground === 'release' ? await releaseHistory($) : []
   const again = consultVerdict({ profile: config.hasOrchestration ? config.profile : 'OPUS_LED', ground, packet: made.packet, facts, consults: fresh.consults ?? [], swarm: swarmState(fresh), progressTask: task?.id ?? null, candidate: nowCandidate, history: fresher })
-  if (!again.ok) throw new Error(again.reason)
+  if (!again.ok) { await tele($, { k: 'consult', ground, ev: 'refused' }); throw new Error(again.reason) }
   if (nowCandidate !== candidate) throw new Error('OPUS / CANDIDATE CHANGED. The commit moved or the working tree changed while the consultation was being admitted; nothing was started. Ask again for the commit you mean.')
   const counter = (list: readonly { id: string }[]) => Math.max(0, ...list.map(x => Number(/^opus-(\d+)-/.exec(x.id)?.[1] ?? 0)))
   // unique across the ledger and the store, so a restart cannot reuse the id of an attempt already spent
@@ -390,6 +393,7 @@ const serveConsultNow = async ($: EngineInterface, e: Record<string, unknown>, a
     return admitted === undefined ? held : { ...held, review: admitted }
   })
 
+  await tele($, { k: 'consult', ground, ev: 'admitted', mandatory: verdict.isMandatory })
   const scope = `Read scope: ${owned.length ? `${owned.length} named file${owned.length === 1 ? '' : 's'}` : 'the project'}${outside ? `; ${outside} location${outside === 1 ? '' : 's'} not readable (outside the project, home-relative or not a plain path)` : ''}.`
 
   return `OPUS ADMITTED / ${id} · ${ground}${verdict.isMandatory ? ' · mandatory for this task' : ''}. ${scope}\nSpawn Agent with subagent_type "cobalt-cockpit:architect", description "[task:${id}] Opus ${ground} consultation", and exactly this brief as the prompt:\n\n${briefOf(c)}\n\nIts answer is advice until you verify it. Then record swarm action "verify" for ${id}: pass when the advice checks out, fail when it does not, with evidence either way.`
@@ -463,6 +467,7 @@ const serveSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
         if (consult && judged) {
           const now = consult.ground === 'release' ? (await candidateOf($)).sha : null
           await change($, t => t.review ? { ...t, review: clearReview(t.review, consult, e['state'] as 'pass' | 'fail', outcome, now) } : t)
+          await tele($, { k: 'consult', ground: consult.ground, ev: 'verified', state: e['state'], ...(outcome === undefined ? {} : { rel: outcome }) })
         }
         // a release consultation that really returned is recorded as such where a restart cannot lose it
         await quiet(() => syncRelease($))
@@ -675,6 +680,7 @@ const HELP =
   '/cockpit version    print the loaded plugin version, its source path and the reasoning mode\n' +
   '/cockpit discovery  show the discovery level, unknowns, decisions and goal check; pin light | standard | deep, or auto\n' +
   '/cockpit router     show this session\'s router, or switch it: off, nobodywho, jev (this session only)\n' +
+  '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
   '/cockpit sound      play both cues'
 
 const isAtLeast = (version: string, floor: readonly number[]): boolean => {
@@ -687,6 +693,12 @@ const isAtLeast = (version: string, floor: readonly number[]): boolean => {
   }
 
   return true
+}
+
+const healthLine = (): string => {
+  const h = healthOf()
+
+  return !h.enabled ? 'TELEMETRY / off (telemetry=false); nothing is being recorded.' : `TELEMETRY / this session wrote ${h.writes} record${h.writes === 1 ? '' : 's'}${h.failures > 0 ? `, ${h.failures} could not be written (incomplete coverage)` : ''} · files ${h.permissions === 'restricted' ? 'restricted to you (0700 dir, 0600 files)' : h.permissions === 'unverified' ? 'permissions could not be set' : 'not yet written'}`
 }
 
 const countPatch = (patch: unknown): { added: number; removed: number } => {
@@ -918,7 +930,9 @@ const pollLedger = async ($: EngineInterface): Promise<void> => {
   ledgerCursor = { ...drained.cursor, offset: size - remainingBytes, size }
   await update($, cursorAtom, () => ledgerCursor)
   if (drained.events.length === 0) return
+  const fresh = (await read($, ledgerAtom)).receipts
   await mutateLedger($, l => receipts(l, drained.events))
+  for (const x of drained.events) if (!fresh.some(old => old.requestId === x.requestId)) await tele($, { k: 'nwho', op: x.op, tier: String(x.tier).toLowerCase(), ms: typeof x.latencyMs === 'number' ? x.latencyMs : null })
   // Only now, with real events in hand, does the session's telemetry change.
   const seen = await $.clock.now()
   await update($, controlAtom, old => fold(old, drained.events, seen))
@@ -948,6 +962,70 @@ let player: Player | null | undefined
 let fieldWalker: Walker = RESTING
 
 /** Runs bookkeeping that must never fail the event it rides on. */
+// --- Local telemetry (what is kept: telemetry.ts). The host follows `$` only into functions declared in this file. ---
+const telemetryDir = async ($: EngineInterface): Promise<string | null> =>
+  dirFor(await $.env.get('XDG_STATE_HOME').catch(() => undefined), await $.env.get('HOME').catch(() => undefined))
+
+const restrictTelemetry = async ($: EngineInterface, dir: string): Promise<void> => {
+  // the host's write has no mode argument: the directories are made 0700 first and each file is narrowed to 0600 after it exists
+  try {
+    for (const d of [dir.slice(0, dir.lastIndexOf('/')), dir]) {
+      const r = await $.process.run(['mkdir', '-p', '-m', '700', d], { timeoutMs: 5000 })
+      if (r.exitCode !== 0) throw new Error('mkdir')
+    }
+    health.permissions = 'restricted'
+  } catch { health.permissions = 'unverified' }
+}
+
+const pruneTelemetry = async ($: EngineInterface, dir: string, now: number): Promise<void> => {
+  try {
+    const names = (await $.fs.list(dir)).filter(x => x.kind === 'file' && !x.isLink).map(x => x.name)
+    // exact month-file names only, inside our own directory
+    for (const name of expiredFiles(names, now)) await $.process.run(['rm', '-f', '--', `${dir}/${name}`], { timeoutMs: 5000 })
+  } catch { /* retention is best effort */ }
+}
+
+/** Records one observed event. Never throws; writes are taken one at a time. */
+const tele = ($: EngineInterface, event: Record<string, unknown>): Promise<void> => {
+  if (!health.enabled) return Promise.resolve()
+  teleQueue.tail = teleQueue.tail.then(async () => {
+    try {
+      const dir = await telemetryDir($)
+      if (dir === null) { health.failures++; return }
+      const at = await $.clock.now()
+      const e = cleanEvent({ v: 1, t: at, ...event })
+      if (e === null) { health.failures++; return }
+      health.dir = dir
+      if (prepared.dir !== dir) { prepared.dir = dir; await restrictTelemetry($, dir); await pruneTelemetry($, dir, at) }
+      const path = `${dir}/${monthFile(monthKey(at))}`
+      // a file that cannot be read is left alone: it is never overwritten with a single line
+      const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+      await $.fs.write(path, appendBounded(text, e, at))
+      if (!secured.has(path)) {
+        secured.add(path)
+        await $.process.run(['chmod', '600', path], { timeoutMs: 5000 }).then(r => { if (r.exitCode !== 0) health.permissions = 'unverified' }, () => { health.permissions = 'unverified' })
+      }
+      health.writes++
+    } catch { health.failures++ }
+  })
+
+  return teleQueue.tail
+}
+
+/** Reads the events of a window. Unreadable files and damaged lines are counted, not thrown. */
+const readStats = async ($: EngineInterface, win: { label: string; days: number | null }) => {
+  const now = await $.clock.now()
+  const dir = await telemetryDir($)
+  const texts: (string | null)[] = []
+  if (dir !== null) {
+    let names: string[] = []
+    try { names = (await $.fs.list(dir)).filter(x => x.kind === 'file' && !x.isLink && isMonthFile(x.name)).map(x => x.name) } catch { /* no directory yet */ }
+    for (const name of filesFor(names, now, win)) texts.push(await $.fs.read(`${dir}/${name}`).catch(() => null))
+  }
+
+  return gather(texts, now, win)
+}
+
 const quiet = async (work: () => unknown): Promise<void> => {
   try {
     await work()
@@ -1366,12 +1444,12 @@ const askRouter = ($: EngineInterface, mode: ActiveMode, bodies: readonly string
  */
 const routeTask = async ($: EngineInterface, text: string, facts: Parameters<typeof deterministicRoute>[0]): Promise<string | null> => {
   const held = await read($, routerAtom)
-  if (held.mode === 'OFF') return null
+  // what happened at the start of this task is told to telemetry as it was: no router, or the rules settling it, or a router asked
+  if (held.mode === 'OFF') { await tele($, { k: 'route', mode: 'OFF', path: 'off', calls: 0, answered: 0, outcome: 'none', provider: null, ms: null }); return null }
   const mode = held.mode
   // Decided more cheaply by rule: a mandatory consultation, or a route the rules read off the task.
-  if (mandatoryGrounds(facts).length > 0) return null
   const rules = deterministicRoute(facts)
-  if (rules.route !== 'direct') return null
+  if (mandatoryGrounds(facts).length > 0 || rules.route !== 'direct') { await tele($, { k: 'route', mode, path: 'rules', calls: 0, answered: 0, outcome: 'none', provider: null, ms: null }); return null }
   const state = routerStateOf(text, mode)
   const calls = state === null ? [] : callsFor(state)
   if (state === null && !carriesCredential(text)) return null
@@ -1387,6 +1465,7 @@ const routeTask = async ($: EngineInterface, text: string, facts: Parameters<typ
   if ((await read($, routerAtom)).epoch !== held.epoch) return null
   await update($, routerAtom, s => withDecision(s, held.epoch, decision))
   await mutateLedger($, l => ({ ...l, routing: addDecision(l.routing ?? [], decision) }))
+  await tele($, { k: 'route', mode, path: calls.length > 0 ? 'router' : 'rules', calls: decision.calls, answered: decision.answered, outcome: decision.outcome, provider: decision.provider, ms: decision.wallMs })
   // An Opus reading the rules refuse goes to the person, never to the model.
   const notice = operatorNotice(mode, reading, verdict)
   if (notice !== null) await quiet(() => $.ui.toast(notice, { timeoutMs: 15_000 }))
@@ -1639,9 +1718,11 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
   let reply = ''
   let unprotected = ''
   let cues: Cue[] = []
+  let wasDone = false
   const pin = await read($, discoveryPinAtom)
   const held = await update($, taskAtom, old => {
     cues = []
+    wasDone = old?.status === 'done'
     // the passed checks must be about the tree the goal check is made for
     if (e.action === 'align' && old !== null && stamp !== null && old.gateTree !== undefined && old.gateTree !== stamp) {
       reply = 'error: ALIGNED refused: the working tree changed after the checks were last observed, so they no longer describe it. Run the checks again, record the gates, then align. Nothing was recorded'
@@ -1668,6 +1749,8 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
   })
   for (const cue of cues) void sound($, cue)
   if (held !== null) await quiet(async () => { await mutateLedger($, l => recordDiscovery(l, held, now)); await persist($) })
+  // a task is counted when it first reads DONE; an Opus consultation is one the ledger admitted for this task
+  if (held !== null && held.status === 'done' && held.percent === 100 && !wasDone) await quiet(async () => tele($, { k: 'task', opus: ((await read($, ledgerAtom)).consults ?? []).some(c => c.progressTask === held.id) }))
 
   return { result: reply }
 }
@@ -1921,6 +2004,11 @@ export const ledgerRequest = async ($: EngineInterface, e: { turnId: string; ind
     const noted = recordRequest(l, e, { ...actual, usage: actual.usage as Record<string, unknown> | null })
     return warning ? warn(noted, warning) : noted
   })
+  // one observed request, as the ledger now holds it; tokens only when the host reported both figures
+  await hush(async () => {
+    const r = (await read($, ledgerAtom)).requests.at(-1)
+    if (r !== undefined) await tele($, { k: 'req', tier: modelTier(r.model), sub: e.agentId !== undefined, ...(typeof r.input === 'number' && typeof r.output === 'number' ? { inTok: r.input, outTok: r.output } : {}) })
+  })
   await persist($)
 }
 const persist = async ($: EngineInterface): Promise<void> => {
@@ -1966,6 +2054,7 @@ export const ledgerTurnStart = async ($: EngineInterface, turnId: string) => { a
 export const ledgerTurnComplete = async ($: EngineInterface, e: { turnId: string; agentId?: string; reason: string; answer?: string }) => {
   await hush(async () => {
     const at = await $.clock.now()
+    const first = e.agentId === undefined ? undefined : !(await read($, ledgerAtom)).observedCompletions?.some(c => c.agentId === e.agentId)
     await mutateLedger($, l => {
       const ended = finishTurn(l,e,at)
       if (!e.agentId) return ended
@@ -1984,6 +2073,16 @@ export const ledgerTurnComplete = async ($: EngineInterface, e: { turnId: string
       const completed = [...(ended.observedCompletions ?? []).filter(c=>c.agentId!==e.agentId), { agentId:e.agentId,reason:e.reason,conclusion:textOf(e.answer),at,...(decision === undefined ? {} : { decision }) }].slice(-128)
       const task = swarmState(ended).tasks.find(t=>t.agentId===e.agentId)
       return { ...ended, observedCompletions:completed, swarm:task ? finishObserved(swarmState(ended),task.id,e.reason,textOf(e.answer),at) : swarmState(ended) }
+    })
+    // a subagent's first end is one observed ending, with its lifetime by the plugin's clock; a later turn of the same agent is not another
+    if (e.agentId !== undefined && first === true) await hush(async () => {
+      const l = await read($, ledgerAtom)
+      const agent = l.agents.find(a => a.id === e.agentId)
+      const started = typeof agent?.start === 'number' ? agent.start : null
+      await tele($, { k: 'agent', tier: modelTier(agent?.model), role: agentRole(agent?.role), ok: e.reason === 'answer', ms: started === null ? null : Math.max(0, at - started) })
+      const owner = swarmState(l).tasks.find(t => t.agentId === e.agentId)
+      const consult = owner?.tier === 'OPUS' ? l.consults?.find(c => c.id === owner.id) : undefined
+      if (consult !== undefined) await tele($, { k: 'consult', ground: consult.ground, ev: 'returned', mandatory: consult.isMandatory, ms: Math.max(0, at - consult.requestedAt) })
     })
     if (!e.agentId) await sample($)
     await checkpoint($)
@@ -2094,6 +2193,7 @@ export const register: Register = (on, options) => {
     routerConfigDir: typeof options['routerConfigDir'] === 'string' && /^(?:\/|~\/)[^\0\n]{1,1024}$/.test(options['routerConfigDir'].trim()) && !/(?:^|\/)\.\.(?:\/|$)/.test(options['routerConfigDir']) ? options['routerConfigDir'].trim() : '',
   }
 
+  setTelemetry(options['telemetry'] !== false)
   registerLedger(on)
 
   on('session.start', async ($, e, next) => {
@@ -2116,7 +2216,7 @@ export const register: Register = (on, options) => {
       $.command.register({
         name: 'cockpit',
         description: 'Mission Control: task progress, milestones, verification gates, git and context',
-        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|sound]',
+        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|sound]',
         immediate: true,
       }),
     )
@@ -2909,6 +3009,20 @@ export const register: Register = (on, options) => {
         if (target === held.mode) return { text: `ROUTER / ${routerLine(held)} (unchanged)` }
 
         return { text: await selectRouter($, target) }
+      }
+      case 'stats': {
+        // read-only; it makes no model call and touches nothing but the local telemetry files
+        const words = e.args.trim().toLowerCase().split(/\s+/).slice(1)
+        const format = words.includes('--json') ? 'json' : words.includes('--csv') ? 'csv' : 'text'
+        const win = parseWindow(words.find(w => !w.startsWith('--')) ?? '30d')
+        const strays = words.filter(w => w.startsWith('--') && w !== '--json' && w !== '--csv')
+        if (win === null || strays.length > 0 || (words.includes('--json') && words.includes('--csv'))) return { text: 'Cockpit: usage /cockpit stats 7d | 30d | all [--json | --csv]' }
+        const stats = await readStats($, win)
+        const note = stats.unreadableFiles > 0 ? `${stats.unreadableFiles} telemetry file${stats.unreadableFiles === 1 ? '' : 's'} could not be read; the figures are incomplete.` : ''
+        if (format === 'json') return { text: statsJson(stats) }
+        if (format === 'csv') return { text: statsCsv(stats) }
+
+        return { text: [statsText(stats), note, healthLine()].filter(Boolean).join('\n') }
       }
       case 'version':
       case 'source': {

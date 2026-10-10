@@ -5,6 +5,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { addConsult, briefOf, consultVerdict, isCandidate, problemKey, withRelease, MAX_DISCRETIONARY_LEDGER, MAX_PER_TASK, MAX_RELEASE_ATTEMPTS, MAX_RELEASE_RECORDS, MAX_RELEASE_SESSION } from '../hooks/consult'
 import type { ConsultFacts } from '../hooks/consult'
 import { emptyLedger, migrateLedger, storageLedger } from '../hooks/ledger'
+import { resetStore } from '../hooks/telemetry-store'
 import { admitTask, bindAgent, configureSwarm, emptySwarm, finishTask, submitTask, SONNET_LED_SWARM } from '../hooks/swarm'
 import type { Consultation, EvidencePacket, Ledger, ReleaseRecord, Swarm, Task } from '../types'
 import { FIVE, GATE_NAMES, hostState, progress, prompt, start, world } from './world'
@@ -198,6 +199,25 @@ describe('a release review through the host', () => {
     await $.command.run({ command: 'cockpit', args: 'reset', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
     expect(ledger(held).consults).toHaveLength(1)
     expect(w.storeWrites.filter(x => x.key === 'release-reviews').at(-1)?.value).toMatchObject([{ candidate: A, returned: false }])
+  })
+  test('a consultation is told to telemetry as it happened, without its packet or its answer', LED, async ($, on) => {
+    resetStore()
+    const w = world(on); const held = hostState(on, {}); await releaseTask($)
+    await call($, releasePacket)
+    await call($, releasePacket).catch(() => undefined)
+    const id = ledger(held).consults![0]!.id
+    const spawned = await spawn($, `[task:${id}] Opus release consultation`)
+    await finish($, spawned.agentId!)
+    await call($, { action: 'verify', task_id: id, state: 'pass', release_outcome: 'go', evidence: ['checked'] })
+    const file = Object.entries(w.files).find(([path]) => path.includes('/cobalt-cockpit/telemetry/'))![1]
+    const seen = file.split('\n').filter(Boolean).map(l => JSON.parse(l) as Record<string, unknown>)
+    const kinds = seen.filter(x => x['k'] === 'consult').map(x => x['ev'])
+    expect(kinds).toContain('admitted')
+    expect(kinds).toContain('returned')
+    expect(kinds).toContain('verified')
+    expect(seen.find(x => x['ev'] === 'verified')).toMatchObject({ ground: 'release', state: 'pass' })
+    expect(seen.some(x => x['k'] === 'agent' && x['tier'] === 'OPUS')).toBe(true)
+    expect(file).not.toMatch(/Approve the release|Plugin hooks|Broken admission|hooks\/consult/)
   })
   describe('/cockpit reset by origin', () => {
     const REFUSED = 'nothing was changed'
