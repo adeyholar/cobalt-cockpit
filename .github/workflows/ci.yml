@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Plugin tests, types, validation and audit
+    name: Plugin tests, validation and audit (TypeScript NOT verified here)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -42,7 +42,7 @@ jobs:
           curl --fail --show-error --silent --location \
             https://claude.ai/install.sh \
             --output "$RUNNER_TEMP/claude-install.sh"
-          bash "$RUNNER_TEMP/claude-install.sh" 2.1.294
+          bash "$RUNNER_TEMP/claude-install.sh" 2.1.296
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Verify Claude Code version
@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           claude --version
-          claude --version | grep -F '2.1.294'
+          claude --version | grep -F '2.1.296'
 
       - name: Strict plugin validation
         shell: bash
@@ -67,31 +67,16 @@ jobs:
           set -euo pipefail
           claude plugin test .
 
-      - name: Generate host TypeScript declarations
+      - name: TypeScript gate (not automated; separate mandatory release gate)
         shell: bash
         run: |
           set -euo pipefail
-          # Claude Code writes its own declarations when loading a plugin directory.
-          # A host-only slash command needs no model credentials or model inference.
-          if ! timeout 30s claude --plugin-dir "$PWD" -p '/cockpit version' \
-              > "$RUNNER_TEMP/cockpit-type-bootstrap.log" 2>&1; then
-            echo "::notice::Plugin bootstrap returned nonzero; checking generated declarations."
-          fi
-          if [[ ! -s .claude-plugin/types/tsconfig.json ]]; then
-            echo "::error::Claude Code did not generate plugin TypeScript declarations."
-            cat "$RUNNER_TEMP/cockpit-type-bootstrap.log"
-            exit 1
-          fi
-
-      - name: Typecheck against Claude Code declarations
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! -f .claude-plugin/types/tsconfig.json ]]; then
-            echo "::error::Claude Code has not generated .claude-plugin/types/tsconfig.json. Type checking cannot be claimed without host declarations."
-            exit 1
-          fi
-          npm exec --yes --package=typescript@5.9.3 -- tsc -p .
+          # Deliberately not a pass: nothing is type-checked in this job and it never reports TypeScript as passing.
+          echo "::warning title=TypeScript not verified by CI::Automated TypeScript verification is unavailable because Claude Code 2.1.296 does not expose a verified unattended generator for plugin host declarations. TypeScript is a separate mandatory release gate (scripts/typecheck-host.sh, attested in docs/release-checklist-v0.5.2.md)."
+          {
+            echo "### TypeScript: NOT VERIFIED by this job"
+            echo "Automated TypeScript verification is unavailable because Claude Code 2.1.296 does not expose a verified unattended generator for plugin host declarations. TypeScript is a separate mandatory release gate: run \`scripts/typecheck-host.sh\` on the exact release SHA from a host that generated its declarations through an authorized interactive development-plugin load, and record the attestation."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Public portability and privacy audit
         shell: bash

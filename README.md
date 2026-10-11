@@ -347,14 +347,14 @@ The guards are not a sandbox: they use recognizable syntax and your confirmation
 
 ## Development
 
-Load the folder once with `claude --plugin-dir /path/to/cobalt-cockpit` to generate the host API declarations. TypeScript 5.4+ is needed for type checking; Python 3 runs the portability audit. The suite's default host version is 2.1.288, and the native-effort and directory-validation paths are exercised at 2.1.294.
+Load the folder once in an interactive session (`claude --plugin-dir /path/to/cobalt-cockpit`, folder trusted by you) so the host writes its API declarations; a headless launch does not write them on Claude Code 2.1.295 or later. CI runs strict validation, the offline tests, the public audit and the whitespace check on Claude Code 2.1.296 but does **not** type-check: `scripts/typecheck-host.sh` is the mandatory manual TypeScript gate for a release ([docs/release-checklist-v0.5.2.md](docs/release-checklist-v0.5.2.md)). TypeScript 5.9.3 is the pinned compiler; Python 3 runs the portability audit. The suite's default host version is 2.1.288, and the native-effort and directory-validation paths are exercised at 2.1.294.
 
 ```sh
 claude plugin validate --strict .
 claude plugin validate --strict .claude-plugin/plugin.json
 claude plugin validate --strict agents
 claude plugin test .
-tsc -p .
+scripts/typecheck-host.sh    # needs host-generated declarations; refuses otherwise
 python3 scripts/audit-public.py
 python3 scripts/make-icon.py    # re-render the listing icon from the HUD portrait
 ```
