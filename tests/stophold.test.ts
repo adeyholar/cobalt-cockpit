@@ -2,12 +2,13 @@
 // forged blocker can lift it, and a saved task from before the field existed cannot slip out of it.
 
 import { describe, expect, test } from 'claude-code/testing'
+import { keyOf } from '../hooks/alerts'
 import { emptyLedger, migrateLedger } from '../hooks/ledger'
 import { completeMilestone, holdTask, newTask, planTask, settle } from '../hooks/model'
 import { migrateStopHold } from '../hooks/stopguard'
 import type { CheckRecord } from '../hooks/stopguard'
 import type { Task } from '../types'
-import { FIVE, bash, command, hostState, passAllGates, planAndComplete, progress, start, world } from './world'
+import { FIVE, bash, command, hostState, passAllGates, planAndComplete, progress, prompt, start, world } from './world'
 
 const SCRIPT = '/work/check.sh'
 const SUMMARY = 'Changed the parser to reject empty input and added a regression test for the empty case.'
@@ -156,7 +157,7 @@ describe('the claim of read-only work is measured', () => {
   test('a read-only plan whose tree then changes is checked', guard(), async ($, on) => {
     const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
     hostState(on, {})
-    await start($); await enroll($)
+    await prompt($, 'explain the parser'); await enroll($)
     await progress($, { action: 'plan', kind: 'readonly', milestones: [{ title: 'a' }, { title: 'b' }, { title: 'c' }] })
     await stop($)
     expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(0)
@@ -389,5 +390,353 @@ describe('migration through the host', () => {
     await command($, 'guard release')
     expect(taskOf(h).stopHold).toBeUndefined()
     expect(taskOf(h).gates.TEST.state).toBe('pending')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// H1 (opus-3-1f7a0c): "read-only" is a claim measured against where the task began, not where the claim was made.
+// ---------------------------------------------------------------------------
+
+describe('a read-only claim is measured against the start of the task', () => {
+  const finish = async ($: any) => {
+    for (const m of ['m1', 'm2', 'm3', 'm4', 'm5']) await progress($, { action: 'complete', milestone: m })
+  }
+  const ranOf = (w: any) => w.runs.filter((r: string[]) => r[0] === SCRIPT).length
+  test('H1: a file changed by an unobserved route, then a read-only plan, cannot reach DONE without the check', guard(), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+    const h = hostState(on, {})
+    await prompt($, 'look at the parser')
+    await enroll($)
+    w.tree['src/changed-by-an-mcp-tool.ts'] = 'x'                                  // no Edit, Write or Bash diff saw this
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    await finish($)
+    await stop($)
+    expect(ranOf(w)).toBeGreaterThan(0)                                              // the verifier was not skipped on the model's say-so
+    expect(taskOf(h).status).not.toBe('done')
+    expect(taskOf(h).percent).toBeLessThan(100)
+  })
+  test('H1 variant: the same through a re-plan', guard(), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+    const h = hostState(on, {})
+    await prompt($, 'look at the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    w.tree['src/changed-later.ts'] = 'x'
+    await progress($, { action: 'plan', replan: true, kind: 'readonly', milestones: FIVE })
+    await finish($); await stop($)
+    expect(ranOf(w)).toBeGreaterThan(0)
+    expect(taskOf(h).status).not.toBe('done')
+  })
+  test('genuinely read-only work stays light: nothing changed since the task began, no check runs', guard(), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+    const h = hostState(on, {})
+    await prompt($, 'explain the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    expect(taskOf(h).kind).toBe('readonly')
+    await finish($); await stop($)
+    expect(ranOf(w)).toBe(0)
+    expect(taskOf(h).status).toBe('done')
+  })
+})
+
+describe('the baseline policy', () => {
+  const plan = ($: any, extra: Record<string, unknown> = {}) => progress($, { action: 'plan', kind: 'readonly', milestones: FIVE, ...extra })
+  const finishAll = async ($: any) => { for (const m of ['m1', 'm2', 'm3', 'm4', 'm5']) await progress($, { action: 'complete', milestone: m }) }
+  const ranOf = (w: any) => w.runs.filter((r: string[]) => r[0] === SCRIPT).length
+  const fixture = (on: any, options?: unknown) => { const w = world(on); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'; return { w, h: hostState(on, {}) } }
+
+  test('an edit the hooks saw makes the read-only claim unprovable, even with an unchanged fingerprint', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await prompt($, 'explain the parser'); await enroll($)
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'e1', file_path: '/work/example/a.ts', old_string: 'a', new_string: 'b' } as never)
+    await plan($)
+    expect(taskOf(h).kind).toBe('coding')
+    await finishAll($); await stop($)
+    expect(ranOf(w)).toBeGreaterThan(0)
+  })
+  test('no baseline (no prompt began the task): the claim is not accepted and the answer says why', guard(), async ($, on) => {
+    const { h } = fixture(on)
+    await start($); await enroll($)
+    const out = await plan($)
+    expect(taskOf(h).kind).toBe('coding')
+    expect(out).toContain('Read-only was not accepted')
+  })
+  test('no git: the tree is unknown, so the claim is not accepted and the check runs', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    w.gitStatus = null
+    await prompt($, 'explain the parser'); await enroll($)
+    await plan($)
+    expect(taskOf(h).kind).toBe('coding')
+    await finishAll($); await stop($)
+    expect(ranOf(w)).toBeGreaterThan(0)
+  })
+  test('a second prompt of an unfinished task keeps the first baseline', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await prompt($, 'explain the parser'); await enroll($)
+    w.tree['src/written-meanwhile.ts'] = 'x'
+    await prompt($, 'and the lexer too')
+    await plan($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('the baseline is kept across prompts, so unchanged read-only work stays light', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await prompt($, 'explain the parser'); await enroll($)
+    await prompt($, 'and the lexer too')
+    await plan($)
+    expect(taskOf(h).kind).toBe('readonly')
+    await finishAll($); await stop($)
+    expect(ranOf(w)).toBe(0)
+  })
+  test('a read-only task whose baseline is unknown is checked at the Stop (no git, no fingerprint)', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    w.gitStatus = null
+    on('session.id', () => ({ value: 's2' }))
+    const standing = { ...newTask(1, 'goal', 100, null), kind: 'readonly' as const, startTree: null }
+    await start($); await enroll($)
+    const t = h.get('task'); h.set('task', { value: standing, version: (t?.version ?? 0) + 1 })
+    await stop($)
+    expect(ranOf(w)).toBeGreaterThan(0)
+  })
+  test('a read-only task whose fingerprint can no longer be taken is checked at the Stop', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await prompt($, 'explain the parser'); await enroll($)
+    await plan($)
+    expect(taskOf(h).kind).toBe('readonly')
+    w.gitStatus = null                                                  // git stops answering after the declaration
+    await finishAll($); await stop($)
+    expect(ranOf(w)).toBeGreaterThan(0)
+  })
+  test('a new task after a finished one has its own baseline, and read-only is light again', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await prompt($, 'explain the parser'); await enroll($)
+    await plan($); await finishAll($); await stop($)
+    expect(taskOf(h).status).toBe('done')
+    w.tree['src/work-between-tasks.ts'] = 'x'
+    await prompt($, 'explain the lexer')
+    await plan($)
+    expect(taskOf(h).kind).toBe('readonly')
+    await finishAll($); await stop($)
+    expect(ranOf(w)).toBe(0)
+  })
+  test('without the Stop guard enforcing, the claim is accepted as before', { options: { stopGuard: 'OBSERVE' } }, async ($, on) => {
+    const { h } = fixture(on)
+    await start($)
+    await plan($)
+    expect(taskOf(h).kind).toBe('readonly')
+  })
+  test('the baseline is not model-writable: it is not an input of the progress tool', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await prompt($, 'explain the parser'); await enroll($)
+    w.tree['src/x.ts'] = 'x'
+    await plan($, { startTree: 'forged', baseline: 'forged', planTree: 'forged' })
+    expect(taskOf(h).kind).toBe('coding')
+    expect(taskOf(h).startTree).not.toBe('forged')
+  })
+})
+
+describe('M1: a prompt is not a reset', () => {
+  const heldNoPlan = (on: any) => {
+    on('session.id', () => ({ value: 's1' }))
+    on('classic.SessionStart', () => ({}) as never)
+
+    return hostState(on, { task: legacy({ blocker: 'STOP GUARD: check exit 1 after 3 attempts' }), 'run-ledger': { ...emptyLedger('s1'), stopChecks: [rec({}), rec({}), rec({})] } })
+  }
+  test('a person\'s prompt on a held task with no milestones continues it: same task, same hold', guard(), async ($, on) => {
+    world(on); const h = heldNoPlan(on)
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never)
+    const before = taskOf(h)
+    expect(before.stopHold).toBeDefined()
+    await prompt($, 'something entirely different now')
+    const after = taskOf(h)
+    expect(after.id).toBe(before.id)
+    expect(after.stopHold).toEqual(before.stopHold)
+    expect(after.status).toBe('blocked')
+  })
+  test('/cockpit reset by a person abandons it: nothing passed, nothing done, and the Ledger keeps what it was', guard(), async ($, on) => {
+    world(on); const h = heldNoPlan(on)
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never)
+    await command($, 'reset')
+    expect(h.get('task')?.value ?? null).toBeNull()
+    const kept = ((h.get('run-ledger')!.value as { stopChecks: CheckRecord[] }).stopChecks).at(-1)!
+    expect(kept.name).toBe('reset')
+    expect(kept.outcome).toBe('released')
+    expect(kept.summary).toContain('abandoned')
+    await prompt($, 'a new job')
+    expect(taskOf(h).stopHold).toBeUndefined()
+    expect(taskOf(h).gates.TEST.state).not.toBe('pass')
+  })
+  test('other origins cannot reset a held task', guard(), async ($, on) => {
+    world(on); const h = heldNoPlan(on)
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never)
+    const out = String((await $.command.run({ command: 'cockpit', args: 'reset', origin: { kind: 'plugin', name: 'x' }, presentation: { isFullscreen: true, columns: 120 } } as never)).text)
+    expect(out).toContain('only by a command you type')
+    expect(taskOf(h).stopHold).toBeDefined()
+  })
+})
+
+describe('M2: a migrated hold does not stand beside DONE', () => {
+  const done = (): Task => {
+    const t = planTask(newTask(1, 'goal', 100, null), { milestones: FIVE, kind: 'coding' } as never, 101).task
+    const { guardSchema: _s, ...rest } = t
+
+    return { ...rest, blocker: 'STOP GUARD: check exit 1 after 3 attempts', status: 'done', percent: 100, phase: 'DONE', milestones: t.milestones.map(m => ({ ...m, state: 'done' as const })), gates: Object.fromEntries(Object.entries(t.gates).map(([k, g]) => [k, { ...g, state: 'pass' as const, evidence: 'ok' }])) as Task['gates'] } as Task
+  }
+  test('a task saved as DONE / 100% with an unresolved guard hold is blocked after migration, and the next prompt keeps the hold', guard(), async ($, on) => {
+    world(on)
+    on('session.id', () => ({ value: 's1' }))
+    on('classic.SessionStart', () => ({}) as never)
+    const h = hostState(on, { task: done(), 'run-ledger': { ...emptyLedger('s1'), stopChecks: [rec({}), rec({}), rec({})] } })
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never)
+    const t = taskOf(h)
+    expect(t.stopHold).toBeDefined()
+    expect(t.status).toBe('blocked')
+    expect(t.percent).toBeLessThan(100)
+    await prompt($, 'what is the state?')
+    expect(taskOf(h).stopHold).toBeDefined()
+    expect(taskOf(h).id).toBe(1)
+  })
+  test('a legitimately completed legacy task is left DONE', guard(), async ($, on) => {
+    world(on)
+    on('session.id', () => ({ value: 's1' }))
+    on('classic.SessionStart', () => ({}) as never)
+    const finished = { ...done(), blocker: null }
+    const h = hostState(on, { task: finished, 'run-ledger': { ...emptyLedger('s1'), stopChecks: [rec({ outcome: 'pass', exit: 0, complete: true })] } })
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never)
+    expect(taskOf(h).stopHold).toBeUndefined()
+    expect(taskOf(h).status).toBe('done')
+    expect(taskOf(h).percent).toBe(100)
+  })
+})
+
+describe('M3: a task carried into a session with an empty Ledger', () => {
+  const stored = (checks: CheckRecord[]) => ({ 'stop-checks': { v: 1, checks } })
+  const current = (over: Partial<Task> = {}): Task => ({ ...newTask(1, 'goal', 100, null), kind: 'coding', startTree: null, ...over })
+  const session = (on: any, task: Task) => {
+    on('session.id', () => ({ value: 's2' }))
+    on('classic.SessionStart', () => ({}) as never)
+
+    return hostState(on, { task })
+  }
+  const enrolledWorld = (on: any, checks: CheckRecord[], player: 'fails' | 'ok' = 'fails') => {
+    const w = world(on, {}, stored(checks)); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = player
+
+    return w
+  }
+  test('the spent budget is found again: no more runs, and the task is held', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = enrolledWorld(on, [rec({}), rec({}), rec({})])
+    const h = session(on, current())
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never); await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(0)
+    expect(taskOf(h).stopHold).toBeDefined()
+    expect(taskOf(h).status).not.toBe('done')
+  })
+  test('a part-spent budget goes on from where it was, not from zero', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const verifier = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`/work/example\0${SCRIPT}`)))].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 12)
+    const w = enrolledWorld(on, [rec({ verifier }), rec({ verifier })])
+    const h = session(on, current())
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never); await enroll($)
+    await stop($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+    expect(taskOf(h).stopHold).toBeDefined()
+  })
+  test('records of another task are not this task\'s budget', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = enrolledWorld(on, [rec({ uid: '9@9' }), rec({ uid: '9@9' }), rec({ uid: '9@9' })])
+    session(on, current())
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never); await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+  })
+  test('a forged or malformed durable record establishes nothing', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on, {}, { 'stop-checks': { v: 1, checks: [{ uid: '1@100', outcome: 'pass', complete: true }, 'x', null] } }); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+    session(on, current())
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never); await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+  })
+  test('a record store of an unknown version is not believed', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on, {}, { 'stop-checks': { v: 2, checks: [rec({}), rec({}), rec({})] } }); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+    session(on, current())
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never); await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+  })
+  test('the verifier a task started with is kept: another script cannot take it over', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = enrolledWorld(on, [rec({ verifier: 'someone-else' })], 'ok')
+    const h = session(on, current())
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never); await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(0)
+    expect(taskOf(h).gates.TEST.state).not.toBe('pass')
+  })
+  test('the records are written to the durable key as well as the Ledger', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 1'; w.players[SCRIPT] = 'fails'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    await stop($)
+    expect(w.storeWrites.some((k: any) => String(k?.key ?? k).includes('stop-checks'))).toBe(true)
+    expect(taskOf(h).stopHold ?? null).toBeNull()
+  })
+})
+
+describe('small fixes', () => {
+  test('L1: a release before any check does not lock the task out of its own verifier', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = hostState(on, {})
+    await start($); await planAndComplete($, 1); await enroll($)
+    await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 42 } as never)   // the guard raises: held with no record
+    expect(taskOf(h).stopHold).toBeDefined()
+    await command($, 'guard release')
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+    expect(taskOf(h).gates.TEST.state).toBe('pass')
+    expect(taskOf(h).stopHold).toBeUndefined()
+  })
+  test('L2: a task whose last check could not run is held even if the hold was missing', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on, {}, { 'stop-checks': { v: 1, checks: [rec({ outcome: 'untrusted', exit: null })] } }); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    on('session.id', () => ({ value: 's2' }))
+    on('classic.SessionStart', () => ({}) as never)
+    const h = hostState(on, { task: { ...newTask(1, 'goal', 100, null), kind: 'coding', startTree: null } })
+    await start($); await $.classic.SessionStart({ source: 'startup' } as never)
+    await stop($)
+    expect(taskOf(h).stopHold).toBeDefined()
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(0)
+  })
+  test('alert identity survives task-number reuse: two tasks numbered 1 do not share a key', () => {
+    expect(keyOf('1@100', 'security-failure', 'SECURITY')).not.toBe(keyOf('1@900', 'security-failure', 'SECURITY'))
+  })
+})
+
+describe('each protection is shown on its own, with the others out of the way', () => {
+  const asHeld = (extra: Partial<Task> = {}) => legacy({ blocker: 'STOP GUARD: check exit 1 after 3 attempts', ...extra })
+  const ledgerOf = (checks: CheckRecord[]) => ({ ...emptyLedger('s1'), stopChecks: checks })
+
+  test('a legacy hold is in force for the first Bash test result, before anything else touched the task', guard(), async ($, on) => {
+    world(on)
+    on('session.id', () => ({ value: 's1' }))
+    const h = hostState(on, { task: { ...asHeld(), kind: 'coding' }, 'run-ledger': ledgerOf([rec({}), rec({}), rec({})]) })
+    await start($)                       // no SessionStart, no progress call, no Stop: the Bash result is the first thing to arrive
+    await bash($, 'npm test')
+    expect(taskOf(h).gates.TEST.state).not.toBe('pass')
+    expect(taskOf(h).stopHold).toBeDefined()
+  })
+  test('planning again keeps TEST required on a held task whose TEST was marked not applicable', () => {
+    const base = planTask(newTask(1, 'g', 100, null), { milestones: FIVE, kind: 'coding' } as never, 101).task
+    const na = { ...base, gates: { ...base.gates, TEST: { ...base.gates.TEST, state: 'na' as const, isRequired: false, evidence: 'the model said so', source: 'model' as const, at: 102 } } }
+    const again = planTask(holdTask(na, 'x', 1, 103), { milestones: FIVE, kind: 'coding' } as never, 104).task
+    expect(again.gates.TEST.isRequired).toBe(true)
+  })
+  test('a held read-only task with an unchanged tree is still checked: the hold, not the tree, asks for it', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+    const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
+    const h = hostState(on, {})
+    await prompt($, 'explain the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    expect(taskOf(h).kind).toBe('readonly')
+    const standing = h.get('task')!
+    h.set('task', { value: { ...(standing.value as Task), stopHold: { reason: 'a hold on a task that claimed to be read-only', at: 1, refusals: 0 } }, version: standing.version + 1 })
+    expect(taskOf(h).kind).toBe('readonly')
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
+    expect(taskOf(h).stopHold).toBeUndefined()
   })
 })

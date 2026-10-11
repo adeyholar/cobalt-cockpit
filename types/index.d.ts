@@ -174,8 +174,14 @@ export type Task = {
   guardSchema?: 1
   /** The task's identity across plans (a plan continues a task; only a person's reset starts a new one). Absent: `id@startedAt`. */
   lineage?: string
-  /** The working-tree fingerprint when a read-only plan was declared, so a read-only claim can be compared with the tree. */
+  /** Superseded by `startTree`; read from tasks saved by earlier builds, never written. */
   planTree?: string
+  /**
+   * The working-tree fingerprint taken by the host when the task began (before any work of this task), carried through plans
+   * and prompts of an unfinished task. A string is a known baseline; `null` is "could not be taken" and absent is "never taken":
+   * neither can show that a tree is unchanged. A model's "read-only" is measured against this, never against the moment it is claimed.
+   */
+  startTree?: string | null
   edited?: true
   /** v0.5.1: how much discovery this task warrants and what it found. Absent on tasks stored by older versions. */
   discovery?: Discovery

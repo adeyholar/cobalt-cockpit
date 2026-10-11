@@ -197,8 +197,10 @@ export const percentOf = (task: Task): number => {
 }
 
 const statusOf = (task: Task, percent: number): TaskStatus => {
+  // a held task is blocked whether or not it has milestones: a prompt without a plan does not make it idle
+  if (isGuardHeld(task)) return 'blocked'
   if (task.milestones.length === 0) return 'idle'
-  if (isGuardHeld(task) || task.blocker !== null || task.milestones.some(one => one.state === 'blocked')) return 'blocked'
+  if ( task.blocker !== null || task.milestones.some(one => one.state === 'blocked')) return 'blocked'
   if (percent === 100) return 'done'
   const open = task.milestones.filter(one => one.state !== 'done')
   const isOnlyVerifyLeft = open.every(one => one.phase === 'VERIFY')
@@ -663,11 +665,11 @@ export const applyAction = (task: Task, given: ProgressInput, now: number, sha: 
               // A review the person or the files made necessary is not planned away:
               // it follows the work into the next plan until Opus has answered it.
               ...(task.review === undefined ? {} : { review: task.review }),
-              // A plan continues the task. Its identity, the Stop guard's hold and the tree a read-only claim was measured against
+              // A plan continues the task. Its identity, the Stop guard's hold and the baseline a read-only claim is measured against
               // go with it; only a person's reset begins a task that owes nothing.
               lineage: uidOf(task),
               ...(task.stopHold === undefined ? {} : { stopHold: task.stopHold }),
-              ...(task.planTree === undefined ? {} : { planTree: task.planTree }),
+              ...(task.startTree === undefined ? {} : { startTree: task.startTree }),
               // Edits already made are not unmade by planning again, whatever the new plan calls itself.
               ...(task.edited === true || task.files.length > 0 ? { edited: true as const } : {}),
               ...(task.promptGrounds === undefined ? {} : { promptGrounds: task.promptGrounds }),
