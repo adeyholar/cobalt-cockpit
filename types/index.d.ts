@@ -512,6 +512,8 @@ declare module 'claude-code' {
       /** The operator's discovery level pin; this session only. */
       'discovery-pin': DiscoveryLevel | null
       'guard-state': GuardState
+      /** Unverified work the Stop guard still owes a check for, kept apart from the task presentation; this session only. */
+      'stop-owed': { at: number; why: string } | null
     }
   }
 }

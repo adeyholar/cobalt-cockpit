@@ -55,6 +55,15 @@ export type World = {
   attributes: string
   /** `size mtime` per ignored entry, as stat reports it; absent means `1 1`. */
   ignoredMeta: Record<string, string>
+  /**
+   * Ignored FILES by path, each with its stat line (`size mtime`). `ls-files -o -i --directory` collapses them to their top directory
+   * (whose own stat is `dirMeta`, and does not move when a child is rewritten); without --directory every file is listed.
+   */
+  ignoredFiles: Record<string, string>
+  /** The stat line of a collapsed top-level ignored directory, by name with its trailing slash. */
+  dirMeta: Record<string, string>
+  /** Directories the plugin may be told to watch: git cannot hash them as objects; `find` lists their files. */
+  watchedDirs: Record<string, string[]>
   /** Content of files outside git's view that the fingerprint watches (path -> content). */
   watched: Record<string, string>
   /** Calls to stat, for cost. */
@@ -158,6 +167,9 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     headBlobs: {},
     attributes: '',
     ignoredMeta: {},
+    ignoredFiles: {},
+    dirMeta: {},
+    watchedDirs: {},
     watched: {},
     statCalls: 0,
     gitHangs: null,
@@ -333,7 +345,13 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       w.statCalls++
       const names = e.argv.slice(e.argv.indexOf('--') + 1)
 
-      return ran(0, names.map(n => `${w.ignoredMeta[n] ?? '1 1'} ${n}\0`).join(''))
+      return ran(0, names.map(n => `${w.ignoredFiles[n] ?? w.dirMeta[n] ?? w.ignoredMeta[n] ?? '1 1'} ${n}\0`).join(''))
+    }
+    if (program === 'find') {
+      const dir = w.watchedDirs[String(e.argv[2])]
+      if (dir === undefined) return ran(1)
+
+      return ran(0, dir.map(n => `${n}\0`).join(''))
     }
     if (program === 'realpath') return ran(0, String(e.argv.at(-1)) + '\n')
     if (program === 'git') {
@@ -360,6 +378,14 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
         return ran(0, git.includes('--diff-filter=D') ? '' : seen.join('\0') + (seen.length ? '\0' : ''))
       }
       if (git[0] === 'status' && git.includes('--porcelain')) return ran(0, w.uncommitted ? ' M src/api.js\n' : '')
+      if (git[0] === 'ls-files' && git.includes('-i') && Object.keys(w.ignoredFiles).length > 0) {
+        const excluded = git.filter(a => a.startsWith(':(exclude)')).map(a => a.slice(10))
+        const files = Object.keys(w.ignoredFiles).filter(f => !excluded.some(x => f.startsWith(x)))
+        const listed = git.includes('--directory') ? [...new Set(files.map(f => (f.includes('/') ? `${f.slice(0, f.indexOf('/'))}/` : f)))] : files
+
+        return ran(0, [...listed, ...w.ignoredEntries].join('\0') + '\0')
+      }
+      if (git[0] === 'hash-object' && git.slice(git.indexOf('--') + 1).some(p => w.watchedDirs[p] !== undefined)) return ran(128)
       if (git[0] === 'ls-files') return ran(0, git.includes('-m') ? w.statDirty.join('\0') + (w.statDirty.length ? '\0' : '') : git.includes('-i') ? w.ignoredEntries.join('\0') + (w.ignoredEntries.length ? '\0' : '') : git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')
       if (git[0] === 'ls-tree') {
         const names = git.slice(git.indexOf('--') + 1)

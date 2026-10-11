@@ -336,13 +336,23 @@ describe('ENFORCE does not fail open', () => {
     expect((await stop($)).block).toBeUndefined()
     expect(runs(w)).toBe(0)
   })
-  test('F2 live: a change git status does not list (index flag, ignored by status) after the prompt still calls for the check', guard(), async ($, on) => {
+  test('a change git status does not list but the fingerprint measures still calls for the check', guard(), async ($, on) => {
     const { w } = scripted(on, null)
     await start($); await enroll($); await prompt($, 'Please tidy the repository')
-    w.tree['src/hidden.ts'] = 'changed under an assume-unchanged flag'
+    w.tree['src/hidden.ts'] = 'changed after the prompt'
     expect((await stop($)).block).toBeDefined()
     expect(runs(w)).toBe(1)
   })
+  for (const [flag, name] of [['h', 'assume-unchanged'], ['S', 'skip-worktree']] as const) {
+    test(`an index flag (${name}) that hides a modified tracked file from diff does not hide it from the check`, guard(), async ($, on) => {
+      const { w } = scripted(on, null)
+      w.indexFlags = `${flag} src/hidden.ts\0`
+      await start($); await enroll($); await prompt($, 'Please tidy the repository')
+      w.tree['src/hidden.ts'] = `content written under ${name}`
+      expect((await stop($)).block).toBeDefined()
+      expect(runs(w)).toBe(1)
+    })
+  }
   test('F1 live: a repository dirty before the prompt and unchanged since needs no check', guard(), async ($, on) => {
     const { w } = scripted(on)
     await start($); await enroll($); await prompt($, 'What is two plus two?')

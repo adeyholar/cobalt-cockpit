@@ -159,6 +159,12 @@ const DEFAULT_PREFS: Prefs = { isMuted: false, isHudHidden: false }
 const taskAtom = atom({ plugin: 'cobalt-cockpit', key: 'task' } as const, null)
 const activityAtom = atom({ plugin: 'cobalt-cockpit', key: 'activity' } as const, IDLE)
 const gitAtom = atom({ plugin: 'cobalt-cockpit', key: 'git' } as const, null)
+/**
+ * A verification obligation that outlives the task presentation: work that may have changed the workspace and was never verified by a
+ * completed Stop check (a tool that can write ran while no task existed; a task that edited or was held was reset or cleared). Only a
+ * completed check clears it. It is session state the progress tool cannot reach.
+ */
+const owedAtom = atom({ plugin: 'cobalt-cockpit', key: 'stop-owed' } as const, null as { at: number; why: string } | null)
 const meterAtom = atom({ plugin: 'cobalt-cockpit', key: 'meter' } as const, NO_METER)
 const guardsAtom = atom({ plugin: 'cobalt-cockpit', key: 'guards' } as const, [])
 const visualAtom = atom({ plugin: 'cobalt-cockpit', key: 'visual' } as const, { waiting: 0, agents: [] as AgentStrip[], revision: 0 })
@@ -1471,6 +1477,17 @@ const adoptLegacyHold = async ($: EngineInterface): Promise<void> => {
   })
 }
 
+/**
+ * Resetting or clearing the task presentation does not discharge an unverified obligation: a task that edited, touched files or was
+ * held by the guard, and was not completed by it, leaves the obligation behind. The next Stop (with or without a new task) checks.
+ */
+const carryObligation = async ($: EngineInterface, abandoned: Task | null, how: string): Promise<void> => {
+  if (abandoned === null || !guardEnforcing() || isGuardOwned(abandoned)) return
+  if (abandoned.edited !== true && abandoned.files.length === 0 && !isGuardHeld(abandoned)) return
+  const at = await $.clock.now()
+  await update($, owedAtom, held => held ?? { at, why: `a task with unverified work was abandoned by ${how}` })
+}
+
 /** A held task that a person abandons (a reset, a /clear) stays in the record as what it was: not a pass, not marked done. */
 const recordAbandoned = async ($: EngineInterface, abandoned: Task | null, how: string): Promise<void> => {
   if (abandoned === null || !isGuardHeld(abandoned)) return
@@ -1836,6 +1853,10 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
 const GIT_SAFE = ['--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'diff.ignoreSubmodules=none', '-c', 'status.submoduleSummary=false', '-c', 'core.checkStat=default', '-c', 'core.trustctime=true']
 const TREE_FILES = 20_000
 const HASH_CHUNK = 400
+/** Most ignored and watched files one fingerprint measures. Measured: 100,000 files take about 0.65 s; beyond it the tree is UNKNOWN. */
+const IGNORED_FILES = 100_000
+/** The whole ignored-file measurement of one fingerprint may take this long; beyond it the tree is UNKNOWN. */
+const FINGERPRINT_BUDGET_MS = 25_000
 /** Why the latest fingerprint was unknown, in words for the Ledger and HUD. Empty after a known one. */
 let treeWhy = ''
 const treeStamp = async ($: EngineInterface, base?: string): Promise<string | null> => {
@@ -1857,7 +1878,9 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const untracked = await at('ls-files', '-o', '--exclude-standard', '-z')
     // What git ignores is not hashed, but its NAMES are part of the state: a nested .gitignore of `*`, a line in .git/info/exclude or in
     // any global ignore file moves a new file out of the untracked list and into this one, which is a change in itself (reproduced).
-    const ignored = await at('ls-files', '-o', '-i', '--exclude-standard', '--directory', '-z')
+    // Every ignored FILE is listed (no --directory): a directory's own stat does not move when a file inside it is rewritten, so a
+    // collapsed entry would prove nothing about its contents. Operator-authorized volatile prefixes are pruned at the listing itself.
+    const ignored = await at('ls-files', '-o', '-i', '--exclude-standard', '-z', '--', '.', ...stopCfg.volatile.map(v => `:(exclude)${v}`))
     // Paths the index is told to ignore (assume-unchanged: a lowercase tag; skip-worktree: S or s) are invisible to diff. They are
     // hashed from the disk instead; a path that cannot be hashed (a sparse-checkout file that is not there) makes the tree unknown.
     const flags = await at('ls-files', '-v', '-z')
@@ -1884,12 +1907,34 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const filtered = [...new Set(statDirty.split('\0').filter(path => path !== '' && !known.has(path)))].sort()
     if (filtered.length > TREE_FILES) return unknown(`more than ${TREE_FILES} stat-dirty tracked files`)
     const ignoredNames = ignored.split('\0').filter(Boolean).sort().filter(name => !stopCfg.volatile.some(v => name.startsWith(v) || `${name}/` === v))
-    if (ignoredNames.length > TREE_FILES) return unknown(`more than ${TREE_FILES} ignored entries`)
-    // An ignored entry that exists is measured by size and modification time (no reads), so a changed ignored file is a change and
-    // a bounded number of stat calls covers a large tree. A name alone would miss a rewrite of a file that was already there.
+    if (ignoredNames.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored files (list the generated directories in stopVolatile, or the check runs every time)`)
+    // The verifier and the operator's watched paths are hashed by content whatever git says about them. A watched DIRECTORY cannot be
+    // hashed as an object: its files are listed (find does not follow links) and measured like the ignored files, with the same bound.
+    const watched: string[] = []
+    const watchedFiles: string[] = []
+    for (const file of [stopCfg.script, ...stopCfg.watch]) {
+      if (file === null || file === undefined) continue
+      const full = file.startsWith('/') ? file : `${top}/${file}`
+      const r = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'hash-object', '--no-filters', '--', full], { timeoutMs: GIT_TIMEOUT_MS })
+      if (r.exitCode === 0) { watched.push(`W\0${file}\0${r.stdout.trim()}`); continue }
+      const f = await $.process.run(['find', '-P', full, '-type', 'f', '-print0'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+      if (f === null || f.exitCode !== 0) { watched.push(`W\0${file}\0none`); continue }
+      if (f.isStdoutTruncated) return unknown(`the watched directory ${file} has too many files to list`)
+      const names = f.stdout.split('\0').filter(Boolean).sort()
+      if (watchedFiles.length + names.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} files under the watched paths`)
+      watchedFiles.push(...names)
+      watched.push(`W\0${file}\0dir\0${names.length}`)
+    }
+    // An ignored or watched file that exists is measured by inode, size, and modification and change times in nanoseconds (no
+    // reads), so a rewrite is a change even when the content keeps its size and the parent directory's own stat does not move. A name
+    // alone would miss it. The whole measurement has a time budget; running out of it is UNKNOWN, never a partial "unchanged".
+    const toMeasure = [...new Set([...ignoredNames, ...watchedFiles])].sort()
+    if (toMeasure.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored and watched files`)
     const measured: string[] = []
-    for (let i = 0; i < ignoredNames.length; i += HASH_CHUNK) {
-      const chunk = ignoredNames.slice(i, i + HASH_CHUNK)
+    const began = await $.clock.now()
+    for (let i = 0; i < toMeasure.length; i += HASH_CHUNK) {
+      if ((await $.clock.now()) - began > FINGERPRINT_BUDGET_MS) return unknown(`measuring the ignored files took longer than ${FINGERPRINT_BUDGET_MS / 1000}s`)
+      const chunk = toMeasure.slice(i, i + HASH_CHUNK)
       let r = await $.process.run(['stat', '--printf', '%i %s %.9Y %.9Z %n\\0', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
       let lines: string[] = r.exitCode === 0 ? r.stdout.split('\0').filter(Boolean) : []
       if (r.exitCode !== 0) {
@@ -1898,14 +1943,6 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       }
       if (r.exitCode !== 0 || r.isStdoutTruncated || lines.length !== chunk.length) return unknown('ignored entries could not be measured (stat failed, or an entry vanished meanwhile)')
       measured.push(...lines)
-    }
-    // The verifier and the operator's watched paths are hashed by content whatever git says about them.
-    const watched: string[] = []
-    for (const file of [stopCfg.script, ...stopCfg.watch]) {
-      if (file === null || file === undefined) continue
-      const full = file.startsWith('/') ? file : `${top}/${file}`
-      const r = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'hash-object', '--no-filters', '--', full], { timeoutMs: GIT_TIMEOUT_MS })
-      watched.push(`W\0${file}\0${r.exitCode === 0 ? r.stdout.trim() : 'none'}`)
     }
     const paths = [...new Set([...changed.split('\0'), ...untracked.split('\0'), ...hidden].filter(Boolean))].sort()
     if (paths.length > TREE_FILES) return unknown(`more than ${TREE_FILES} changed, untracked or flagged files`)
@@ -2083,6 +2120,12 @@ const noteEnd = async (
   // next Stop or prompt must show otherwise. (Reads leave it alone.)
   if (e.tool === 'Bash' || e.tool === 'Write' || e.tool === 'Edit' || e.tool === 'MultiEdit' || e.tool === 'NotebookEdit' || (e.tool.startsWith('mcp__') && !e.tool.startsWith('mcp__cobalt-cockpit__'))) {
     if ((await read($, taskAtom))?.guardDone !== undefined) await change($, t => withdrawDone(t))
+    // With no task to carry the fact, the obligation is kept apart from it. (Reads never create one; a Bash call may write, and no
+    // reading of its command is trusted to say that it did not.)
+    if (ran.deny === undefined && guardEnforcing() && (await read($, taskAtom)) === null) {
+      const at = await $.clock.now()
+      await update($, owedAtom, held => held ?? { at, why: `${e.tool} ran while no task was in progress` })
+    }
   }
   if (e.agentId !== undefined) {
     // A helper's edit never moves the task, but it does make an earlier goal check stale.
@@ -2669,22 +2712,14 @@ const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean,
  */
 const changeState = async ($: EngineInterface, task: Task): Promise<{ state: TreeVerdict; why: string; tree: string | null }> => {
   if (hasChanges(task)) return { state: 'CHANGED', why: 'edits were observed', tree: null }
-  if (task.kind === 'readonly') {
-    const now = await treeStamp($)
-    const state = compareTree(task.startTree, now)
-
-    return { state, why: state !== 'UNKNOWN' ? '' : now === null ? treeWhy : 'the task has no known starting fingerprint', tree: now }
-  }
-  // Changes the tool hooks did not see (an MCP tool, a Bash command with no edit diff) are measured against the task's own start.
-  // `git status` is not that measure: it misses what the index is told to ignore, and a repository dirty before the task is not
-  // evidence of a change made during it.
+  // A task is measured only against its own start. With no known starting fingerprint (git was unreadable when it began, or no
+  // prompt began it) nothing can be said about what changed, and the end state is never used to reconstruct one: `git status` being
+  // clean at the Stop, after a commit, an index flag or a repaired repository, is not evidence that no work occurred.
+  if (typeof task.startTree !== 'string') return { state: 'UNKNOWN', why: 'the task has no known starting fingerprint', tree: null }
   const now = await treeStamp($)
-  if (typeof task.startTree === 'string' && now !== null) return { state: compareTree(task.startTree, now), why: '', tree: now }
-  // no baseline, or a tree that cannot be measured: an unreadable repository is unknown, never unchanged
-  if (now === null) return { state: 'UNKNOWN', why: treeWhy, tree: null }
-  await quiet(() => refreshGit($))
+  const state = compareTree(task.startTree, now)
 
-  return ((await read($, gitAtom))?.dirty ?? 0) > 0 ? { state: 'CHANGED', why: 'the repository is dirty', tree: now } : { state: 'UNCHANGED', why: '', tree: now }
+  return { state, why: state !== 'UNKNOWN' ? '' : treeWhy, tree: now }
 }
 
 /** The guard's record that a read-only task changed nothing: only a tree measured equal to the task's own start qualifies. */
@@ -2741,11 +2776,18 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
   // Work with no task at all (no prompt was seen, or the task was reset) is still work: a changed repository is checked as a
   // coding task, and only a repository known to be clean needs nothing.
   if (task === null) {
-    await quiet(() => refreshGit($))
-    if (((await read($, gitAtom))?.dirty ?? 0) === 0) return null
+    // A clean `git status` is not evidence that nothing happened: a tool that can write ran with no task (or an unverified task was
+    // reset), and that obligation stands until a check completes. With no such evidence and no visible change there is nothing to ask:
+    // a conversation that touched nothing is not made to verify, even where git cannot be read (the host gives no more to go on).
+    const owed = await read($, owedAtom)
+    if (owed === null) {
+      await quiet(() => refreshGit($))
+      if (((await read($, gitAtom))?.dirty ?? 0) === 0) return null
+    }
     const now = await $.clock.now()
     const sha = (await read($, gitAtom))?.sha ?? null
-    task = await update($, taskAtom, old => old ?? markEdited({ ...newTask(1, '', now, sha), startTree: null }, 'changes were found with no task in progress'))
+    const why = owed === null ? 'changes were found with no task in progress' : owed.why
+    task = await update($, taskAtom, old => old ?? markEdited({ ...newTask(1, '', now, sha), startTree: null }, why))
     if (task === null) return null
   }
   // a record that still matches this task and this tree: there is nothing to ask again
@@ -2801,6 +2843,8 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
   const notes = `${unknownNote}${unidentified ? `[tree identity unknown: ${whyNow}; a pass on it is not recorded as verified] ` : ''}`
   const done: CheckRecord = { ...run, complete: isComplete, ...(notes === '' ? {} : { summary: oneLine(`${notes}${run.summary}`, 600) }) }
   await keepCheck($, done)
+  // a completed check on an identified tree discharges the obligation (a failed, unstable or unidentified one does not)
+  if (isComplete) await update($, owedAtom, () => null)
   await hush(() => persist($))
   const detail = run.exit === null ? run.outcome : `${run.outcome} (exit ${run.exit})`
   await change($, (t, now) => {
@@ -2958,6 +3002,7 @@ export const register: Register = (on, options) => {
     await quiet(() => update($, routerAtom, held => held.mode === 'OFF' ? held : switchRouter(held, 'OFF')))
     if (e.reason === 'clear') {
       // a /clear ends the conversation the task belonged to; a task the guard held is recorded as abandoned, not as done
+      await quiet(async () => { await carryObligation($, await read($, taskAtom), '/clear') })
       await quiet(async () => { await recordAbandoned($, await read($, taskAtom), '/clear') })
       await quiet(() => update($, taskAtom, () => null))
       await quiet(() => update($, activityAtom, () => IDLE))
@@ -3010,6 +3055,8 @@ export const register: Register = (on, options) => {
       // keeps the one it has, so nothing the model does later can move it.
       const standing = await read($, taskAtom)
       const startStamp = standing !== null && standing.status !== 'done' ? null : await treeStamp($)
+      // an unverified obligation (see owedAtom) goes on with the next task: that task is a coding task from its first moment
+      const isOwed = (await read($, owedAtom)) !== null
       const task = await update($, taskAtom, old => {
         // An unfinished planned task goes on, and so does one the Stop guard holds, planned or not: a prompt is not a reset.
         // Only a person's `/cockpit reset` abandons a held task. Anything else is a new one.
@@ -3021,7 +3068,7 @@ export const register: Register = (on, options) => {
         // baselines existed) and the fact that it edited go on with whatever follows it.
         const unfinished = old !== null && old.status !== 'done'
         const startTree = unfinished ? (old.startTree === undefined ? null : old.startTree) : startStamp
-        const base = isContinuing ? old : { ...newTask((old?.id ?? 0) + 1, e.text, now, sha), startTree, ...(unfinished && (old.edited === true || old.files.length > 0) ? { edited: true as const } : {}), ...(owed ? { review: old.review, ...(old.promptGrounds === undefined ? {} : { promptGrounds: old.promptGrounds }) } : {}) }
+        const base = isContinuing ? old : { ...newTask((old?.id ?? 0) + 1, e.text, now, sha), startTree, ...((unfinished && (old.edited === true || old.files.length > 0)) || isOwed ? { edited: true as const } : {}), ...(owed ? { review: old.review, ...(old.promptGrounds === undefined ? {} : { promptGrounds: old.promptGrounds }) } : {}) }
 
         const prompted: Task = {
           ...base,
@@ -3657,6 +3704,7 @@ export const register: Register = (on, options) => {
         // a trigger, a peer or an origin this build does not know is refused, and nothing is changed.
         if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: the task is cleared only by a command you type; nothing was changed.' }
         const abandoned = await read($, taskAtom)
+        await hush(() => carryObligation($, abandoned, '/cockpit reset'))
         await update($, taskAtom, () => null)
         await hush(() => recordAbandoned($, abandoned, '/cockpit reset'))
 

@@ -321,14 +321,14 @@ describe('L-1: a repository cannot talk the fingerprint out of seeing a change',
   })
   test('too many ignored entries is UNKNOWN with that reason, never a match', guard(), async ($, on) => {
     const { w, h } = fixture(on)
-    w.ignoredEntries = Array.from({ length: 20_001 }, (_, i) => `out/f${i}`)
+    w.ignoredEntries = Array.from({ length: 100_001 }, (_, i) => `out/f${i}`)
     await prompt($, 'explain the parser'); await enroll($)
     await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
     await finishAll($)
     await stop($)
     expect(scriptRuns(w)).toBe(1)
     const kept = ((h.get('run-ledger')?.value ?? {}) as { stopChecks?: CheckRecord[] }).stopChecks ?? []
-    expect(kept.at(-1)?.summary).toContain('more than 20000 ignored entries')
+    expect(kept.at(-1)?.summary).toContain('more than 100000 ignored files')
   })
 })
 
