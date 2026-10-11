@@ -1871,6 +1871,16 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const top = (await sh(['rev-parse', '--show-toplevel']))?.trim()
     if (!top) return unknown('not a git work tree, or git is unavailable')
     const at = (...argv: string[]) => sh(['-C', top, ...argv])
+    // The files (and links) under a directory, for what git cannot hash or list file by file. A directory that exists but cannot be read
+    // in full is never "missing" and never a partial answer: the caller makes the tree UNKNOWN.
+    const walk = async (dir: string): Promise<{ names: string[] } | { missing: true } | { why: string }> => {
+      const f = await $.process.run(['find', '-H', dir, '(', '-type', 'f', '-o', '-type', 'l', ')', '-print0'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+      if (f !== null && f.exitCode === 0 && !f.isStdoutTruncated) return { names: f.stdout.split('\0').filter(Boolean).sort() }
+      const there = await $.process.run(['stat', '--', dir], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+      if (f !== null && f.exitCode !== 0 && (there === null || there.exitCode !== 0)) return { missing: true }
+
+      return { why: `${dir} exists but could not be listed in full (unreadable, too large or timed out)` }
+    }
     const head = base ?? (await at('rev-parse', '--verify', 'HEAD'))?.trim()
     if (!head) return unknown('no commit to measure against')
     const changed = await at('diff', head, '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=d')
@@ -1908,8 +1918,19 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     if (filtered.length > TREE_FILES) return unknown(`more than ${TREE_FILES} stat-dirty tracked files`)
     const ignoredNames = ignored.split('\0').filter(Boolean).sort().filter(name => !stopCfg.volatile.some(v => name.startsWith(v) || `${name}/` === v))
     if (ignoredNames.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored files (list the generated directories in stopVolatile, or the check runs every time)`)
+    // git lists an ignored directory that holds its own repository (a clone, a vendored checkout) as ONE entry even without
+    // --directory (reproduced with real git): its own stat does not move when a file inside is rewritten. Those entries are expanded to
+    // their files under the same bound; one that cannot be listed in full makes the tree unknown.
+    const embedded: string[] = []
+    for (const entry of ignoredNames.filter(name => name.endsWith('/'))) {
+      const listed = await walk(`${top}/${entry.replace(/\/+$/, '')}`)
+      if ('why' in listed) return unknown(listed.why)
+      if ('missing' in listed) return unknown(`${entry} vanished while it was listed`)
+      embedded.push(...listed.names)
+      if (embedded.length + ignoredNames.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored files (list the generated directories in stopVolatile, or the check runs every time)`)
+    }
     // The verifier and the operator's watched paths are hashed by content whatever git says about them. A watched DIRECTORY cannot be
-    // hashed as an object: its files are listed (find does not follow links) and measured like the ignored files, with the same bound.
+    // hashed as an object: its files are listed (find follows no link below the start) and measured like the ignored files, with the same bound.
     const watched: string[] = []
     const watchedFiles: string[] = []
     for (const file of [stopCfg.script, ...stopCfg.watch]) {
@@ -1917,10 +1938,10 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       const full = file.startsWith('/') ? file : `${top}/${file}`
       const r = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'hash-object', '--no-filters', '--', full], { timeoutMs: GIT_TIMEOUT_MS })
       if (r.exitCode === 0) { watched.push(`W\0${file}\0${r.stdout.trim()}`); continue }
-      const f = await $.process.run(['find', '-P', full, '-type', 'f', '-print0'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
-      if (f === null || f.exitCode !== 0) { watched.push(`W\0${file}\0none`); continue }
-      if (f.isStdoutTruncated) return unknown(`the watched directory ${file} has too many files to list`)
-      const names = f.stdout.split('\0').filter(Boolean).sort()
+      const listed = await walk(full)
+      if ('missing' in listed) { watched.push(`W\0${file}\0none`); continue }
+      if ('why' in listed) return unknown(`the watched path ${file}: ${listed.why}`)
+      const names = listed.names
       if (watchedFiles.length + names.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} files under the watched paths`)
       watchedFiles.push(...names)
       watched.push(`W\0${file}\0dir\0${names.length}`)
@@ -1928,7 +1949,7 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     // An ignored or watched file that exists is measured by inode, size, and modification and change times in nanoseconds (no
     // reads), so a rewrite is a change even when the content keeps its size and the parent directory's own stat does not move. A name
     // alone would miss it. The whole measurement has a time budget; running out of it is UNKNOWN, never a partial "unchanged".
-    const toMeasure = [...new Set([...ignoredNames, ...watchedFiles])].sort()
+    const toMeasure = [...new Set([...ignoredNames, ...embedded, ...watchedFiles])].sort()
     if (toMeasure.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored and watched files`)
     const measured: string[] = []
     const began = await $.clock.now()

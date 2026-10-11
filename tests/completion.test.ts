@@ -314,7 +314,7 @@ describe('L-1: a repository cannot talk the fingerprint out of seeing a change',
     notFinished(taskOf(h))
   })
   test('negative control: ignored entries that were there at the start are not a change', guard(), async ($, on) => {
-    const { w, h } = await roTask($, on, w => { w.ignoredEntries = ['node_modules/', 'dist/'] })
+    const { w, h } = await roTask($, on, w => { w.ignoredEntries = ['node_modules/x/index.js', 'dist/bundle.js'] })
     await stop($)
     expect(scriptRuns(w)).toBe(0)
     expect(taskOf(h).status).toBe('done')

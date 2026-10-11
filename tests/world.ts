@@ -64,6 +64,10 @@ export type World = {
   dirMeta: Record<string, string>
   /** Directories the plugin may be told to watch: git cannot hash them as objects; `find` lists their files. */
   watchedDirs: Record<string, string[]>
+  /** Paths `find` cannot read in full: it exits 1 after printing some of the files, as it does with an unreadable subdirectory. */
+  watchedUnreadable: string[]
+  /** Ignored directories that hold their own repository: git lists each as ONE `dir/` entry (real git, with or without --directory). */
+  embeddedRepos: Record<string, string[]>
   /** Content of files outside git's view that the fingerprint watches (path -> content). */
   watched: Record<string, string>
   /** Calls to stat, for cost. */
@@ -170,6 +174,8 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     ignoredFiles: {},
     dirMeta: {},
     watchedDirs: {},
+    watchedUnreadable: [],
+    embeddedRepos: {},
     watched: {},
     statCalls: 0,
     gitHangs: null,
@@ -348,11 +354,14 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       return ran(0, names.map(n => `${w.ignoredFiles[n] ?? w.dirMeta[n] ?? w.ignoredMeta[n] ?? '1 1'} ${n}\0`).join(''))
     }
     if (program === 'find') {
-      const dir = w.watchedDirs[String(e.argv[2])]
+      const asked = String(e.argv[2])
+      if (w.watchedUnreadable.includes(asked)) return ran(1, `${(w.watchedDirs[asked] ?? []).slice(0, 1).map(n => `${n}\0`).join('')}`)
+      const dir = w.watchedDirs[asked] ?? w.embeddedRepos[`${asked.replace(/^\/work\/example\//, '')}/`]
       if (dir === undefined) return ran(1)
 
       return ran(0, dir.map(n => `${n}\0`).join(''))
     }
+    if (program === 'stat' && !e.argv.includes('--printf')) return w.watchedUnreadable.includes(String(e.argv.at(-1))) ? ran(0, '') : ran(1)
     if (program === 'realpath') return ran(0, String(e.argv.at(-1)) + '\n')
     if (program === 'git') {
       if (w.gitStatus === null) return ran(128)
@@ -378,12 +387,12 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
         return ran(0, git.includes('--diff-filter=D') ? '' : seen.join('\0') + (seen.length ? '\0' : ''))
       }
       if (git[0] === 'status' && git.includes('--porcelain')) return ran(0, w.uncommitted ? ' M src/api.js\n' : '')
-      if (git[0] === 'ls-files' && git.includes('-i') && Object.keys(w.ignoredFiles).length > 0) {
+      if (git[0] === 'ls-files' && git.includes('-i') && (Object.keys(w.ignoredFiles).length > 0 || Object.keys(w.embeddedRepos).length > 0)) {
         const excluded = git.filter(a => a.startsWith(':(exclude)')).map(a => a.slice(10))
         const files = Object.keys(w.ignoredFiles).filter(f => !excluded.some(x => f.startsWith(x)))
         const listed = git.includes('--directory') ? [...new Set(files.map(f => (f.includes('/') ? `${f.slice(0, f.indexOf('/'))}/` : f)))] : files
 
-        return ran(0, [...listed, ...w.ignoredEntries].join('\0') + '\0')
+        return ran(0, [...listed, ...Object.keys(w.embeddedRepos), ...w.ignoredEntries].join('\0') + '\0')
       }
       if (git[0] === 'hash-object' && git.slice(git.indexOf('--') + 1).some(p => w.watchedDirs[p] !== undefined)) return ran(128)
       if (git[0] === 'ls-files') return ran(0, git.includes('-m') ? w.statDirty.join('\0') + (w.statDirty.length ? '\0' : '') : git.includes('-i') ? w.ignoredEntries.join('\0') + (w.ignoredEntries.length ? '\0' : '') : git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')

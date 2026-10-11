@@ -215,6 +215,41 @@ describe('B3: ignored content', () => {
     expect(keptChecks(h).at(-1)?.complete).toBe(false)
     expect(keptChecks(h).at(-1)?.summary).toContain('longer than 25s')
   })
+  test('an ignored directory holding its own repository (listed by git as one entry) is expanded: a same-size rewrite and a deeper new file are changes', guard(), async ($, on) => {
+    const { w } = fixture(on)
+    w.embeddedRepos = { 'vendor/dep/': ['/work/example/vendor/dep/x.py', '/work/example/vendor/dep/sub/y.py'] }
+    await start($); await enroll($); await prompt($, 'what is two plus two?')
+    expect((await stop($)).block).toBeUndefined()
+    expect(runs(w)).toBe(0)
+    w.ignoredMeta['/work/example/vendor/dep/sub/y.py'] = '5 7777'      // rewritten inside; the repository directory's own stat did not move
+    expect((await stop($)).block).toBeDefined()
+  })
+  test('an embedded repository that cannot be listed in full makes the tree UNKNOWN, never a partial match', guard(), async ($, on) => {
+    const { w, h } = fixture(on, 'ok')
+    w.embeddedRepos = { 'vendor/dep/': ['/work/example/vendor/dep/x.py'] }
+    w.watchedUnreadable = ['/work/example/vendor/dep']
+    await start($); await enroll($); await prompt($, 'tidy it')
+    await stop($)
+    expect(runs(w)).toBe(1)
+    expect(keptChecks(h).at(-1)?.complete).toBe(false)
+    expect(taskOf(h)?.guardDone).toBeUndefined()
+  })
+  test('a watched directory with an unreadable subdirectory is UNKNOWN, not a constant "missing"', guard({ stopWatch: '/work/conf' }), async ($, on) => {
+    const { w, h } = fixture(on, 'ok')
+    w.watchedDirs['/work/conf'] = ['/work/conf/a.cfg']
+    w.watchedUnreadable = ['/work/conf']
+    await start($); await enroll($); await prompt($, 'what is two plus two?')
+    await stop($)
+    expect(runs(w)).toBe(1)
+    expect(keptChecks(h).at(-1)?.summary).toContain('could not be listed in full')
+    expect(keptChecks(h).at(-1)?.complete).toBe(false)
+  })
+  test('control: a watched path that does not exist is a stable "missing", not UNKNOWN', guard({ stopWatch: '/work/absent' }), async ($, on) => {
+    const { w } = fixture(on)
+    await start($); await enroll($); await prompt($, 'what is two plus two?')
+    expect((await stop($)).block).toBeUndefined()
+    expect(runs(w)).toBe(0)
+  })
   test('more ignored files than the bound is UNKNOWN: the check runs and no completion is recorded', guard(), async ($, on) => {
     const { w, h } = fixture(on, 'ok')
     w.ignoredFiles = Object.fromEntries(Array.from({ length: 100_001 }, (_, i) => [`out/f${i}`, '1 1']))
