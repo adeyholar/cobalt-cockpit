@@ -118,6 +118,14 @@ export type StopCheck = {
   hasSummary: boolean
 }
 
+export type GuardDone = {
+  uid: string
+  tree: string
+  check: string
+  outcome: 'verified' | 'unchanged'
+  at: number
+}
+
 export type StopHold = { reason: string; at: number; refusals: number }
 
 export type TaskKind = 'unplanned' | 'coding' | 'readonly'

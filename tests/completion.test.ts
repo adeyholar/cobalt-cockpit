@@ -4,9 +4,10 @@ import { describe, expect, test } from 'claude-code/testing'
 import { emptyLedger } from '../hooks/ledger'
 import { summaryOf } from '../hooks/model'
 import { configOf, volatileOf, watchOf, type CheckRecord } from '../hooks/stopguard'
-import { clearHold, holdTask, newTask, planTask, releaseHold, settle, touchFile } from '../hooks/model'
+import { register } from '../hooks/register'
+import { isGuardRequired, setGuardRequired, clearHold, holdTask, newTask, planTask, releaseHold, settle, touchFile } from '../hooks/model'
 import type { Task } from '../types'
-import { FIVE, command, hostState, passAllGates, planAndComplete, progress, prompt, start, world } from './world'
+import { FIVE, blobOf, bash, command, hostState, passAllGates, planAndComplete, progress, prompt, start, world } from './world'
 
 const SCRIPT = '/work/check.sh'
 const SUMMARY = 'Changed the parser to reject empty input and added a regression test for the empty case.'
@@ -421,6 +422,98 @@ describe('ignored files: relevance, volatility and coverage', () => {
   })
 })
 
+describe('M-2: a clean filter or an attributes file cannot hide a modified tracked file', () => {
+  const scriptRuns = (w: any) => w.runs.filter((r: string[]) => r[0] === SCRIPT).length
+  const roTask = async ($: any, on: any, setup: (w: any) => void = () => {}) => {
+    const { w, h } = fixture(on)
+    setup(w)
+    await prompt($, 'explain the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    await finishAll($)
+    return { w, h }
+  }
+  test('diff says unchanged (a clean filter), the file differs from its base blob: CHANGED', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.statDirty = ['src/a.ts']; w.headBlobs['src/a.ts'] = blobOf('original'); w.watched['src/a.ts'] = 'original' })
+    w.watched['src/a.ts'] = 'MALICIOUS CHANGE'                                       // `git diff HEAD` still lists nothing: w.tree is untouched
+    expect(Object.keys(w.tree)).toEqual([])
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+    expect(scriptRuns(w)).toBeGreaterThan(0)
+    notFinished(taskOf(h))
+  })
+  test('negative control: a file merely touched during the task (stat-dirty, same content as the base blob) is not a change', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.headBlobs['src/a.ts'] = blobOf('original'); w.watched['src/a.ts'] = 'original' })
+    w.statDirty = ['src/a.ts']                                                           // became stat-dirty after the task began; content is the base blob
+    await stop($)
+    expect(scriptRuns(w)).toBe(0)
+    expect(taskOf(h).status).toBe('done')
+  })
+  test('an attributes line added mid-task is a change in itself', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on)
+    w.attributes = 'src/a.ts filter=h\n'
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('the fingerprint pins checkStat and trustctime', guard(), async ($, on) => {
+    const { w } = await roTask($, on)
+    await stop($)
+    for (const call of w.runs.filter((r: string[]) => r[0] === 'git')) { expect(call).toContain('core.checkStat=default'); expect(call).toContain('core.trustctime=true') }
+  })
+})
+
+describe('Medium M-1 / L-2 / L-3 of the guard-owned completion review', () => {
+  test('a write after the guard recorded a completion withdraws it at once, on every projection', guard(), async ($, on) => {
+    const { h } = fixture(on, 'ok')
+    await prompt($, 'fix the parser'); await enroll($)
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'e1', file_path: '/work/example/a.ts', old_string: 'a', new_string: 'b' } as never)
+    for (const m of ['m1', 'm2', 'm3', 'm4']) { /* planned below */ void m }
+    await progress($, { action: 'plan', milestones: FIVE })
+    for (const m of ['m1', 'm2', 'm3', 'm4']) await progress($, { action: 'complete', milestone: m })
+    await passAllGates($); await progress($, { action: 'complete', milestone: 'm5' })
+    await stop($)
+    expect(taskOf(h).status).toBe('done')
+    await bash($, "python3 -c \"open('src/x.ts','a').write('x')\"")                  // a write with no edit diff
+    expect(taskOf(h).guardDone).toBeUndefined()
+    notFinished(taskOf(h))
+  })
+  test('a read does not withdraw it', guard(), async ($, on) => {
+    const { h } = fixture(on, 'ok')
+    await prompt($, 'fix the parser'); await enroll($)
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'e1', file_path: '/work/example/a.ts', old_string: 'a', new_string: 'b' } as never)
+    await progress($, { action: 'plan', milestones: FIVE })
+    for (const m of ['m1', 'm2', 'm3', 'm4']) await progress($, { action: 'complete', milestone: m })
+    await passAllGates($); await progress($, { action: 'complete', milestone: 'm5' })
+    await stop($)
+    await $.tool.call({ tool: 'Read', tool_use_id: 'r1', file_path: '/work/example/a.ts' } as never)
+    expect(taskOf(h).guardDone).toBeDefined()
+    expect(taskOf(h).status).toBe('done')
+  })
+  test('L-2: a pass whose first fingerprint was unknown is not a completion', guard(), async ($, on) => {
+    const { w, h } = fixture(on, 'ok')
+    await prompt($, 'fix the parser'); await enroll($)
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'e1', file_path: '/work/example/a.ts', old_string: 'a', new_string: 'b' } as never)
+    await progress($, { action: 'plan', milestones: FIVE })
+    for (const m of ['m1', 'm2', 'm3', 'm4']) await progress($, { action: 'complete', milestone: m })
+    await passAllGates($); await progress($, { action: 'complete', milestone: 'm5' })
+    w.gitHangs = 'diff'
+    w.duringRun = async (argv: readonly string[]) => { if (argv[0] === SCRIPT) w.gitHangs = null }   // git answers again after the check began
+    await stop($)
+    expect(taskOf(h).guardDone).toBeUndefined()
+    expect(taskOf(h).stopHold).toBeDefined()
+  })
+  test('L-3: ENFORCE with a script named is enforcing at registration, before any settings read, even for ~/…', () => {
+    const sink: any = new Proxy(function () {}, { get: () => sink, apply: () => sink })
+    setGuardRequired(false)
+    register(sink, { stopGuard: 'ENFORCE', verifyScript: '~/check.sh' })
+    expect(isGuardRequired()).toBe(true)
+    register(sink, { stopGuard: 'OBSERVE', verifyScript: '~/check.sh' })
+    expect(isGuardRequired()).toBe(false)
+    register(sink, { stopGuard: 'ENFORCE' })
+    expect(isGuardRequired()).toBe(false)                                              // nothing to enforce without a script
+    setGuardRequired(false)
+  })
+})
+
 describe('Lows: legacy adoption at a prompt, and /clear', () => {
   test('a prompt adopts a legacy held task before it can be replaced', guard(), async ($, on) => {
     world(on)
@@ -464,7 +557,7 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     await finishAll($)
     const before = gitRuns(w)
     await stop($)
-    expect(gitRuns(w) - before).toBeLessThanOrEqual(12)
+    expect(gitRuns(w) - before).toBeLessThanOrEqual(20)
     expect(scriptRuns(w)).toBe(0)
     expect(taskOf(h).status).toBe('done')
   })
@@ -473,7 +566,7 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     await finishAll($)
     const before = gitRuns(w)
     await stop($)
-    expect(gitRuns(w) - before).toBeLessThanOrEqual(12)
+    expect(gitRuns(w) - before).toBeLessThanOrEqual(20)
     expect(scriptRuns(w)).toBe(0)
     expect(taskOf(h).status).toBe('done')
   })

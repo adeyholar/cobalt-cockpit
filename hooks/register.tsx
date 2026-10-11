@@ -1833,7 +1833,7 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
  * (a replaced blob makes HEAD look like the working file; reproduced), a filesystem monitor that reports nothing, a submodule
  * set to ignore=all (reproduced), an untracked cache. A user's git configuration is not trusted to describe the work.
  */
-const GIT_SAFE = ['--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'diff.ignoreSubmodules=none', '-c', 'status.submoduleSummary=false']
+const GIT_SAFE = ['--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'diff.ignoreSubmodules=none', '-c', 'status.submoduleSummary=false', '-c', 'core.checkStat=default', '-c', 'core.trustctime=true']
 const TREE_FILES = 20_000
 const HASH_CHUNK = 400
 /** Why the latest fingerprint was unknown, in words for the Ledger and HUD. Empty after a known one. */
@@ -1861,7 +1861,10 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     // Paths the index is told to ignore (assume-unchanged: a lowercase tag; skip-worktree: S or s) are invisible to diff. They are
     // hashed from the disk instead; a path that cannot be hashed (a sparse-checkout file that is not there) makes the tree unknown.
     const flags = await at('ls-files', '-v', '-z')
-    if (changed === null || deleted === null || untracked === null) return unknown('a git command failed, timed out or its output was cut short')
+    // A clean filter or an attributes line can make `git diff` report a modified tracked file as unchanged (reproduced). Tracked files
+    // git sees as stat-dirty are therefore also hashed WITHOUT filters and compared with their blob at the base commit.
+    const statDirty = await at('ls-files', '-m', '-z')
+    if (changed === null || deleted === null || untracked === null || statDirty === null) return unknown('a git command failed, timed out or its output was cut short')
     if (ignored === null) return unknown('the ignored-entry listing failed, timed out or was cut short')
     if (flags === null) return unknown('the index listing failed, timed out or was cut short by the host output limit')
     const hidden = flags.split('\0').filter(l => l.length > 2 && (/[a-z]/.test(l[0] as string) || l[0] === 'S')).map(l => l.slice(2))
@@ -1869,12 +1872,17 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const sources: string[] = []
     const exclude = (await at('rev-parse', '--git-path', 'info/exclude'))?.trim()
     const global = (await at('config', '--type=path', '--get', 'core.excludesFile'))?.trim()
-    for (const file of [exclude, global]) {
+    const attributes = (await at('rev-parse', '--git-path', 'info/attributes'))?.trim()
+    const globalAttributes = (await at('config', '--type=path', '--get', 'core.attributesFile'))?.trim()
+    for (const file of [exclude, global, attributes, globalAttributes]) {
       if (!file) { sources.push('-'); continue }
       const r = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'hash-object', '--no-filters', '--', file], { timeoutMs: GIT_TIMEOUT_MS })
       sources.push(r.exitCode === 0 ? r.stdout.trim() : 'none')
     }
     // Operator-authorized volatile directories (caches, build output) leave the IGNORED part of the stamp; nothing else is excluded.
+    const known = new Set([...changed.split('\0'), ...deleted.split('\0')])
+    const filtered = [...new Set(statDirty.split('\0').filter(path => path !== '' && !known.has(path)))].sort()
+    if (filtered.length > TREE_FILES) return unknown(`more than ${TREE_FILES} stat-dirty tracked files`)
     const ignoredNames = ignored.split('\0').filter(Boolean).sort().filter(name => !stopCfg.volatile.some(v => name.startsWith(v) || `${name}/` === v))
     if (ignoredNames.length > TREE_FILES) return unknown(`more than ${TREE_FILES} ignored entries`)
     // An ignored entry that exists is measured by size and modification time (no reads), so a changed ignored file is a change and
@@ -1882,10 +1890,10 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const measured: string[] = []
     for (let i = 0; i < ignoredNames.length; i += HASH_CHUNK) {
       const chunk = ignoredNames.slice(i, i + HASH_CHUNK)
-      let r = await $.process.run(['stat', '--printf', '%s %Y %n\\0', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
+      let r = await $.process.run(['stat', '--printf', '%i %s %.9Y %.9Z %n\\0', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
       let lines: string[] = r.exitCode === 0 ? r.stdout.split('\0').filter(Boolean) : []
       if (r.exitCode !== 0) {
-        r = await $.process.run(['stat', '-f', '%z %m %N', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
+        r = await $.process.run(['stat', '-f', '%i %z %m %c %N', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
         lines = r.exitCode === 0 ? r.stdout.split('\n').filter(Boolean) : []
       }
       if (r.exitCode !== 0 || r.isStdoutTruncated || lines.length !== chunk.length) return unknown('ignored entries could not be measured (stat failed, or an entry vanished meanwhile)')
@@ -1908,6 +1916,18 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       const got = hashes?.split('\n').filter(Boolean)
       if (got === undefined || got.length !== chunk.length) return unknown('a file could not be hashed (deleted meanwhile, unreadable or not present in a sparse checkout)')
       chunk.forEach((path, n) => lines.push(`${got[n]}\0${path}`))
+    }
+    for (let i = 0; i < filtered.length; i += HASH_CHUNK) {
+      const chunk = filtered.slice(i, i + HASH_CHUNK)
+      const hashes = (await at('hash-object', '--no-filters', '--', ...chunk))?.split('\n').filter(Boolean)
+      const tree = await at('ls-tree', '-r', '-z', head, '--', ...chunk)
+      if (hashes === undefined || hashes.length !== chunk.length || tree === null) return unknown('a stat-dirty tracked file could not be hashed or compared with the base commit')
+      const blobs = new Map<string, string>()
+      for (const entry of tree.split('\0').filter(Boolean)) {
+        const tab = entry.indexOf('\t')
+        blobs.set(entry.slice(tab + 1), (entry.slice(0, tab).split(' ')[2] ?? ''))
+      }
+      chunk.forEach((path, n) => { if (blobs.get(path) !== hashes[n]) lines.push(`${hashes[n]}\0${path}`) })
     }
     const text = lines.join('\n')
     // FNV-1a twice with different seeds: a change detector, not a security boundary. Paths and hashes never leave this function.
@@ -2059,6 +2079,11 @@ const noteEnd = async (
   e: { tool: string; tool_use_id: string; agentId?: string } & Record<string, unknown>,
   ran: { deny?: string | undefined; isError?: boolean | undefined; result?: unknown },
 ) => {
+  // Any tool that can write, after the guard recorded a completion, withdraws it: the tree it stood for may no longer exist, and the
+  // next Stop or prompt must show otherwise. (Reads leave it alone.)
+  if (e.tool === 'Bash' || e.tool === 'Write' || e.tool === 'Edit' || e.tool === 'MultiEdit' || e.tool === 'NotebookEdit' || (e.tool.startsWith('mcp__') && !e.tool.startsWith('mcp__cobalt-cockpit__'))) {
+    if ((await read($, taskAtom))?.guardDone !== undefined) await change($, t => withdrawDone(t))
+  }
   if (e.agentId !== undefined) {
     // A helper's edit never moves the task, but it does make an earlier goal check stale.
     const made = (ran.deny === undefined && ran.isError !== true ? ran.result : null) as Record<string, unknown> | null
@@ -2627,7 +2652,8 @@ const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean,
     const summary = outputTail(redactSecrets(`${r.stderr}\n${r.stdout}`))
     // two fingerprints are not an atomic snapshot, but a tree seen to move while the check ran is not what was checked
     if (before !== null && after !== null && before !== after) return rec({ outcome: 'unstable', sha: short, exit: r.exitCode, ms, tree: after, summary })
-    if (r.exitCode === 0) return rec({ outcome: 'pass', sha: short, exit: 0, ms, tree: after, summary })
+    // a pass is only a pass about a tree seen at both ends: an unknown start cannot show the tree stood still
+    if (r.exitCode === 0) return rec({ outcome: 'pass', sha: short, exit: 0, ms, tree: before === null ? null : after, summary })
 
     return rec({ outcome: ms >= stopCfg.timeoutMs ? 'timeout' : 'fail', sha: short, exit: r.exitCode, ms, tree: after, summary })
   } catch (error) {
@@ -2770,6 +2796,7 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
       return holdTask(chain, reason, spent + 1, now)
     }
     // the completion record is written in the same step that lifts the hold, after the result was persisted above
+    if (uidOf(chain) !== uid) return chain                                              // another task by now: this record is not for it
     return { ...clearHold(chain, now), guardDone: { uid: uidOf(chain), tree: run.tree as string, check: `${run.name}@${run.at}`, outcome: 'verified' as const, at: now } }
   })
 
@@ -2808,7 +2835,9 @@ export const register: Register = (on, options) => {
   stopOptions = options
   guardCfg = guardConfigOf(options)
   stopCfg = stopConfigOf(options, null)
-  setGuardRequired(guardEnforcing())
+  // Before the first settings read the home directory is unknown, so `~/…` cannot be expanded: ENFORCE with a script named is
+  // enforcing already (fail closed); loadStopCfg refines it once the configuration is read.
+  setGuardRequired(options['stopGuard'] === 'ENFORCE' && typeof options['verifyScript'] === 'string' && options['verifyScript'].trim() !== '')
   registerLedger(on)
 
   // another Cockpit that registers after this one: all the host lets a plugin see of the others

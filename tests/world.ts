@@ -47,6 +47,12 @@ export type World = {
   untracked: string[]
   /** Entries `git ls-files -o -i` lists: untracked and ignored (by .gitignore, info/exclude or a global file). */
   ignoredEntries: string[]
+  /** Tracked files git lists as stat-dirty (`ls-files -m`), whether or not `diff` reports them (a clean filter can hide them). */
+  statDirty: string[]
+  /** The blob id the base commit holds for a path, as `ls-tree` reports it (absent: none). */
+  headBlobs: Record<string, string>
+  /** The content of .git/info/attributes. */
+  attributes: string
   /** `size mtime` per ignored entry, as stat reports it; absent means `1 1`. */
   ignoredMeta: Record<string, string>
   /** Content of files outside git's view that the fingerprint watches (path -> content). */
@@ -148,6 +154,9 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     indexFlags: '',
     untracked: [],
     ignoredEntries: [],
+    statDirty: [],
+    headBlobs: {},
+    attributes: '',
     ignoredMeta: {},
     watched: {},
     statCalls: 0,
@@ -340,7 +349,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       }
       const git = e.argv.slice(at)
       if (w.gitHangs !== null && git[0] === w.gitHangs) throw new Error('git was still running at the timeout')
-      if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, '/work/example/.git/info/exclude\n')
+      if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, `/work/example/.git/${git[git.indexOf('--git-path') + 1]}\n`)
       if (git[0] === 'config') return ran(1)
       if (git[0] === 'rev-parse') return ran(0, git.includes('--verify') ? `${w.head}\n` : '/work/example\n')
       if (git[0] === 'diff') {
@@ -351,8 +360,13 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
         return ran(0, git.includes('--diff-filter=D') ? '' : seen.join('\0') + (seen.length ? '\0' : ''))
       }
       if (git[0] === 'status' && git.includes('--porcelain')) return ran(0, w.uncommitted ? ' M src/api.js\n' : '')
-      if (git[0] === 'ls-files') return ran(0, git.includes('-i') ? w.ignoredEntries.join('\0') + (w.ignoredEntries.length ? '\0' : '') : git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')
-      if (git[0] === 'hash-object') return ran(0, git.slice(git.indexOf('--') + 1).map(path => `h${[...(path.endsWith('info/exclude') ? w.excludes : (w.watched[path] ?? w.tree[path] ?? (w.untracked.includes(path) ? 'u' : '')))].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`).join('\n') + '\n')
+      if (git[0] === 'ls-files') return ran(0, git.includes('-m') ? w.statDirty.join('\0') + (w.statDirty.length ? '\0' : '') : git.includes('-i') ? w.ignoredEntries.join('\0') + (w.ignoredEntries.length ? '\0' : '') : git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')
+      if (git[0] === 'ls-tree') {
+        const names = git.slice(git.indexOf('--') + 1)
+
+        return ran(0, names.filter(n => w.headBlobs[n] !== undefined).map(n => `100644 blob ${w.headBlobs[n]}\t${n}\0`).join(''))
+      }
+      if (git[0] === 'hash-object') return ran(0, git.slice(git.indexOf('--') + 1).map(path => `h${[...(path.endsWith('info/exclude') ? w.excludes : path.endsWith('info/attributes') ? w.attributes : (w.watched[path] ?? w.tree[path] ?? (w.untracked.includes(path) ? 'u' : '')))].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`).join('\n') + '\n')
 
       return ran(0, w.gitStatus)
     }
@@ -637,6 +651,9 @@ export const hostState = (on: On, seed: Record<string, unknown>): Map<string, { 
 
   return held
 }
+
+/** The id the test world's `hash-object` gives a file with this content, for seeding `headBlobs`. */
+export const blobOf = (content: string): string => `h${[...content].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`
 
 export const command = ($: Engine, args: string) =>
   $.command.run({ command: 'cockpit', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
