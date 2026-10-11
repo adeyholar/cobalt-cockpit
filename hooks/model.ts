@@ -84,6 +84,14 @@ export const oneLine = (text: string, max: number): string => {
  * clears or forges can touch it. It is placed by `holdTask` (the guard), lifted by `clearHold` (the guard, on a fresh
  * verified pass) or `releaseHold` (a person's command), and the one rule for completion below reads it.
  */
+/**
+ * Whether the Stop guard is enforcing (set by the host from the plugin's own options, never by a tool input). While it is, a task
+ * is DONE only on a record the guard wrote for this task: milestones, gates, criteria and a goal check are all reports.
+ */
+let guardRequired = false
+export const setGuardRequired = (on: boolean): void => { guardRequired = on }
+export const isGuardRequired = (): boolean => guardRequired
+
 export const isGuardHeld = (task: Task): boolean => task.stopHold !== undefined
 
 /** The task's identity across plans. Task numbers start again at 1 after a reset; this does not repeat. */
@@ -104,7 +112,9 @@ export const clearHold = (task: Task, now: number): Task => {
 
 /** A person releases the hold. It passes nothing: TEST goes back to pending and the goal check starts over. */
 export const releaseHold = (task: Task, now: number): Task => {
-  const cleared = clearHold(task, now)
+  const { guardDone: _stale, ...cleared0 } = clearHold(task, now)
+  // a released task is not complete: the work that finished under the hold is open again until the guard completes it
+  const cleared: Task = { ...cleared0, milestones: cleared0.milestones.map(m => (m.phase === 'VERIFY' && m.state === 'done' ? { ...m, state: 'pending' as const } : m)) }
   // a release never makes verification optional: TEST stays required (a read-only task is a coding task by now, or becomes one)
   const gate: Gate = { ...cleared.gates.TEST, isRequired: true, state: 'pending', evidence: 'hold released by a person; the check has not been run again', source: 'auto', at: now }
 
@@ -125,6 +135,23 @@ export const reclassifyChanged = (task: Task, now: number): Task => {
   })) as Task['gates']
 
   return invalidateAlignment({ ...task, kind: 'coding', edited: true, gates, updatedAt: now }, 'the read-only task changed files')
+}
+
+/**
+ * Any observed mutation, by the main loop, a helper or a tree that moved, ends a read-only claim for good, withdraws the guard's
+ * completion record (it was about a tree that no longer exists) and makes what was verified stale.
+ */
+export const markEdited = (task: Task, why: string): Task => {
+  const { guardDone: _stale, ...rest } = task
+
+  return reopenVerification(reclassifyChanged({ ...rest, edited: true }, task.updatedAt), why)
+}
+
+/** The guard's completion record no longer holds (the tree moved, or it cannot be shown to match). */
+export const withdrawDone = (task: Task): Task => {
+  const { guardDone: _stale, ...rest } = task
+
+  return rest
 }
 
 export const newTask = (id: number, goal: string, now: number, startSha: string | null): Task => ({
@@ -195,7 +222,10 @@ export const unsatisfiedGates = (task: Task): GateName[] =>
 export const isReviewSatisfied = (task: Task): boolean => task.review === undefined || task.review.state === 'adjudicated'
 
 /** True when nothing but the gates, the consultation and the goal check stand between the milestones and DONE. */
-const isVerified = (task: Task): boolean => !isGuardHeld(task) && areGatesSatisfied(task) && isReviewSatisfied(task) && isAlignmentSatisfied(task)
+/** The guard's own record of completion is for this very task. */
+export const isGuardOwned = (task: Task): boolean => task.guardDone !== undefined && task.guardDone.uid === uidOf(task)
+
+const isVerified = (task: Task): boolean => !isGuardHeld(task) && (!guardRequired || isGuardOwned(task)) && areGatesSatisfied(task) && isReviewSatisfied(task) && isAlignmentSatisfied(task)
 
 const reviewNote = (task: Task): string =>
   task.review === undefined ? '' : `Opus consultation (${task.review.grounds.join(', ')}) ${task.review.state}`
@@ -535,7 +565,7 @@ export const touchFile = (task: Task, path: string, added: number, removed: numb
         )
       : [...task.files, { path, added, removed }].slice(-MAX_FILES)
 
-  return reopenVerification(reclassifyChanged({ ...task, files, edited: true }, task.updatedAt), 'files changed')
+  return markEdited({ ...task, files }, 'files changed')
 }
 
 /**
@@ -566,7 +596,7 @@ export const treeMoved = (task: Task, tree: string | null): Task => {
   const accepted = task.alignment?.tree
   if (tree === null || task.alignment?.state !== 'ALIGNED' || typeof accepted !== 'string' || accepted === tree) return task
 
-  return reopenVerification({ ...task, edited: true }, 'the working tree changed')
+  return markEdited(task, 'the working tree changed')
 }
 
 /** Distinct files the main loop edits before a task without a plan is reminded of one. */
@@ -607,7 +637,9 @@ export const summaryOf = (task: Task | null): string => {
       ? 'DONE: every milestone complete and every required gate satisfied.'
       : task.status === 'unverified'
         ? open.length === 0
-          ? !isReviewSatisfied(task)
+          ? guardRequired && !isGuardOwned(task) && isReviewSatisfied(task) && isAlignmentSatisfied(task)
+            ? 'UNVERIFIED: not done until the Stop guard has completed the check for this task and tree.'
+            : !isReviewSatisfied(task)
             ? `UNVERIFIED: not done until the ${reviewNote(task)} is adjudicated.`
             : `UNVERIFIED: ${alignmentNote(task)}; not done until alignment is ALIGNED (action "align").`
           : `UNVERIFIED: not done until ${open.join(', ')} ${open.length === 1 ? 'is' : 'are'} pass or na.`

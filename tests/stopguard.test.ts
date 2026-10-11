@@ -81,7 +81,7 @@ describe('the hook', () => {
   test('ENFORCE pass: allowed, TEST passed, the script run as one argv element', guard(), async ($, on) => {
     const { w, held } = await armed($, on)
     expect((await stop($)).block).toBeUndefined()
-    expect(w.runs.filter(r => r.includes(SCRIPT))).toEqual([[SCRIPT]])
+    expect(w.runs.filter(r => r[0] === SCRIPT || r[0] === 'sh' || r[0] === 'bash')).toEqual([[SCRIPT]])
     expect((held.get('task')!.value as any).gates.TEST.state).toBe('pass')
   })
   test('fail then repair: blocked with the reason, then allowed; other gates stay independent', guard(), async ($, on) => {

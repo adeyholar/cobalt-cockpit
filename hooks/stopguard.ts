@@ -43,9 +43,25 @@ export type StopConfig = {
   pin: string | null
   timeoutMs: number
   maxAttempts: number
+  /**
+   * Operator-authorized prefixes (relative to the repository, ending in /) whose IGNORED entries do not count in the fingerprint:
+   * dependency caches, build output, temporary logs. They never exclude a tracked or untracked file, and never the verifier.
+   */
+  volatile: string[]
+  /** Operator-listed paths whose content is hashed into the fingerprint whatever git says about them (ignored configs, a verifier's dependencies). */
+  watch: string[]
   /** Why the configuration is not usable, one line each. */
   problems: string[]
 }
+
+const listOf = (raw: unknown): string[] => (typeof raw === 'string' ? raw.split(',').map(x => x.trim()).filter(Boolean).slice(0, 64) : [])
+
+/** A volatile prefix: relative, a directory, no traversal, not git's own, and not covering the root. */
+export const volatileOf = (raw: unknown): string[] =>
+  listOf(raw).filter(x => /^[A-Za-z0-9._@+ -]+(?:\/[A-Za-z0-9._@+ -]+)*\/$/.test(x) && !x.split('/').some(part => part === '.' || part === '..' || part === '.git') && x.length <= 200)
+
+/** A watched path: no traversal or control characters; relative to the repository or absolute. */
+export const watchOf = (raw: unknown): string[] => listOf(raw).filter(x => x.length <= 300 && !/[\0\r\n]/.test(x) && !x.split('/').some(part => part === '..'))
 
 const clampInt = (x: unknown, lo: number, hi: number, fallback: number): number => (typeof x === 'number' && Number.isFinite(x) ? Math.min(hi, Math.max(lo, Math.round(x))) : fallback)
 
@@ -76,12 +92,15 @@ export const configOf = (options: Readonly<Record<string, unknown>>, home: strin
     policy, script, pin,
     timeoutMs: clampInt((typeof options['verifyTimeoutSec'] === 'number' ? options['verifyTimeoutSec'] * 1000 : undefined), 1000, TIMEOUT_CEILING_MS, 120_000),
     maxAttempts: clampInt(options['stopMaxContinuations'], 1, MAX_ATTEMPTS_CEILING, 3),
+    // a volatile prefix never covers the verifier or a watched path: that exclusion would hide what the check stands on
+    volatile: volatileOf(options['stopVolatile']).filter(v => !(script?.includes(`/${v}`) ?? false) && !watchOf(options['stopWatch']).some(w => w.startsWith(v))),
+    watch: watchOf(options['stopWatch']),
     problems,
   }
 }
 
-export type Outcome = 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable' | 'released'
-export const OUTCOMES: readonly Outcome[] = ['pass', 'fail', 'timeout', 'error', 'missing', 'untrusted', 'unstable', 'released']
+export type Outcome = 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable' | 'released' | 'unchanged'
+export const OUTCOMES: readonly Outcome[] = ['pass', 'fail', 'timeout', 'error', 'missing', 'untrusted', 'unstable', 'released', 'unchanged']
 export type CheckRecord = {
   taskId: number
   /** Which task, across resets and restarts: task numbers start again at 1, this does not. */

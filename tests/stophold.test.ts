@@ -510,12 +510,26 @@ describe('the baseline policy', () => {
     await prompt($, 'explain the parser'); await enroll($)
     await plan($); await finishAll($); await stop($)
     expect(taskOf(h).status).toBe('done')
-    w.tree['src/work-between-tasks.ts'] = 'x'
-    await prompt($, 'explain the lexer')
+    await prompt($, 'explain the lexer')                                              // nothing changed between the tasks
     await plan($)
+    expect(taskOf(h).id).toBe(2)
     expect(taskOf(h).kind).toBe('readonly')
     await finishAll($); await stop($)
     expect(ranOf(w)).toBe(0)
+  })
+  test('H-1 (owner decision): work done between tasks is never accepted as the next baseline', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await prompt($, 'explain the parser'); await enroll($)
+    await plan($); await finishAll($); await stop($)
+    expect(taskOf(h).status).toBe('done')
+    w.tree['src/work-between-tasks.ts'] = 'x'
+    await prompt($, 'explain the lexer')
+    expect(taskOf(h).id).toBe(1)                                                       // the finished task is held, not left behind
+    expect(taskOf(h).stopHold).toBeDefined()
+    await plan($)
+    expect(taskOf(h).kind).toBe('coding')
+    await finishAll($); await stop($)
+    expect(ranOf(w)).toBeGreaterThan(0)
   })
   test('without the Stop guard enforcing, the claim is accepted as before', { options: { stopGuard: 'OBSERVE' } }, async ($, on) => {
     const { h } = fixture(on)
@@ -594,17 +608,18 @@ describe('M2: a migrated hold does not stand beside DONE', () => {
     expect(taskOf(h).stopHold).toBeDefined()
     expect(taskOf(h).id).toBe(1)
   })
-  test('a legitimately completed legacy task is left DONE', guard(), async ($, on) => {
+  test('a legacy task finished before the guard owned completion is held for one check, not trusted', guard(), async ($, on) => {
     world(on)
     on('session.id', () => ({ value: 's1' }))
     on('classic.SessionStart', () => ({}) as never)
     const finished = { ...done(), blocker: null }
     const h = hostState(on, { task: finished, 'run-ledger': { ...emptyLedger('s1'), stopChecks: [rec({ outcome: 'pass', exit: 0, complete: true })] } })
     await start($); await $.classic.SessionStart({ source: 'startup' } as never)
-    expect(taskOf(h).stopHold).toBeUndefined()
-    expect(taskOf(h).status).toBe('done')
-    expect(taskOf(h).percent).toBe(100)
+    expect(taskOf(h).status).not.toBe('done')                                          // a pass with no tree identity is no completion record
+    expect(taskOf(h).stopHold).toBeDefined()
+    expect(taskOf(h).percent).toBeLessThan(100)
   })
+
 })
 
 describe('M3: a task carried into a session with an empty Ledger', () => {

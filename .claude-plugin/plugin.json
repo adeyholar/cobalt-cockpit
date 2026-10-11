@@ -90,6 +90,18 @@
       "description": "How many refused stops one task may take before it is marked BLOCKED and the stop is allowed. Default 3, maximum 10.",
       "default": 3
     },
+    "stopVolatile": {
+      "type": "string",
+      "title": "Volatile ignored directories (optional)",
+      "description": "Comma-separated repository-relative directories ending in / (for example node_modules/,dist/,.pytest_cache/) whose git-IGNORED entries are left out of the change fingerprint, so caches and build output do not turn read-only work into coding. They never exclude a tracked or untracked file, and a directory that holds the verifier or a watched path is refused. Anything a model writes inside them goes unseen: you are accepting that. Default: none.",
+      "default": ""
+    },
+    "stopWatch": {
+      "type": "string",
+      "title": "Watched files (optional)",
+      "description": "Comma-separated paths (repository-relative or absolute) whose content is hashed into the change fingerprint even when git ignores them: an ignored config, the files your verifyScript depends on. The verifyScript itself is always watched.",
+      "default": ""
+    },
     "guardAlerts": {
       "type": "boolean",
       "title": "Cobalt Guard owner alerts",

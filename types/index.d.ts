@@ -110,7 +110,7 @@ export type StopCheck = {
   name: string
   sha: string | null
   at: number
-  outcome: 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable' | 'released'
+  outcome: 'pass' | 'fail' | 'timeout' | 'error' | 'missing' | 'untrusted' | 'unstable' | 'released' | 'unchanged'
   exit: number | null
   ms: number | null
   tree: string | null
@@ -170,6 +170,12 @@ export type Task = {
    * While it is present the task cannot read DONE, whatever its milestones, gates or blocker say.
    */
   stopHold?: StopHold
+  /**
+   * Written only by the Stop guard, never by the progress tool: the guard decided this task, for this tree, is complete.
+   * `uid` is the task's identity, `tree` the fingerprint it was measured against, `check` the Ledger record it rests on.
+   * In ENFORCE a task reads DONE only while this record is present, matches the task and still matches the tree.
+   */
+  guardDone?: GuardDone
   /** Present (1) once the Stop guard's protected state has been settled for this task. A task saved before it existed carries none, and is migrated once. */
   guardSchema?: 1
   /** The task's identity across plans (a plan continues a task; only a person's reset starts a new one). Absent: `id@startedAt`. */

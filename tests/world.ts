@@ -45,6 +45,14 @@ export type World = {
   indexFlags: string
   /** Paths `git ls-files -o` lists as untracked and not ignored. */
   untracked: string[]
+  /** Entries `git ls-files -o -i` lists: untracked and ignored (by .gitignore, info/exclude or a global file). */
+  ignoredEntries: string[]
+  /** `size mtime` per ignored entry, as stat reports it; absent means `1 1`. */
+  ignoredMeta: Record<string, string>
+  /** Content of files outside git's view that the fingerprint watches (path -> content). */
+  watched: Record<string, string>
+  /** Calls to stat, for cost. */
+  statCalls: number
   /** A git subcommand that times out (throws), by name. */
   gitHangs: string | null
   /** The content of .git/info/exclude. */
@@ -139,6 +147,10 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     gitStatus: CLEAN_REPO,
     indexFlags: '',
     untracked: [],
+    ignoredEntries: [],
+    ignoredMeta: {},
+    watched: {},
+    statCalls: 0,
     gitHangs: null,
     excludes: '',
     tree: {},
@@ -308,12 +320,25 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     w.runEnvs.push(e.init?.env)
     if (w.duringRun !== null) await w.duringRun(e.argv)
     const program = e.argv[0] ?? ''
+    if (program === 'stat' && e.argv.includes('--printf') && w.players['stat'] !== 'fails') {
+      w.statCalls++
+      const names = e.argv.slice(e.argv.indexOf('--') + 1)
+
+      return ran(0, names.map(n => `${w.ignoredMeta[n] ?? '1 1'} ${n}\0`).join(''))
+    }
     if (program === 'realpath') return ran(0, String(e.argv.at(-1)) + '\n')
     if (program === 'git') {
       if (w.gitStatus === null) return ran(128)
 
-      const sub = e.argv.slice(e.argv[1] === '--no-optional-locks' ? 2 : 1)
-      const git = sub[0] === '-C' ? sub.slice(2) : sub
+      // global options (--no-optional-locks, --no-replace-objects, -c k=v) and -C <top> come before the subcommand
+      let at = 1
+      while (at < e.argv.length) {
+        const a = e.argv[at] as string
+        if (a === '-c' || a === '-C') at += 2
+        else if (a.startsWith('--no-')) at += 1
+        else break
+      }
+      const git = e.argv.slice(at)
       if (w.gitHangs !== null && git[0] === w.gitHangs) throw new Error('git was still running at the timeout')
       if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, '/work/example/.git/info/exclude\n')
       if (git[0] === 'config') return ran(1)
@@ -326,8 +351,8 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
         return ran(0, git.includes('--diff-filter=D') ? '' : seen.join('\0') + (seen.length ? '\0' : ''))
       }
       if (git[0] === 'status' && git.includes('--porcelain')) return ran(0, w.uncommitted ? ' M src/api.js\n' : '')
-      if (git[0] === 'ls-files') return ran(0, git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')
-      if (git[0] === 'hash-object') return ran(0, git.slice(git.indexOf('--') + 1).map(path => `h${[...(path.endsWith('info/exclude') ? w.excludes : (w.tree[path] ?? (w.untracked.includes(path) ? 'u' : '')))].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`).join('\n') + '\n')
+      if (git[0] === 'ls-files') return ran(0, git.includes('-i') ? w.ignoredEntries.join('\0') + (w.ignoredEntries.length ? '\0' : '') : git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')
+      if (git[0] === 'hash-object') return ran(0, git.slice(git.indexOf('--') + 1).map(path => `h${[...(path.endsWith('info/exclude') ? w.excludes : (w.watched[path] ?? w.tree[path] ?? (w.untracked.includes(path) ? 'u' : '')))].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`).join('\n') + '\n')
 
       return ran(0, w.gitStatus)
     }

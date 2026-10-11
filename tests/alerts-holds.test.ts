@@ -92,7 +92,7 @@ describe('script trust and configuration', () => {
     const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
     await start($); await progress($, { action: 'plan', milestones: FIVE }); await enroll($)
     await stop($)
-    expect(w.runs.filter(r => r.includes(SCRIPT))).toEqual([[SCRIPT]])
+    expect(w.runs.filter(r => r[0] === SCRIPT || r[0] === 'sh' || r[0] === 'bash')).toEqual([[SCRIPT]])
     expect(w.runs.some(r => ['sh', 'bash', '-c'].includes(r[0] ?? ''))).toBe(false)
   })
 })

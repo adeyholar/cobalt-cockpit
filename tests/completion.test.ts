@@ -3,7 +3,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { emptyLedger } from '../hooks/ledger'
 import { summaryOf } from '../hooks/model'
-import type { CheckRecord } from '../hooks/stopguard'
+import { configOf, volatileOf, watchOf, type CheckRecord } from '../hooks/stopguard'
 import { clearHold, holdTask, newTask, planTask, releaseHold, settle, touchFile } from '../hooks/model'
 import type { Task } from '../types'
 import { FIVE, command, hostState, passAllGates, planAndComplete, progress, prompt, start, world } from './world'
@@ -281,6 +281,146 @@ describe('git index flags and exclude sources', () => {
   })
 })
 
+describe('L-1: a repository cannot talk the fingerprint out of seeing a change', () => {
+  const gitCalls = (w: any) => w.runs.filter((r: string[]) => r[0] === 'git')
+  const scriptRuns = (w: any) => w.runs.filter((r: string[]) => r[0] === SCRIPT).length
+  const roTask = async ($: any, on: any, setup: (w: any) => void = () => {}) => {
+    const { w, h } = fixture(on)
+    setup(w)
+    await prompt($, 'explain the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    await finishAll($)
+    return { w, h }
+  }
+  test('every git call ignores replace refs, fsmonitor, submodule ignore settings and the untracked cache', guard(), async ($, on) => {
+    const { w } = await roTask($, on)
+    await stop($)
+    const calls = gitCalls(w)
+    expect(calls.length).toBeGreaterThan(8)
+    for (const call of calls) {
+      expect(call).toContain('--no-replace-objects')
+      expect(call).toContain('core.fsmonitor=false')
+      expect(call).toContain('core.untrackedCache=false')
+      expect(call).toContain('diff.ignoreSubmodules=none')
+    }
+    for (const call of calls.filter((c: string[]) => c.includes('diff'))) expect(call).toContain('--ignore-submodules=none')
+  })
+  test('a new file hidden by a self-ignoring .gitignore (or any exclude source) moves into the ignored list: CHANGED', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on)
+    w.ignoredEntries.push('src/.gitignore', 'src/new-secret.ts')                      // untracked list stays empty, as git reports it
+    expect((await stop($)).block).toBeDefined()
+    expect(taskOf(h).kind).toBe('coding')
+    notFinished(taskOf(h))
+  })
+  test('negative control: ignored entries that were there at the start are not a change', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.ignoredEntries = ['node_modules/', 'dist/'] })
+    await stop($)
+    expect(scriptRuns(w)).toBe(0)
+    expect(taskOf(h).status).toBe('done')
+  })
+  test('too many ignored entries is UNKNOWN with that reason, never a match', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    w.ignoredEntries = Array.from({ length: 20_001 }, (_, i) => `out/f${i}`)
+    await prompt($, 'explain the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    await finishAll($)
+    await stop($)
+    expect(scriptRuns(w)).toBe(1)
+    const kept = ((h.get('run-ledger')?.value ?? {}) as { stopChecks?: CheckRecord[] }).stopChecks ?? []
+    expect(kept.at(-1)?.summary).toContain('more than 20000 ignored entries')
+  })
+})
+
+describe('ignored files: relevance, volatility and coverage', () => {
+  const scriptRuns = (w: any) => w.runs.filter((r: string[]) => r[0] === SCRIPT).length
+  const gitRuns = (w: any) => w.runs.filter((r: string[]) => r[0] === 'git').length
+  const roTask = async ($: any, on: any, setup: (w: any) => void = () => {}) => {
+    const { w, h } = fixture(on)
+    setup(w)
+    await prompt($, 'explain the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    await finishAll($)
+    return { w, h }
+  }
+  const SEEN = { ignoredEntries: ['.cache/index.db', 'logs/app.log'] }
+  test('a new ignored cache file is a change (names)', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.ignoredEntries = [...SEEN.ignoredEntries] })
+    w.ignoredEntries.push('.cache/new.db')
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('an existing ignored file rewritten is a change (size/mtime), though its name is the same', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.ignoredEntries = [...SEEN.ignoredEntries] })
+    w.ignoredMeta['.cache/index.db'] = '4096 99'
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+    expect(scriptRuns(w)).toBeGreaterThan(0)
+  })
+  test('the verifier script is watched by content, even where git cannot see it', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.watched[SCRIPT] = 'exit 1' })
+    w.watched[SCRIPT] = 'exit 0'                                                       // the check itself was rewritten
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('an operator-listed watch path (an ignored config) is watched by content', guard({ stopWatch: 'config/local.json' }), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.watched['/work/example/config/local.json'] = 'a' })
+    w.watched['/work/example/config/local.json'] = 'b'
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('operator-authorized volatile directories: churn inside them is neither a change nor a cost', guard({ stopVolatile: 'node_modules/,dist/' }), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.ignoredEntries = ['node_modules/', ...Array.from({ length: 30_000 }, (_, i) => `dist/chunk-${i}.js`)] })
+    w.ignoredEntries.push('dist/new-chunk.js'); w.ignoredMeta['node_modules/'] = '4096 99'
+    const before = gitRuns(w)
+    await stop($)
+    expect(scriptRuns(w)).toBe(0)
+    expect(taskOf(h).status).toBe('done')
+    expect(w.statCalls).toBeLessThanOrEqual(2)                                        // 30000 volatile entries were never stat'ed
+    expect(gitRuns(w) - before).toBeLessThanOrEqual(16)
+  })
+  test('volatile does not exclude an untracked file, whatever the prefix', guard({ stopVolatile: 'dist/' }), async ($, on) => {
+    const { w, h } = await roTask($, on)
+    w.untracked.push('dist/hand-written.ts')
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('volatile does not exclude a tracked change, whatever the prefix', guard({ stopVolatile: 'dist/' }), async ($, on) => {
+    const { w, h } = await roTask($, on)
+    w.tree['dist/also-tracked.ts'] = 'x'
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('without the option the same churn IS a change: the exclusion is the operator\'s, never default', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.ignoredEntries = ['dist/a.js'] })
+    w.ignoredEntries.push('dist/b.js')
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('an exclude rule added mid-task is a change, whatever it hides', guard({ stopVolatile: 'dist/' }), async ($, on) => {
+    const { w, h } = await roTask($, on)
+    w.excludes = 'src/\n'
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+  })
+  test('ignored entries that cannot be measured are UNKNOWN: checked, never a match', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    w.ignoredEntries = ['.cache/index.db']
+    w.players['stat'] = 'fails'
+    await prompt($, 'explain the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    await finishAll($)
+    await stop($)
+    expect(scriptRuns(w)).toBe(1)
+    expect(taskOf(h).guardDone).toBeUndefined()
+  })
+  test('config: volatile prefixes are validated and cannot cover the verifier or a watched path', () => {
+    expect(volatileOf('dist/, node_modules/ ,../etc/,/abs/,.git/,a/../b/,src,')).toEqual(['dist/', 'node_modules/'])
+    expect(configOf({ stopGuard: 'ENFORCE', verifyScript: '/work/tools/check.sh', stopVolatile: 'tools/,dist/', stopWatch: 'dist/x.json' }, null).volatile).toEqual([])
+    expect(configOf({ stopGuard: 'ENFORCE', verifyScript: '/work/check.sh', stopVolatile: 'dist/' }, null).volatile).toEqual(['dist/'])
+    expect(watchOf('a/b.json,../x,/abs/f')).toEqual(['a/b.json', '/abs/f'])
+  })
+})
+
 describe('Lows: legacy adoption at a prompt, and /clear', () => {
   test('a prompt adopts a legacy held task before it can be replaced', guard(), async ($, on) => {
     world(on)
@@ -395,7 +535,7 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     expect(last.block).toBeUndefined()                                                // bounded: the loop ends
     expect(taskOf(h).stopHold).toBeDefined()
   })
-  test('5b a git timeout with a passing check: finished on evidence, not on the absence of it', guard(), async ($, on) => {
+  test('5b a git timeout with a passing check is not a completion: held, no record, reason kept', guard(), async ($, on) => {
     const { w, h } = fixture(on, 'ok')
     await prompt($, 'explain the parser'); await enroll($)
     await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
@@ -403,8 +543,9 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     w.gitHangs = 'diff'
     await stop($)
     expect(scriptRuns(w)).toBe(1)
-    expect(taskOf(h).stopHold).toBeUndefined()
-    expect(taskOf(h).gates.TEST.state).toBe('pass')
+    expect(taskOf(h).stopHold).toBeDefined()
+    expect(taskOf(h).guardDone).toBeUndefined()
+    notFinished(taskOf(h))
   })
   test('7 a non-git workspace: UNKNOWN, checked once on a failing script, held, bounded', guard(), async ($, on) => {
     const { w, h } = fixture(on)
