@@ -509,7 +509,7 @@ describe('Medium M-1 / L-2 / L-3 of the guard-owned completion review', () => {
     register(sink, { stopGuard: 'OBSERVE', verifyScript: '~/check.sh' })
     expect(isGuardRequired()).toBe(false)
     register(sink, { stopGuard: 'ENFORCE' })
-    expect(isGuardRequired()).toBe(false)                                              // nothing to enforce without a script
+    expect(isGuardRequired()).toBe(true)                                               // F4: ENFORCE without a script is not OBSERVE; completion stays the guard's
     setGuardRequired(false)
   })
 })
@@ -678,6 +678,42 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     await finishAll($)
     await stop($)
     expect(scriptRuns(w)).toBeGreaterThan(0)
+    notFinished(taskOf(h))
+  })
+})
+
+describe('F3: a background change after the guard completed a task', () => {
+  const finished = async ($: any, on: any) => {
+    const fx = fixture(on, 'ok')
+    await prompt($, 'fix the parser'); await enroll($)
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'e1', file_path: '/work/example/a.ts', old_string: 'a', new_string: 'b' } as never)
+    await progress($, { action: 'plan', milestones: FIVE })
+    for (const m of ['m1', 'm2', 'm3', 'm4']) await progress($, { action: 'complete', milestone: m })
+    await passAllGates($); await progress($, { action: 'complete', milestone: 'm5' })
+    await stop($)
+    expect(taskOf(fx.h).status).toBe('done')
+
+    return fx
+  }
+  test('the next stop re-checks instead of trusting the old record', guard(), async ($, on) => {
+    const { w, h } = await finished($, on)
+    const before = w.runs.filter(r => r[0] === SCRIPT).length
+    w.tree['src/bg.ts'] = 'changed by a background process'
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(before + 1)
+    expect(taskOf(h).guardDone?.tree).toBeDefined()
+  })
+  test('the next prompt does not carry DONE over a changed tree', guard(), async ($, on) => {
+    const { w, h } = await finished($, on)
+    w.tree['src/bg.ts'] = 'changed by a background process'
+    await prompt($, 'now something else entirely please')
+    expect(taskOf(h).guardDone).toBeUndefined()
+  })
+  test('a progress status read after the change does not report DONE', guard(), async ($, on) => {
+    const { w, h } = await finished($, on)
+    w.tree['src/bg.ts'] = 'changed by a background process'
+    const text = await progress($, { action: 'status' })
+    expect(text).not.toMatch(/\bDONE\b|100%/)
     notFinished(taskOf(h))
   })
 })

@@ -281,3 +281,64 @@ describe('completion integrity', () => {
     expect(runs(w)).toBe(first + 1)
   })
 })
+
+describe('ENFORCE does not fail open', () => {
+  const DIRTY = '# branch.oid abc\n# branch.head main\n1 .M N... 100644 100644 100644 a b src/x.ts\n'
+  const scripted = (on: any, status: string | null = DIRTY) => {
+    const w = world(on, status === null ? {} : { gitStatus: status }); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'fails'
+    const held = hostState(on, {})
+
+    return { w, held }
+  }
+  test('F1: files edited with no prompt and no plan still call for the check', guard(), async ($, on) => {
+    const { w } = scripted(on)
+    await start($); await enroll($)
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'e1', file_path: '/work/example/a.ts', old_string: 'a', new_string: 'b' } as never)
+    expect((await stop($)).block).toBeDefined()
+    expect(runs(w)).toBe(1)
+  })
+  test('F1: a dirty repository with no task at all calls for the check', guard(), async ($, on) => {
+    const { w } = scripted(on)
+    await start($); await enroll($)
+    expect((await stop($)).block).toBeDefined()
+    expect(runs(w)).toBe(1)
+  })
+  test('F1: a reset task followed by edits calls for the check', guard(), async ($, on) => {
+    const { w } = scripted(on)
+    await start($); await prompt($, 'Please tidy the repository'); await enroll($)
+    await command($, 'reset')
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'e2', file_path: '/work/example/a.ts', old_string: 'a', new_string: 'b' } as never)
+    expect((await stop($)).block).toBeDefined()
+    expect(runs(w)).toBe(1)
+  })
+  test('F1: no task and a clean repository needs no check', guard(), async ($, on) => {
+    const { w } = scripted(on, null)
+    await start($)
+    expect((await stop($)).block).toBeUndefined()
+    expect(runs(w)).toBe(0)
+  })
+  for (const bad of ['enforce', 'Enforce ', 'ENFORCED', 'true', 'on', 1, true]) {
+    test(`F4: stopGuard ${JSON.stringify(bad)} is not silently OBSERVE`, async ($, on) => {
+      const c = configOf({ stopGuard: bad, verifyScript: SCRIPT }, null)
+      expect(c.policy).toBe('ENFORCE')
+      expect(c.problems.join()).toContain('stopGuard')
+    })
+  }
+  test('F4: OBSERVE and absent stay OBSERVE with no problem', async () => {
+    for (const v of [undefined, 'OBSERVE', '']) expect(configOf({ stopGuard: v }, null)).toMatchObject({ policy: 'OBSERVE', problems: [] })
+  })
+  test('F4: ENFORCE with a malformed verifyScript refuses the stop once, then allows (bounded)', guard({ verifyScript: '../relative.sh' }), async ($, on) => {
+    const { w } = scripted(on)
+    await start($); await prompt($, 'Please tidy the repository')
+    const first = await stop($)
+    expect(first.block).toContain('STOP GUARD')
+    expect(first.block).toContain('verifyScript')
+    expect((await stop($, { stop_hook_active: true })).block).toBeUndefined()
+    expect(runs(w)).toBe(0)
+  })
+  test('F4: a malformed pin refuses the stop once', guard({ verifyScriptSha256: 'abc' }), async ($, on) => {
+    scripted(on)
+    await start($); await prompt($, 'Please tidy the repository')
+    expect((await stop($)).block).toContain('verifyScriptSha256')
+  })
+})

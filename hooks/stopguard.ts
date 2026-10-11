@@ -79,13 +79,19 @@ export const scriptPathOf = (raw: unknown, home: string | null): string | null =
 
 export const configOf = (options: Readonly<Record<string, unknown>>, home: string | null): StopConfig => {
   const problems: string[] = []
-  const policy: Policy = options['stopGuard'] === 'ENFORCE' ? 'ENFORCE' : 'OBSERVE'
+  // Only an absent value or exactly OBSERVE is OBSERVE. Anything else is an attempt at ENFORCE that was not understood, and it
+  // stays ENFORCE with a stated problem: a typo must not quietly turn the owner's verification off.
+  const rawPolicy = options['stopGuard']
+  const isObserve = rawPolicy === undefined || rawPolicy === null || rawPolicy === 'OBSERVE' || (typeof rawPolicy === 'string' && rawPolicy.trim() === '')
+  const policy: Policy = isObserve ? 'OBSERVE' : 'ENFORCE'
+  if (!isObserve && rawPolicy !== 'ENFORCE') problems.push('stopGuard must be exactly OBSERVE or ENFORCE; the value given was not understood, so verification stays required and stops are refused until it is fixed')
   const rawScript = options['verifyScript']
-  const script = typeof rawScript === 'string' && rawScript.trim() !== '' ? scriptPathOf(rawScript, home) : null
-  if (typeof rawScript === 'string' && rawScript.trim() !== '' && script === null) problems.push('verifyScript must be an absolute path (or ~/…) with no "..", no newline and no trailing slash')
+  const isScriptGiven = rawScript !== undefined && rawScript !== null && !(typeof rawScript === 'string' && rawScript.trim() === '')
+  const script = typeof rawScript === 'string' && isScriptGiven ? scriptPathOf(rawScript, home) : null
+  if (isScriptGiven && script === null) problems.push('verifyScript must be an absolute path (or ~/…) with no "..", no newline and no trailing slash')
   const rawPin = options['verifyScriptSha256']
   const pin = typeof rawPin === 'string' && /^[0-9a-f]{64}$/i.test(rawPin.trim()) ? rawPin.trim().toLowerCase() : null
-  if (typeof rawPin === 'string' && rawPin.trim() !== '' && pin === null) problems.push('verifyScriptSha256 must be 64 hex characters')
+  if (rawPin !== undefined && rawPin !== null && !(typeof rawPin === 'string' && rawPin.trim() === '') && pin === null) problems.push('verifyScriptSha256 must be 64 hex characters')
   if (policy === 'ENFORCE' && script === null && problems.length === 0) problems.push('ENFORCE needs verifyScript: with no named check there is nothing to enforce, so stops are allowed')
 
   return {

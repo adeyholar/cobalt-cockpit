@@ -25,7 +25,7 @@ const enroll = async ($: any): Promise<void> => {
   const sha = /sha-256  ([0-9a-f]{64})/.exec(String((await command($, 'guard trust')).text))![1]!
   await command($, `guard trust ${sha.slice(0, 12)}`)
 }
-const stop = ($: any) => $.classic.Stop({ stop_hook_active: false, last_assistant_message: SUMMARY }) as Promise<{ block?: string }>
+const stop = ($: any, over: Record<string, unknown> = {}) => $.classic.Stop({ stop_hook_active: false, last_assistant_message: SUMMARY, ...over }) as Promise<{ block?: string }>
 
 describe('an open mandatory review', () => {
   test('is told to the owner once at stop, and stays open', { options: OPTS }, async ($, on) => {
@@ -85,7 +85,8 @@ describe('script trust and configuration', () => {
   test('the script is only ever the owner\'s configured path, never text from the task', { options: { orchestration: true, stopGuard: 'ENFORCE', verifyScript: 'relative/check.sh' } }, async ($, on) => {
     const w = world(on); w.files['relative/check.sh'] = 'exit 0'; w.players['relative/check.sh'] = 'ok'
     await start($); await progress($, { action: 'plan', milestones: FIVE })
-    expect((await stop($)).block).toBeUndefined()
+    expect((await stop($)).block).toContain('STOP GUARD')                              // F4: refused once, never run
+    expect((await stop($, { stop_hook_active: true })).block).toBeUndefined()
     expect(w.runs.some(r => (r[0] ?? '').includes('check.sh'))).toBe(false)
   })
   test('a check is run as an argv of exactly one element, with no shell', { options: { orchestration: true, stopGuard: 'ENFORCE', verifyScript: SCRIPT } }, async ($, on) => {

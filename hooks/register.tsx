@@ -2553,7 +2553,7 @@ const guardEnforcing = (): boolean => stopCfg.policy === 'ENFORCE' && stopCfg.pr
 
 const loadStopCfg = async ($: EngineInterface): Promise<StopConfig> => {
   stopCfg = stopConfigOf(stopOptions, (await $.env.get('HOME').catch(() => undefined)) ?? null)
-  setGuardRequired(guardEnforcing())
+  setGuardRequired(stopCfg.policy === 'ENFORCE')
 
   return stopCfg
 }
@@ -2722,8 +2722,26 @@ const reconcileCompletion = async ($: EngineInterface): Promise<void> => {
 const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; last_assistant_message?: string }): Promise<string | null> => {
   await loadStopCfg($)
   await hush(() => adoptLegacyHold($))
-  const task = await read($, taskAtom)
-  if (stopCfg.policy !== 'ENFORCE' || stopCfg.problems.length > 0 || stopCfg.script === null || task === null) return null
+  let task = await read($, taskAtom)
+  if (stopCfg.policy !== 'ENFORCE') return null
+  // ENFORCE that cannot be carried out is not OBSERVE. The stop is refused once with the reason (a person can always end the
+  // session: the repeat is allowed), and a task is held so it cannot read DONE until the configuration is fixed and a check passes.
+  if (stopCfg.problems.length > 0 || stopCfg.script === null) {
+    const problem = stopCfg.problems.join('; ') || 'verifyScript is not set'
+    if (task !== null && !isGuardHeld(task)) await change($, (t, now) => holdTask(t, `the Stop guard is set to ENFORCE but cannot run: ${problem}`, 0, now))
+
+    return e.stop_hook_active === true ? null : `STOP GUARD: ENFORCE is configured but cannot run (${problem}). Nothing has been verified. Tell the person to fix the plugin options; do not claim the work is verified. (this stop is refused once)`
+  }
+  // Work with no task at all (no prompt was seen, or the task was reset) is still work: a changed repository is checked as a
+  // coding task, and only a repository known to be clean needs nothing.
+  if (task === null) {
+    await quiet(() => refreshGit($))
+    if (((await read($, gitAtom))?.dirty ?? 0) === 0) return null
+    const now = await $.clock.now()
+    const sha = (await read($, gitAtom))?.sha ?? null
+    task = await update($, taskAtom, old => old ?? markEdited({ ...newTask(1, '', now, sha), startTree: null }, 'changes were found with no task in progress'))
+    if (task === null) return null
+  }
   // a record that still matches this task and this tree: there is nothing to ask again
   if (!isGuardHeld(task) && isGuardOwned(task) && task.guardDone !== undefined) {
     const now = await treeStamp($, baseOf(task.guardDone.tree))
@@ -2837,7 +2855,7 @@ export const register: Register = (on, options) => {
   stopCfg = stopConfigOf(options, null)
   // Before the first settings read the home directory is unknown, so `~/…` cannot be expanded: ENFORCE with a script named is
   // enforcing already (fail closed); loadStopCfg refines it once the configuration is read.
-  setGuardRequired(options['stopGuard'] === 'ENFORCE' && typeof options['verifyScript'] === 'string' && options['verifyScript'].trim() !== '')
+  setGuardRequired(stopCfg.policy === 'ENFORCE')
   registerLedger(on)
 
   // another Cockpit that registers after this one: all the host lets a plugin see of the others
