@@ -103,8 +103,11 @@ export const doctorText = (f: DoctorFacts): string => {
   out.push(line('INFO', RESTART_TEXT))
   out.push('', 'STOP-HOOK VERIFICATION GUARD')
   const g = f.stop
-  if (g.policy === 'OBSERVE') out.push(line('INFO', 'OBSERVE (default): nothing runs at Stop; no check, no block, no model call'))
-  else {
+  if (g.policy === 'OBSERVE') {
+    out.push(line('INFO', 'OBSERVE (default): nothing runs at Stop; no check, no block, no model call'))
+    // a script named while the effective mode is OBSERVE: the host may have turned a value it did not accept into OBSERVE before the plugin saw it
+    if (g.script !== null || g.problems.length > 0) out.push(line('WARN', 'Verification script configured, but Stop Guard is in OBSERVE mode. Verification is not enforced. Check your configured stopGuard value.'))
+  } else {
     out.push(line(g.problems.length > 0 || g.script === null ? 'WARN' : 'OK', `ENFORCE · script ${g.script ?? 'NOT SET'} · ${g.pinned ? 'sha-256 pinned · ' : ''}trust: ${g.trust}${g.trust === 'enrolled' ? '' : ' (a person must run /cockpit guard trust)'} · timeout ${g.timeoutSec}s · ${g.maxAttempts} attempt${g.maxAttempts === 1 ? '' : 's'} per task`))
     for (const p of g.problems) out.push(line('WARN', p))
     out.push(line('INFO', g.last === null ? 'no check run yet this session' : `last check: ${g.last.outcome}${g.last.exit === null ? '' : ` (exit ${g.last.exit})`}`))

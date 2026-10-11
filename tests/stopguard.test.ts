@@ -151,12 +151,31 @@ describe('the hook', () => {
     expect((await stop($)).block).toBeUndefined()
     expect(runs(w)).toBe(0)
   })
-  test('changes no tool hook saw still call for a check when the repository is dirty', guard(), async ($, on) => {
+  test('changes no tool hook saw still call for a check in a repository that was already dirty', guard(), async ($, on) => {
     const w = world(on, { gitStatus: '# branch.oid abc\n# branch.head main\n1 .M N... 100644 100644 100644 a b src/x.ts\n' }); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'fails'
     hostState(on, {})
     await start($); await prompt($, 'Please tidy the repository'); await enroll($)
+    w.tree['src/x.ts'] = 'changed by a tool no hook saw'        // measured against the task's own start, not against `git status`
     await stop($)
     expect(runs(w)).toBe(1)
+  })
+  test('doctor warns when a script is configured but the mode is OBSERVE, and only then', guard({ stopGuard: 'OBSERVE' }), async ($, on) => {
+    world(on); hostState(on, {})
+    await start($)
+    const out = String((await command($, 'doctor')).text)
+    expect(out).toContain('Verification script configured, but Stop Guard is in OBSERVE mode. Verification is not enforced. Check your configured stopGuard value.')
+    expect(out).not.toContain('ENFORCE ·')
+  })
+  test('doctor has no OBSERVE warning when no script is configured', { options: {} }, async ($, on) => {
+    world(on); hostState(on, {})
+    await start($)
+    expect(String((await command($, 'doctor')).text)).not.toContain('Verification script configured, but Stop Guard is in OBSERVE mode')
+  })
+  test('doctor has no OBSERVE warning under ENFORCE', guard(), async ($, on) => {
+    await armed($, on)
+    const out = String((await command($, 'doctor')).text)
+    expect(out).toContain('ENFORCE ·')
+    expect(out).not.toContain('Verification script configured, but Stop Guard is in OBSERVE mode')
   })
   test('doctor reports the guard and writes no settings', guard(), async ($, on) => {
     const { w } = await armed($, on)
@@ -316,6 +335,39 @@ describe('ENFORCE does not fail open', () => {
     await start($)
     expect((await stop($)).block).toBeUndefined()
     expect(runs(w)).toBe(0)
+  })
+  test('F2 live: a change git status does not list (index flag, ignored by status) after the prompt still calls for the check', guard(), async ($, on) => {
+    const { w } = scripted(on, null)
+    await start($); await enroll($); await prompt($, 'Please tidy the repository')
+    w.tree['src/hidden.ts'] = 'changed under an assume-unchanged flag'
+    expect((await stop($)).block).toBeDefined()
+    expect(runs(w)).toBe(1)
+  })
+  test('F1 live: a repository dirty before the prompt and unchanged since needs no check', guard(), async ($, on) => {
+    const { w } = scripted(on)
+    await start($); await enroll($); await prompt($, 'What is two plus two?')
+    expect((await stop($)).block).toBeUndefined()
+    expect(runs(w)).toBe(0)
+  })
+  test('F1 live: a repository dirty before the prompt and changed since calls for the check', guard(), async ($, on) => {
+    const { w } = scripted(on)
+    await start($); await enroll($); await prompt($, 'Please tidy the repository')
+    w.tree['src/x.ts'] = 'edited after the prompt'
+    expect((await stop($)).block).toBeDefined()
+    expect(runs(w)).toBe(1)
+  })
+  test('F1 live: a clean repository, nothing changed since the prompt, needs no check', guard(), async ($, on) => {
+    const { w } = scripted(on, null)
+    await start($); await enroll($); await prompt($, 'What is two plus two?')
+    expect((await stop($)).block).toBeUndefined()
+    expect(runs(w)).toBe(0)
+  })
+  test('F1 live: git state that cannot be read is unknown, not unchanged, and calls for the check', guard(), async ($, on) => {
+    const { w } = scripted(on, null)
+    w.gitStatus = null
+    await start($); await enroll($); await prompt($, 'Please tidy the repository')
+    await stop($)
+    expect(runs(w)).toBe(1)
   })
   for (const bad of ['enforce', 'Enforce ', 'ENFORCED', 'true', 'on', 1, true]) {
     test(`F4: stopGuard ${JSON.stringify(bad)} is not silently OBSERVE`, async ($, on) => {

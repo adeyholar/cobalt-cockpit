@@ -2675,10 +2675,16 @@ const changeState = async ($: EngineInterface, task: Task): Promise<{ state: Tre
 
     return { state, why: state !== 'UNKNOWN' ? '' : now === null ? treeWhy : 'the task has no known starting fingerprint', tree: now }
   }
-  // changes the tool hooks did not see (an MCP tool, a Bash command with no edit diff) still show in the repository
+  // Changes the tool hooks did not see (an MCP tool, a Bash command with no edit diff) are measured against the task's own start.
+  // `git status` is not that measure: it misses what the index is told to ignore, and a repository dirty before the task is not
+  // evidence of a change made during it.
+  const now = await treeStamp($)
+  if (typeof task.startTree === 'string' && now !== null) return { state: compareTree(task.startTree, now), why: '', tree: now }
+  // no baseline, or a tree that cannot be measured: an unreadable repository is unknown, never unchanged
+  if (now === null) return { state: 'UNKNOWN', why: treeWhy, tree: null }
   await quiet(() => refreshGit($))
 
-  return ((await read($, gitAtom))?.dirty ?? 0) > 0 ? { state: 'CHANGED', why: 'the repository is dirty', tree: null } : { state: 'UNCHANGED', why: '', tree: null }
+  return ((await read($, gitAtom))?.dirty ?? 0) > 0 ? { state: 'CHANGED', why: 'the repository is dirty', tree: now } : { state: 'UNCHANGED', why: '', tree: now }
 }
 
 /** The guard's record that a read-only task changed nothing: only a tree measured equal to the task's own start qualifies. */
