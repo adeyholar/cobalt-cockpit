@@ -183,7 +183,11 @@ describe('through the host', () => {
       expect(w.runs.some(r => ['mkdir', 'chmod', 'stat', 'sh', 'bash', 'python3', 'install'].includes(r[0] ?? ''))).toBe(false)
     })
   }
-  test('a burst of events all lands, each line whole', async ($, on) => {
+  // Forty prompts run through the whole prompt hook at once, about 5 git calls and a ledger write each. Measured in isolation: 1.4 s on a
+  // quiet machine, up to 2.9 s with the load average at 60; the cost is linear in the count and every one of the 40 lines landed whole in
+  // each run (no event is lost, it is only slow), so the default 5 s left a 2x margin that CPU contention erased. 30 s is ten times the worst
+  // measurement; the assertions below still require every line, each whole.
+  test('a burst of events all lands, each line whole', { timeoutMs: 30000 }, async ($, on) => {
     resetStore()
     const w = world(on); await start($)
     await Promise.all(Array.from({ length: 40 }, (_, i) => prompt($, `burst ${i}`)))
