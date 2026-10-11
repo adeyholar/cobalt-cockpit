@@ -105,9 +105,26 @@ export const clearHold = (task: Task, now: number): Task => {
 /** A person releases the hold. It passes nothing: TEST goes back to pending and the goal check starts over. */
 export const releaseHold = (task: Task, now: number): Task => {
   const cleared = clearHold(task, now)
-  const gate: Gate = { ...cleared.gates.TEST, state: 'pending', evidence: 'hold released by a person; the check has not been run again', source: 'auto', at: now }
+  // a release never makes verification optional: TEST stays required (a read-only task is a coding task by now, or becomes one)
+  const gate: Gate = { ...cleared.gates.TEST, isRequired: true, state: 'pending', evidence: 'hold released by a person; the check has not been run again', source: 'auto', at: now }
 
   return invalidateAlignment({ ...cleared, gates: { ...cleared.gates, TEST: gate } }, 'the Stop guard hold was released')
+}
+
+/**
+ * A read-only classification is only as good as the evidence for it. Once a change is seen (an edit the hooks observed, or a
+ * tree that differs from where the task began) the task is a coding task: edited, every gate required again, nothing the
+ * read-only plan marked not applicable survives, and the model cannot undo it by declaring read-only once more.
+ */
+export const reclassifyChanged = (task: Task, now: number): Task => {
+  if (task.kind !== 'readonly') return task
+  const gates = Object.fromEntries(GATES.map(name => {
+    const gate = task.gates[name]
+
+    return [name, gate.state === 'na' && gate.evidence === READONLY_EVIDENCE ? unsetGate(true) : { ...gate, isRequired: true }]
+  })) as Task['gates']
+
+  return invalidateAlignment({ ...task, kind: 'coding', edited: true, gates, updatedAt: now }, 'the read-only task changed files')
 }
 
 export const newTask = (id: number, goal: string, now: number, startSha: string | null): Task => ({
@@ -297,7 +314,7 @@ export const planTask = (task: Task, input: PlanInput, now: number): Outcome => 
     return { task, error: `a plan takes at most ${MAX_MILESTONES} milestones` }
   }
   // a held task cannot be re-declared read-only to shed its verification
-  const kind: TaskKind = input.kind === 'readonly' && !isGuardHeld(task) ? 'readonly' : 'coding'
+  const kind: TaskKind = input.kind === 'readonly' && !isGuardHeld(task) && task.edited !== true ? 'readonly' : 'coding'
   const isReplan = input.isReplan === true && task.milestones.length > 0
   const previous = isReplan ? task.milestones : []
   const milestones = titles.map((one, index): Milestone => {
@@ -518,7 +535,7 @@ export const touchFile = (task: Task, path: string, added: number, removed: numb
         )
       : [...task.files, { path, added, removed }].slice(-MAX_FILES)
 
-  return reopenVerification({ ...task, files, edited: true }, 'files changed')
+  return reopenVerification(reclassifyChanged({ ...task, files, edited: true }, task.updatedAt), 'files changed')
 }
 
 /**

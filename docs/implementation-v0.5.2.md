@@ -50,9 +50,43 @@ A migrated hold is reconciled with the rest of the task at once: a task saved as
 
 The controls here are plugin-level: the hold, the baseline, the enrolled hashes and the check records are fields and store keys the plugin API gives the model no way to write, and the progress tool has no input that reaches them. They are not a sandbox. A model that is allowed a shell, or a tool that reaches the host's files, may be able to write the plugin store file or the project files directly; nothing here stops that, and this document does not claim the store cannot be modified through every capability a host offers. What the design does give is that the ordinary routes (the progress tool, plans, prompts, test output, forged blocker text) cannot lift a hold or skip a check, and that enrollment, release and reset need a person's own command.
 
+### Completion integrity (H1-b)
+
+One rule decides DONE: `isVerified` in `hooks/model.ts` (no protected hold, every required gate pass or not applicable, the review and the goal check satisfied). Status, percent, phase, the HUD, the Ledger projections and the Stop guard all read it; nothing else may say DONE.
+
+- **Hold on every check that did not complete the task.** A failed, timed-out, unstable, errored, untrusted or pass-without-summary check holds the task at once (`stopHold`, refusals counted). The refusal budget bounds the loop of continuations, not the hold: when it is spent the stop is allowed and the task stays BLOCKED. A later passing check with a change summary lifts the hold.
+- **Read-only is only as good as its evidence.** A change seen after a read-only plan, whether an edit the hooks observed (`touchFile`) or a tree that differs from the task's start (`reclassifyChanged` at the Stop), makes it a coding task: `edited`, every gate required and unset, no not-applicable exemption kept, goal check invalid. Declaring read-only again is refused on an edited task.
+- **Release makes nothing optional.** `/cockpit guard release` clears the hold, sets TEST required and pending, restores neither DONE nor 100%, and waives no security, Opus or release requirement.
+- **`/clear` and a prompt.** `/clear` writes a `released` record for a held task (abandoned, not passed, not done). A prompt settles a legacy held task before it can start another one.
+
+### Change detection: UNCHANGED, CHANGED, UNKNOWN
+
+`compareTree(start, now)` yields UNCHANGED, CHANGED or UNKNOWN. UNKNOWN is never read as UNCHANGED (the check runs under ENFORCE) and not read as CHANGED either (a read-only task is not converted, and a pass is real evidence). The reason is written in the check record the Ledger keeps: `[change detection unknown: <reason>]`.
+
+Reasons for UNKNOWN: not a git work tree or git unavailable; no commit to measure against; a git command failed, timed out or its output was cut short; the index listing failed or exceeded the host's output limit; more than 20,000 changed, untracked or flagged files; a file could not be hashed (deleted meanwhile, unreadable, absent in a sparse checkout); no starting fingerprint (the task began without a prompt).
+
+Coverage added: files marked assume-unchanged or skip-worktree (`git ls-files -v` tags) are hashed from the disk; `.git/info/exclude` and `core.excludesFile` are part of the stamp, so hiding a new file there is itself a change. Not covered: the default global ignore file when `core.excludesFile` is unset, files git ignores through `.gitignore` (unchanged), and any writer that leaves no trace in these. A model with a shell can still alter Git metadata; this is a change detector, not a boundary.
+
+Measured, with `git` 2.x on this machine, replicating the exact git calls of the fingerprint (a scripted replay of the calls, one run each, wall clock):
+
+| repository | tracked files | changed + untracked | git subprocesses | time |
+|---|---|---|---|---|
+| cobalt-cockpit | 122 | 5 | 11 | 24 ms |
+| a local project | 536 | 0 | 10 | 41 ms |
+| ComfyUI | 1,239 | 0 | 10 | 43 ms |
+| synthetic, clean | 60,000 | 0 | 10 | 664 ms |
+| synthetic, 5,000 untracked | 60,000 | 5,000 | 60 (100 per call before, now 400) | 578 ms |
+| synthetic, 1 tracked edit + 5,000 untracked | 60,000 | 5,001 | 61 | 590 ms |
+
+A clean tree costs a constant ten git calls whatever its size; only changed or untracked files cost hash calls (one per 400 paths). The earlier cap of 2,000 made a repository with a few thousand untracked, non-ignored files UNKNOWN for no good reason; it is now 20,000. The host's own limit on process output is not known from here: a repository whose `ls-files -v` listing is cut short is reported UNKNOWN with that reason. The live acceptance measures it on a real large fixture. Figures are one run on one machine, not a benchmark.
+
 ### Mutation audit of the guard's tests
 
 Each protection was removed on its own in a disposable worktree and the suite run (about 45 mutations over three rounds). Every one that violates an invariant fails a named test: the hold in `isVerified`, `statusOf` and the VERIFY milestone; the TEST-gate refusal; the read-only proof (fingerprint, edit and unknown-baseline legs separately); the downgrade to coding; the Stop-time measurement against the baseline (unknown baseline, unknown fingerprint); the baseline carried across prompts; the prompt/hold rule; the migration and its reconciliation of a saved DONE; the durable records and their version check; the verifier lock and the `released` exception; the final-branch hold restoration; the reset record and its person-only origin; the re-hash before and after each run; and the exception-to-hold catch. Surviving mutants are equivalent or defense in depth, not gaps: the `planTask` branch that keeps TEST required on a held task is behind the forced coding kind (one layer cannot be removed without the other being redundant), and a mutant that gave the first progress call a "known" baseline was also stopped by the string check beside it. None of them lets a task read DONE without the check.
+
+### Mutation audit of the completion-integrity round
+
+Sixteen mutations, each in a disposable worktree, one protection removed at a time; every one fails at least one named test: hold only at budget exhaustion (6 tests), no conversion of a read-only task on an observed edit (2) or at the Stop (6), release leaving TEST optional (1, the pure-model test: through the host the conversion to coding masks it, so this one is defense in depth and has its own test so the release rule cannot silently depend on the conversion), read-only re-declared after an edit (1), index flags ignored (2), exclude sources ignored (4), no legacy adoption at a prompt (1), no record on `/clear` (1), read-only exemptions kept after conversion (5), a held task allowed to be DONE (6), cap back at 2,000 (2), UNKNOWN read as UNCHANGED (4), UNKNOWN read as CHANGED (1), reason not recorded (2), a held task skipping its check on an unchanged tree (1). One first attempt (index flags) survived because the test world's `git diff` listed flagged files, which real git does not; that was a defect of the test double, fixed, and the mutation then failed 2 tests.
 
 ### Trust boundaries and the time-of-check/time-of-use limit
 

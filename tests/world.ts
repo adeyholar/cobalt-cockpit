@@ -41,6 +41,14 @@ export type World = {
   blits: number
   /** What `git status --porcelain=v2 --branch` prints; null: not a repository. */
   gitStatus: string | null
+  /** `git ls-files -v -z` output: index flags (a lowercase tag is assume-unchanged, S is skip-worktree). */
+  indexFlags: string
+  /** Paths `git ls-files -o` lists as untracked and not ignored. */
+  untracked: string[]
+  /** A git subcommand that times out (throws), by name. */
+  gitHangs: string | null
+  /** The content of .git/info/exclude. */
+  excludes: string
   /** The working tree as git sees it against HEAD: path to content. Changing it is a change the fingerprint must notice. */
   tree: Record<string, string>
   /** HEAD: a commit moves it and leaves `tree` alone. */
@@ -129,6 +137,10 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     transcript: [],
     blits: 0,
     gitStatus: CLEAN_REPO,
+    indexFlags: '',
+    untracked: [],
+    gitHangs: null,
+    excludes: '',
     tree: {},
     head: 'a'.repeat(40),
     uncommitted: false,
@@ -302,11 +314,20 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
       const sub = e.argv.slice(e.argv[1] === '--no-optional-locks' ? 2 : 1)
       const git = sub[0] === '-C' ? sub.slice(2) : sub
+      if (w.gitHangs !== null && git[0] === w.gitHangs) throw new Error('git was still running at the timeout')
+      if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, '/work/example/.git/info/exclude\n')
+      if (git[0] === 'config') return ran(1)
       if (git[0] === 'rev-parse') return ran(0, git.includes('--verify') ? `${w.head}\n` : '/work/example\n')
-      if (git[0] === 'diff') return ran(0, git.includes('--diff-filter=D') ? '' : Object.keys(w.tree).join('\0') + (Object.keys(w.tree).length ? '\0' : ''))
+      if (git[0] === 'diff') {
+        // like git, `diff` does not see a path the index is told to ignore (assume-unchanged: lowercase tag; skip-worktree: S)
+        const hidden = new Set(w.indexFlags.split('\0').filter(l => l.length > 2 && (/[a-z]/.test(l[0] as string) || l[0] === 'S')).map(l => l.slice(2)))
+        const seen = Object.keys(w.tree).filter(path => !hidden.has(path))
+
+        return ran(0, git.includes('--diff-filter=D') ? '' : seen.join('\0') + (seen.length ? '\0' : ''))
+      }
       if (git[0] === 'status' && git.includes('--porcelain')) return ran(0, w.uncommitted ? ' M src/api.js\n' : '')
-      if (git[0] === 'ls-files') return ran(0, '')
-      if (git[0] === 'hash-object') return ran(0, git.slice(git.indexOf('--') + 1).map(path => `h${[...(w.tree[path] ?? '')].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`).join('\n') + '\n')
+      if (git[0] === 'ls-files') return ran(0, git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')
+      if (git[0] === 'hash-object') return ran(0, git.slice(git.indexOf('--') + 1).map(path => `h${[...(path.endsWith('info/exclude') ? w.excludes : (w.tree[path] ?? (w.untracked.includes(path) ? 'u' : '')))].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`).join('\n') + '\n')
 
       return ran(0, w.gitStatus)
     }

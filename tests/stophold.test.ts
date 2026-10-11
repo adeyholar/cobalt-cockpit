@@ -675,7 +675,7 @@ describe('M3: a task carried into a session with an empty Ledger', () => {
     await start($); await planAndComplete($, 1); await enroll($)
     await stop($)
     expect(w.storeWrites.some((k: any) => String(k?.key ?? k).includes('stop-checks'))).toBe(true)
-    expect(taskOf(h).stopHold ?? null).toBeNull()
+    expect(taskOf(h).stopHold?.refusals).toBe(1)                                         // held from the first failed check
   })
 })
 

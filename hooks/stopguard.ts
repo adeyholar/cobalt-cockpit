@@ -237,3 +237,9 @@ export const migrateStopHold = (task: Task, checks: readonly CheckRecord[], drop
 
   return settled
 }
+
+/** What a fingerprint comparison proves. UNKNOWN is never read as UNCHANGED, and it is not read as CHANGED either. */
+export type TreeVerdict = 'UNCHANGED' | 'CHANGED' | 'UNKNOWN'
+
+export const compareTree = (start: string | null | undefined, now: string | null): TreeVerdict =>
+  typeof start !== 'string' || now === null ? 'UNKNOWN' : start === now ? 'UNCHANGED' : 'CHANGED'

@@ -59,8 +59,8 @@ import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
 import { EMPTY_GUARD, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
 import type { GuardConfig } from './alerts'
-import { uidOf, attemptsOf, boundedChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, type CheckRecord, type StopConfig } from './stopguard'
-import { applyAction, clearHold, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
+import { uidOf, attemptsOf, boundedChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
+import { applyAction, clearHold, reclassifyChanged, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
 import { basename, parseShell, unwrap } from './shell'
 import { COLORS, fit, heading, hudRows, paneRows, visualStateOf } from './view'
@@ -1471,6 +1471,14 @@ const adoptLegacyHold = async ($: EngineInterface): Promise<void> => {
   })
 }
 
+/** A held task that a person abandons (a reset, a /clear) stays in the record as what it was: not a pass, not marked done. */
+const recordAbandoned = async ($: EngineInterface, abandoned: Task | null, how: string): Promise<void> => {
+  if (abandoned === null || !isGuardHeld(abandoned)) return
+  const at = await $.clock.now()
+  await keepCheck($, { taskId: abandoned.id, uid: uidOf(abandoned), verifier: 'released', complete: true, name: how.replace(/^\/(cockpit )?/, ''), sha: null, at, outcome: 'released', exit: null, ms: null, tree: null, summary: oneLine(`abandoned by ${how} while held: ${abandoned.stopHold?.reason ?? ''}`, 600), hasSummary: true })
+  await hush(() => persist($))
+}
+
 /** Applies a change to the task, settles what follows from it, and plays what it earned. */
 const change = async ($: EngineInterface, apply: (task: Task, now: number) => Task): Promise<Task | null> => {
   await hush(() => adoptLegacyHold($))
@@ -1820,8 +1828,13 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
  * a git command failed, was cut short or timed out, or more than TREE_FILES files differ; no change outside
  * Edit, Write and a Bash edit diff can then be observed. Ignored files are not seen.
  */
-const TREE_FILES = 2000
+const TREE_FILES = 20_000
+const HASH_CHUNK = 400
+/** Why the latest fingerprint was unknown, in words for the Ledger and HUD. Empty after a known one. */
+let treeWhy = ''
 const treeStamp = async ($: EngineInterface, base?: string): Promise<string | null> => {
+  treeWhy = ''
+  const unknown = (why: string): null => { treeWhy = why; return null }
   try {
     const sh = async (argv: string[]): Promise<string | null> => {
       const r = await $.process.run(['git', '--no-optional-locks', ...argv], { timeoutMs: GIT_TIMEOUT_MS })
@@ -1829,22 +1842,36 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       return r.exitCode === 0 && !r.isStdoutTruncated ? r.stdout : null
     }
     const top = (await sh(['rev-parse', '--show-toplevel']))?.trim()
-    if (!top) return null
+    if (!top) return unknown('not a git work tree, or git is unavailable')
     const at = (...argv: string[]) => sh(['-C', top, ...argv])
     const head = base ?? (await at('rev-parse', '--verify', 'HEAD'))?.trim()
-    if (!head) return null
+    if (!head) return unknown('no commit to measure against')
     const changed = await at('diff', head, '--no-renames', '--name-only', '-z', '--diff-filter=d')
     const deleted = await at('diff', head, '--no-renames', '--name-only', '-z', '--diff-filter=D')
     const untracked = await at('ls-files', '-o', '--exclude-standard', '-z')
-    if (changed === null || deleted === null || untracked === null) return null
-    const paths = [...new Set([...changed.split('\0'), ...untracked.split('\0')].filter(Boolean))].sort()
-    if (paths.length > TREE_FILES) return null
-    const lines: string[] = [...deleted.split('\0').filter(Boolean).sort().map(path => `D\0${path}`)]
-    for (let i = 0; i < paths.length; i += 100) {
-      const chunk = paths.slice(i, i + 100)
+    // Paths the index is told to ignore (assume-unchanged: a lowercase tag; skip-worktree: S or s) are invisible to diff. They are
+    // hashed from the disk instead; a path that cannot be hashed (a sparse-checkout file that is not there) makes the tree unknown.
+    const flags = await at('ls-files', '-v', '-z')
+    if (changed === null || deleted === null || untracked === null) return unknown('a git command failed, timed out or its output was cut short')
+    if (flags === null) return unknown('the index listing failed, timed out or was cut short by the host output limit')
+    const hidden = flags.split('\0').filter(l => l.length > 2 && (/[a-z]/.test(l[0] as string) || l[0] === 'S')).map(l => l.slice(2))
+    // The sources that decide what "untracked" means are part of the state, so adding a file to them is a change in itself.
+    const sources: string[] = []
+    const exclude = (await at('rev-parse', '--git-path', 'info/exclude'))?.trim()
+    const global = (await at('config', '--type=path', '--get', 'core.excludesFile'))?.trim()
+    for (const file of [exclude, global]) {
+      if (!file) { sources.push('-'); continue }
+      const r = await $.process.run(['git', '--no-optional-locks', '-C', top, 'hash-object', '--no-filters', '--', file], { timeoutMs: GIT_TIMEOUT_MS })
+      sources.push(r.exitCode === 0 ? r.stdout.trim() : 'none')
+    }
+    const paths = [...new Set([...changed.split('\0'), ...untracked.split('\0'), ...hidden].filter(Boolean))].sort()
+    if (paths.length > TREE_FILES) return unknown(`more than ${TREE_FILES} changed, untracked or flagged files`)
+    const lines: string[] = [...deleted.split('\0').filter(Boolean).sort().map(path => `D\0${path}`), `X\0${sources.join('\0')}`]
+    for (let i = 0; i < paths.length; i += HASH_CHUNK) {
+      const chunk = paths.slice(i, i + HASH_CHUNK)
       const hashes = await at('hash-object', '--no-filters', '--', ...chunk)
       const got = hashes?.split('\n').filter(Boolean)
-      if (got === undefined || got.length !== chunk.length) return null
+      if (got === undefined || got.length !== chunk.length) return unknown('a file could not be hashed (deleted meanwhile, unreadable or not present in a sparse checkout)')
       chunk.forEach((path, n) => lines.push(`${got[n]}\0${path}`))
     }
     const text = lines.join('\n')
@@ -1854,7 +1881,7 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
 
     return `${head}:${lines.length}.${a.toString(16)}${b.toString(16)}`
   } catch {
-    return null
+    return unknown('git raised an error or timed out')
   }
 }
 const baseOf = (stamp: string | undefined): string | undefined => (typeof stamp === 'string' && stamp.includes(':') ? stamp.slice(0, stamp.indexOf(':')) : undefined)
@@ -2570,19 +2597,22 @@ const runStopCheck = async ($: EngineInterface, task: Task, hasSummary: boolean,
   }
 }
 
-/** Whether anything may have changed that a check should be about. A model's "read-only" is a claim, measured against the tree. */
-const mayHaveChanged = async ($: EngineInterface, task: Task): Promise<boolean> => {
-  if (hasChanges(task)) return true
+/**
+ * Whether the work changed since the task began: UNCHANGED and CHANGED are measured, UNKNOWN is neither. Unknown is never
+ * proof of an unchanged tree, and it is not evidence of a change either; it asks for the check without calling the task coding.
+ */
+const changeState = async ($: EngineInterface, task: Task): Promise<{ state: TreeVerdict; why: string }> => {
+  if (hasChanges(task)) return { state: 'CHANGED', why: 'edits were observed' }
   if (task.kind === 'readonly') {
     const now = await treeStamp($)
+    const state = compareTree(task.startTree, now)
 
-    // measured against where the task began; an unknown baseline or state is never proof of an unchanged tree
-    return typeof task.startTree !== 'string' || now === null || now !== task.startTree
+    return { state, why: state !== 'UNKNOWN' ? '' : now === null ? treeWhy : 'the task has no known starting fingerprint' }
   }
   // changes the tool hooks did not see (an MCP tool, a Bash command with no edit diff) still show in the repository
   await quiet(() => refreshGit($))
 
-  return ((await read($, gitAtom))?.dirty ?? 0) > 0
+  return ((await read($, gitAtom))?.dirty ?? 0) > 0 ? { state: 'CHANGED', why: 'the repository is dirty' } : { state: 'UNCHANGED', why: '' }
 }
 
 const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; last_assistant_message?: string }): Promise<string | null> => {
@@ -2590,7 +2620,18 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
   await hush(() => adoptLegacyHold($))
   const task = await read($, taskAtom)
   if (stopCfg.policy !== 'ENFORCE' || stopCfg.problems.length > 0 || stopCfg.script === null || task === null) return null
-  if (!isGuardHeld(task) && !(await mayHaveChanged($, task))) return null
+  const seen = isGuardHeld(task) ? { state: 'CHANGED' as TreeVerdict, why: 'the task is held' } : await changeState($, task)
+  if (seen.state === 'UNCHANGED') return null
+  // a read-only claim contradicted by a tree known to differ from the task's start is a coding task from here on; an unknown
+  // tree is checked but not called a change
+  if (task.kind === 'readonly' && seen.state === 'CHANGED' && !isGuardHeld(task) && !hasChanges(task)) await change($, (t, at) => reclassifyChanged(t, at))
+  // A task with no known starting fingerprint was never measurable: the check runs for that reason, and the record says so.
+  let unknownWhy = seen.state === 'UNKNOWN' ? seen.why : ''
+  if (unknownWhy === '' && typeof task.startTree !== 'string' && task.edited !== true && task.files.length === 0) {
+    const nowTree = await treeStamp($)
+    unknownWhy = nowTree === null ? treeWhy : 'the task has no known starting fingerprint'
+  }
+  const unknownNote = unknownWhy === '' ? '' : `[change detection unknown: ${unknownWhy}] `
   const uid = uidOf(task)
   // the Ledger is where the attempts are kept, so a resumed session finds the budget as it was left
   const checks = await checksOf($)
@@ -2612,7 +2653,7 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
   }
   const run = await runStopCheck($, task, hasSummary, checks)
   const verdict = verdictOf({ cfg: stopCfg, spent, run, hasSummary })
-  const done: CheckRecord = { ...run, complete: verdict.action === 'allow' && verdict.state === 'VERIFIED' }
+  const done: CheckRecord = { ...run, complete: verdict.action === 'allow' && verdict.state === 'VERIFIED', ...(unknownNote === '' ? {} : { summary: oneLine(`${unknownNote}${run.summary}`, 600) }) }
   await keepCheck($, done)
   await hush(() => persist($))
   const detail = run.exit === null ? run.outcome : `${run.outcome} (exit ${run.exit})`
@@ -2621,8 +2662,10 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
     if (run.outcome === 'pass' && run.tree !== null) chain = checkedAt(chain, run.tree)
     if (run.outcome === 'pass' || run.outcome === 'fail' || run.outcome === 'timeout') chain = setGate(chain, 'TEST', run.outcome === 'pass' ? 'pass' : 'fail', `stop check ${run.name} ${detail}${run.tree === null && run.outcome === 'pass' ? ' (tree state unknown)' : ''}`, 'auto', now)
     if (run.outcome === 'pass' && run.tree !== null) chain = stampGates(chain, run.tree)
-    if (verdict.action === 'allow' && verdict.state === 'BLOCKED') chain = holdTask(chain, verdict.reason, spent + 1, now)
-    else if (verdict.action === 'allow' && verdict.state === 'VERIFIED') chain = clearHold(chain, now)
+    // Every check that did not complete the task holds it now, not once the budget is spent: the refusal count bounds the loop,
+    // the hold is what keeps the task from reading DONE in between (and across a prompt, a restart or a release).
+    if (!done.complete) chain = holdTask(chain, verdict.action === 'block' ? `the last check ${run.outcome === 'pass' ? 'passed but the change summary was missing' : run.outcome}: attempt ${spent + 1} of ${stopCfg.maxAttempts}` : 'reason' in verdict ? verdict.reason : `the last check ${run.outcome}`, spent + 1, now)
+    else chain = clearHold(chain, now)
 
     return chain
   })
@@ -2757,7 +2800,8 @@ export const register: Register = (on, options) => {
     // The router belongs to the session that chose it: whatever follows starts OFF.
     await quiet(() => update($, routerAtom, held => held.mode === 'OFF' ? held : switchRouter(held, 'OFF')))
     if (e.reason === 'clear') {
-      // a /clear ends the conversation the task belonged to
+      // a /clear ends the conversation the task belonged to; a task the guard held is recorded as abandoned, not as done
+      await quiet(async () => { await recordAbandoned($, await read($, taskAtom), '/clear') })
       await quiet(() => update($, taskAtom, () => null))
       await quiet(() => update($, activityAtom, () => IDLE))
       await quiet(() => update($, guardsAtom, () => []))
@@ -2783,6 +2827,8 @@ export const register: Register = (on, options) => {
     }
     if (await isApiRefused($).catch(() => false)) return { drop: API_REFUSAL }
     if (!isSupported) return next(e)
+    // a task saved before the hold was a field of its own is settled before this prompt can start another task
+    await hush(async () => { await loadStopCfg($); await adoptLegacyHold($) })
     // The init line has done its job the moment real work arrives.
     await dismissStartup($)
     const added: string[] = []
@@ -3453,12 +3499,7 @@ export const register: Register = (on, options) => {
         if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: the task is cleared only by a command you type; nothing was changed.' }
         const abandoned = await read($, taskAtom)
         await update($, taskAtom, () => null)
-        // the abandoned hold stays in the record as what it was; it is not turned into a pass, and the task is not marked done
-        if (abandoned !== null && isGuardHeld(abandoned)) {
-          const at = await $.clock.now()
-          await keepCheck($, { taskId: abandoned.id, uid: uidOf(abandoned), verifier: 'released', complete: true, name: 'reset', sha: null, at, outcome: 'released', exit: null, ms: null, tree: null, summary: oneLine(`abandoned by /cockpit reset while held: ${abandoned.stopHold?.reason ?? ''}`, 600), hasSummary: true })
-          await hush(() => persist($))
-        }
+        await hush(() => recordAbandoned($, abandoned, '/cockpit reset'))
 
         return { text: 'Cockpit: task cleared.' }
       case 'mute':
