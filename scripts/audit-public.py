@@ -72,6 +72,14 @@ for p in sorted((root / 'hooks').glob('*.ts*')):
   # Cockpit asks no permission decision of its own. A query on every tool call
   # would be a second permission operation that nothing here needs.
   if re.search(r'\$\s*\.\s*tool\s*\.\s*check\b', line): findings.append(f'hooks/{p.name}:{n}: a permission query ($.tool.check) in the hooks module')
+# The directory warns when a TSX hooks module binds `h` or `Fragment`, the names
+# its JSX runtime reserves. Only a binding is flagged (a parameter, a const, a
+# destructured name); this is an approximation of the directory's own scan.
+for p in sorted((root / 'hooks').glob('*.tsx')):
+ for n, line in enumerate(p.read_text().splitlines(), 1):
+  code = re.sub(r"'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|//.*$", "''", line)
+  for name in ('h', 'Fragment'):
+   if re.search(r'\b(?:const|let|var|function)\s+' + name + r'\b|[(,]\s*' + name + r'\s*[:,)=]|\b' + name + r'\s*=>', code): findings.append(f'hooks/{p.name}:{n}: binds the reserved JSX identifier `{name}`')
 m=json.loads((root/'.claude-plugin/plugin.json').read_text()); market=json.loads((root/'.claude-plugin/marketplace.json').read_text())
 assert m['version']==market['plugins'][0]['version']=='0.5.1'
 assert m['name']==market['plugins'][0]['name']=='cobalt-cockpit'

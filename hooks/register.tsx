@@ -265,9 +265,9 @@ const candidateOf = async ($: EngineInterface): Promise<Candidate> => {
     return { sha: null, why: 'unknown' }
   }
 }
-const releaseRecords = (held: unknown): ReleaseRecord[] => (Array.isArray(held) ? held.filter((h): h is ReleaseRecord => h !== null && typeof h === 'object' && isCandidate((h as ReleaseRecord).candidate) && typeof (h as ReleaseRecord).id === 'string' && typeof (h as ReleaseRecord).returned === 'boolean' && typeof (h as ReleaseRecord).at === 'number').map(h => {
+const releaseRecords = (held: unknown): ReleaseRecord[] => (Array.isArray(held) ? held.filter((record): record is ReleaseRecord => record !== null && typeof record === 'object' && isCandidate((record as ReleaseRecord).candidate) && typeof (record as ReleaseRecord).id === 'string' && typeof (record as ReleaseRecord).returned === 'boolean' && typeof (record as ReleaseRecord).at === 'number').map(record => {
   // a verdict is kept only in its two known forms; anything else reads as no verdict, which never approves
-  const { verified, outcome, ...rest } = h
+  const { verified, outcome, ...rest } = record
   return { ...rest, ...(verified === 'pass' || verified === 'fail' ? { verified } : {}), ...(outcome === 'go' || outcome === 'no-go' ? { outcome } : {}) }
 }) : [])
 /** The store's release records. Strict: a store that cannot be read, or holds something else, fails a release request closed. */
@@ -311,7 +311,7 @@ const syncRelease = async ($: EngineInterface): Promise<void> => {
   const swarm = swarmState(ledger)
   const back = (ledger.consults ?? []).filter(c => c.ground === 'release' && c.candidate !== undefined && hasReturned(swarm.tasks.find(t => t.id === c.id)))
   if (back.length === 0) return
-  await mutateRelease($, held => back.reduce((all, c) => (all.some(h => h.id === c.id && h.returned) ? all : withRelease(all, { candidate: c.candidate!, id: c.id, at: c.requestedAt, returned: true })), held))
+  await mutateRelease($, held => back.reduce((all, c) => (all.some(entry => entry.id === c.id && entry.returned) ? all : withRelease(all, { candidate: c.candidate!, id: c.id, at: c.requestedAt, returned: true })), held))
 }
 /**
  * A release approval stands only for the commit it was given for, on a clean tree: a change takes it back, and the
@@ -325,7 +325,7 @@ const reconcileRelease = async ($: EngineInterface): Promise<void> => {
   if (review === undefined || !review.grounds.includes('release')) return
   const history = await releaseHistorySoft($)
   // nothing held and nothing stored that could stand for a commit: git need not be asked
-  if (review.cleared?.some(x => x.ground === 'release') !== true && review.state !== 'adjudicated' && !history.some(h => h.returned && h.verified === 'pass' && h.outcome === 'go')) return
+  if (review.cleared?.some(x => x.ground === 'release') !== true && review.state !== 'adjudicated' && !history.some(entry => entry.returned && entry.verified === 'pass' && entry.outcome === 'go')) return
   const revalidated = revalidateRelease(review, await candidateOf($), history)
   if (revalidated === review) return
   const was = JSON.stringify(review)
@@ -457,7 +457,7 @@ const serveSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
         const consult = (await read($, ledgerAtom)).consults?.find(c => c.id === id)
         const judged = e['state'] === 'pass' || e['state'] === 'fail'
         // a recorded release recommendation is final: it is not judged again, so nothing can turn a NO-GO into a GO
-        if (consult?.ground === 'release' && judged && (await releaseHistory($)).some(h => h.id === id && h.outcome !== undefined)) throw new Error('OPUS / RELEASE VERDICT RECORDED. This release consultation already has its recommendation recorded and it is final. Ask again only on a changed commit.')
+        if (consult?.ground === 'release' && judged && (await releaseHistory($)).some(entry => entry.id === id && entry.outcome !== undefined)) throw new Error('OPUS / RELEASE VERDICT RECORDED. This release consultation already has its recommendation recorded and it is final. Ask again only on a changed commit.')
         if (consult && judged && !hasReturned(task)) throw new Error('OPUS / this consultation has not returned. Spawn cobalt-cockpit:architect with its [task:ID] and let it answer; a review is adjudicated only on an answer Opus gave')
         // A release ground is cleared by a recommendation, not by the advice being sound. The recommendation is the
         // architect's own DECISION line; `release_outcome` is the main session confirming it, and can only be as
@@ -710,9 +710,9 @@ const isAtLeast = (version: string, floor: readonly number[]): boolean => {
 }
 
 const healthLine = (): string => {
-  const h = healthOf()
+  const health = healthOf()
 
-  return !h.enabled ? 'TELEMETRY / off (telemetry=false); nothing is being recorded.' : `TELEMETRY / this session wrote ${h.writes} record${h.writes === 1 ? '' : 's'}${h.failures > 0 ? `, ${h.failures} could not be written (incomplete coverage)` : ''} · files ${h.permissions === 'verified' ? 'read back as 0700 directory, 0600 files' : h.permissions === 'unverified' ? 'permissions could NOT be confirmed (the host gives plugins no file mode; the directory is only as private as your umask)' : 'not yet written'}`
+  return !health.enabled ? 'TELEMETRY / off (telemetry=false); nothing is being recorded.' : `TELEMETRY / this session wrote ${health.writes} record${health.writes === 1 ? '' : 's'}${health.failures > 0 ? `, ${health.failures} could not be written (incomplete coverage)` : ''} · files ${health.permissions === 'verified' ? 'read back as 0700 directory, 0600 files' : health.permissions === 'unverified' ? 'permissions could NOT be confirmed (the host gives plugins no file mode; the directory is only as private as your umask)' : 'not yet written'}`
 }
 
 const countPatch = (patch: unknown): { added: number; removed: number } => {
@@ -1047,13 +1047,13 @@ const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
     } catch { listed = null }
   }
   const ledger = await read($, ledgerAtom)
-  const h = healthOf()
+  const health = healthOf()
 
   return {
     version: manifestVersion, root: $.plugin.root, home, host, hostSupported: host === null ? null : isSupported,
     profile: config.profile, orchestration: config.hasOrchestration, reasoning: config.reasoningMode, router: (await read($, routerAtom)).mode,
     permissionMode: seenPermissionMode, installs, enabled, otherRegistrations: [...otherCockpits],
-    telemetry: { enabled: h.enabled, dir, listed, writes: h.writes, failures: h.failures, permissions: h.permissions, shed: h.shed },
+    telemetry: { enabled: health.enabled, dir, listed, writes: health.writes, failures: health.failures, permissions: health.permissions, shed: health.shed },
     cache: await cacheFacts($),
     agents: agentsOf(ledger.agents.map(a => (typeof a.start === 'number' && typeof a.end === 'number' ? a.end - a.start : null))),
     stop: await stopFacts($),
