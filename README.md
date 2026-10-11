@@ -1,4 +1,4 @@
-# Cobalt Cockpit v0.5.1 — Elastic Swarm + Adaptive Intelligence
+# Cobalt Cockpit v0.5.2 — Elastic Swarm + Adaptive Intelligence
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 

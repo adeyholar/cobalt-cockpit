@@ -47,6 +47,8 @@ export type World = {
   untracked: string[]
   /** Entries `git ls-files -o -i` lists: untracked and ignored (by .gitignore, info/exclude or a global file). */
   ignoredEntries: string[]
+  /** What `git ls-files -o` prints on stderr while exiting 0 (real git: "warning: could not open directory 'd/': Permission denied"); null: nothing. */
+  lsFilesWarning: string | null
   /** Tracked files git lists as stat-dirty (`ls-files -m`), whether or not `diff` reports them (a clean filter can hide them). */
   statDirty: string[]
   /** The blob id the base commit holds for a path, as `ls-tree` reports it (absent: none). */
@@ -66,6 +68,8 @@ export type World = {
   watchedDirs: Record<string, string[]>
   /** Paths `find` cannot read in full: it exits 1 after printing some of the files, as it does with an unreadable subdirectory. */
   watchedUnreadable: string[]
+  /** Watched paths whose parent cannot be entered: find and stat both fail, stat with "Permission denied" (real: the path is there, git/find just cannot reach it). */
+  watchedDenied: string[]
   /** Ignored directories that hold their own repository: git lists each as ONE `dir/` entry (real git, with or without --directory). */
   embeddedRepos: Record<string, string[]>
   /** Content of files outside git's view that the fingerprint watches (path -> content). */
@@ -172,9 +176,11 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     attributes: '',
     ignoredMeta: {},
     ignoredFiles: {},
+    lsFilesWarning: null,
     dirMeta: {},
     watchedDirs: {},
     watchedUnreadable: [],
+    watchedDenied: [],
     embeddedRepos: {},
     watched: {},
     statCalls: 0,
@@ -357,11 +363,17 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       const asked = String(e.argv[2])
       if (w.watchedUnreadable.includes(asked)) return ran(1, `${(w.watchedDirs[asked] ?? []).slice(0, 1).map(n => `${n}\0`).join('')}`)
       const dir = w.watchedDirs[asked] ?? w.embeddedRepos[`${asked.replace(/^\/work\/example\//, '')}/`]
-      if (dir === undefined) return ran(1)
+      if (dir === undefined || w.watchedDenied.includes(asked)) return ran(1)
 
       return ran(0, dir.map(n => `${n}\0`).join(''))
     }
-    if (program === 'stat' && !e.argv.includes('--printf')) return w.watchedUnreadable.includes(String(e.argv.at(-1))) ? ran(0, '') : ran(1)
+    if (program === 'stat' && !e.argv.includes('--printf')) {
+      const asked = String(e.argv.at(-1))
+      if (w.watchedUnreadable.includes(asked)) return ran(0, '')
+      const why = w.watchedDenied.includes(asked) ? 'Permission denied' : 'No such file or directory'
+
+      return { value: { exitCode: 1, stdout: '', stderr: `stat: cannot statx '${asked}': ${why}\n`, isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (program === 'realpath') return ran(0, String(e.argv.at(-1)) + '\n')
     if (program === 'git') {
       if (w.gitStatus === null) return ran(128)
@@ -387,6 +399,11 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
         return ran(0, git.includes('--diff-filter=D') ? '' : seen.join('\0') + (seen.length ? '\0' : ''))
       }
       if (git[0] === 'status' && git.includes('--porcelain')) return ran(0, w.uncommitted ? ' M src/api.js\n' : '')
+      if (git[0] === 'ls-files' && git.includes('-o') && w.lsFilesWarning !== null) {
+        const out = git.includes('-i') ? w.ignoredEntries : w.untracked
+
+        return { value: { exitCode: 0, stdout: out.join('\0') + (out.length ? '\0' : ''), stderr: w.lsFilesWarning, isStdoutTruncated: false, isStderrTruncated: false } }
+      }
       if (git[0] === 'ls-files' && git.includes('-i') && (Object.keys(w.ignoredFiles).length > 0 || Object.keys(w.embeddedRepos).length > 0)) {
         const excluded = git.filter(a => a.startsWith(':(exclude)')).map(a => a.slice(10))
         const files = Object.keys(w.ignoredFiles).filter(f => !excluded.some(x => f.startsWith(x)))
@@ -394,7 +411,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
         return ran(0, [...listed, ...Object.keys(w.embeddedRepos), ...w.ignoredEntries].join('\0') + '\0')
       }
-      if (git[0] === 'hash-object' && git.slice(git.indexOf('--') + 1).some(p => w.watchedDirs[p] !== undefined)) return ran(128)
+      if (git[0] === 'hash-object' && git.slice(git.indexOf('--') + 1).some(p => w.watchedDirs[p] !== undefined || w.watchedDenied.includes(p))) return ran(128)
       if (git[0] === 'ls-files') return ran(0, git.includes('-m') ? w.statDirty.join('\0') + (w.statDirty.length ? '\0' : '') : git.includes('-i') ? w.ignoredEntries.join('\0') + (w.ignoredEntries.length ? '\0' : '') : git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')
       if (git[0] === 'ls-tree') {
         const names = git.slice(git.indexOf('--') + 1)

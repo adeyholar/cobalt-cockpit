@@ -1868,6 +1868,15 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
 
       return r.exitCode === 0 && !r.isStdoutTruncated ? r.stdout : null
     }
+    // `git ls-files -o` exits 0 and only warns on stderr when a directory cannot be opened ("could not open directory"), leaving the
+    // files in it out of the listing (reproduced with real git). Any stderr from a listing means it was not complete: UNKNOWN.
+    let incomplete = ''
+    const listing = async (argv: string[]): Promise<string | null> => {
+      const r = await $.process.run(['git', ...GIT_SAFE, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
+      if (r.exitCode === 0 && r.stderr.trim() !== '') incomplete = oneLine(r.stderr, 160)
+
+      return r.exitCode === 0 && !r.isStdoutTruncated && r.stderr.trim() === '' ? r.stdout : null
+    }
     const top = (await sh(['rev-parse', '--show-toplevel']))?.trim()
     if (!top) return unknown('not a git work tree, or git is unavailable')
     const at = (...argv: string[]) => sh(['-C', top, ...argv])
@@ -1876,8 +1885,10 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const walk = async (dir: string): Promise<{ names: string[] } | { missing: true } | { why: string }> => {
       const f = await $.process.run(['find', '-H', dir, '(', '-type', 'f', '-o', '-type', 'l', ')', '-print0'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
       if (f !== null && f.exitCode === 0 && !f.isStdoutTruncated) return { names: f.stdout.split('\0').filter(Boolean).sort() }
-      const there = await $.process.run(['stat', '--', dir], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
-      if (f !== null && f.exitCode !== 0 && (there === null || there.exitCode !== 0)) return { missing: true }
+      // "missing" only when the system says there is no such file: a path that is there but cannot be entered (permission denied on a
+      // parent) must not become a constant "missing" that a writer can keep equal at both measurements. C locale: stable wording.
+      const there = await $.process.run(['stat', '--', dir], { timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
+      if (f !== null && f.exitCode !== 0 && there !== null && there.exitCode !== 0 && /No such file or directory/.test(there.stderr)) return { missing: true }
 
       return { why: `${dir} exists but could not be listed in full (unreadable, too large or timed out)` }
     }
@@ -1885,18 +1896,19 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     if (!head) return unknown('no commit to measure against')
     const changed = await at('diff', head, '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=d')
     const deleted = await at('diff', head, '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=D')
-    const untracked = await at('ls-files', '-o', '--exclude-standard', '-z')
+    const untracked = await listing(['-C', top, 'ls-files', '-o', '--exclude-standard', '-z'])
     // What git ignores is not hashed, but its NAMES are part of the state: a nested .gitignore of `*`, a line in .git/info/exclude or in
     // any global ignore file moves a new file out of the untracked list and into this one, which is a change in itself (reproduced).
     // Every ignored FILE is listed (no --directory): a directory's own stat does not move when a file inside it is rewritten, so a
     // collapsed entry would prove nothing about its contents. Operator-authorized volatile prefixes are pruned at the listing itself.
-    const ignored = await at('ls-files', '-o', '-i', '--exclude-standard', '-z', '--', '.', ...stopCfg.volatile.map(v => `:(exclude)${v}`))
+    const ignored = await listing(['-C', top, 'ls-files', '-o', '-i', '--exclude-standard', '-z', '--', '.', ...stopCfg.volatile.map(v => `:(exclude)${v}`)])
     // Paths the index is told to ignore (assume-unchanged: a lowercase tag; skip-worktree: S or s) are invisible to diff. They are
     // hashed from the disk instead; a path that cannot be hashed (a sparse-checkout file that is not there) makes the tree unknown.
     const flags = await at('ls-files', '-v', '-z')
     // A clean filter or an attributes line can make `git diff` report a modified tracked file as unchanged (reproduced). Tracked files
     // git sees as stat-dirty are therefore also hashed WITHOUT filters and compared with their blob at the base commit.
     const statDirty = await at('ls-files', '-m', '-z')
+    if (incomplete !== '') return unknown(`git could not read part of the work tree, so its listing is incomplete (${incomplete})`)
     if (changed === null || deleted === null || untracked === null || statDirty === null) return unknown('a git command failed, timed out or its output was cut short')
     if (ignored === null) return unknown('the ignored-entry listing failed, timed out or was cut short')
     if (flags === null) return unknown('the index listing failed, timed out or was cut short by the host output limit')

@@ -137,6 +137,32 @@ describe('B2: work with no task presentation', () => {
   })
 })
 
+describe('LOW-1: an incomplete git listing is unknown', () => {
+  const WARN = "warning: could not open directory 'secret/': Permission denied"
+  for (const [name, listing] of [['untracked', 'untracked'], ['ignored', 'ignored']] as const) {
+    test(`a ${name} listing that exits 0 but warns on stderr never reads as unchanged`, guard(), async ($, on) => {
+      const { w, h } = fixture(on)
+      if (listing === 'ignored') w.ignoredEntries = ['dist/a.js']   // the same entries at both measurements: only the warning differs
+      await start($); await enroll($); await prompt($, 'explain the parser')
+      await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+      for (const m of ['m1', 'm2', 'm3', 'm4', 'm5']) await progress($, { action: 'complete', milestone: m })
+      w.lsFilesWarning = WARN                   // a writer put files where git cannot list them; git still exits 0
+      await stop($)
+      expect(taskOf(h)?.guardDone).toBeUndefined()
+      expect(taskOf(h)?.status).not.toBe('done')
+    })
+  }
+  test('control: the same task with a silent listing is recorded as unchanged', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await start($); await enroll($); await prompt($, 'explain the parser')
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE })
+    for (const m of ['m1', 'm2', 'm3', 'm4', 'm5']) await progress($, { action: 'complete', milestone: m })
+    expect(w.lsFilesWarning).toBeNull()
+    await stop($)
+    expect(taskOf(h)?.status).toBe('done')
+  })
+})
+
 describe('B3: ignored content', () => {
   const ignored = (w: any, files: Record<string, string>) => { w.ignoredFiles = { ...files }; w.dirMeta = { 'cache/': '4096 1000' } }
   test('rewriting an existing file inside an ignored directory (directory stat unchanged) is a change', guard(), async ($, on) => {
@@ -243,6 +269,15 @@ describe('B3: ignored content', () => {
     expect(runs(w)).toBe(1)
     expect(keptChecks(h).at(-1)?.summary).toContain('could not be listed in full')
     expect(keptChecks(h).at(-1)?.complete).toBe(false)
+  })
+  test('LOW-2: a watched path under a parent that cannot be entered is UNKNOWN, not a constant "missing"', guard({ stopWatch: '/work/closed/conf' }), async ($, on) => {
+    const { w, h } = fixture(on, 'ok')
+    w.watchedDenied = ['/work/closed/conf']
+    await start($); await enroll($); await prompt($, 'what is two plus two?')
+    await stop($)
+    expect(runs(w)).toBe(1)
+    expect(keptChecks(h).at(-1)?.complete).toBe(false)
+    expect(taskOf(h)?.guardDone).toBeUndefined()
   })
   test('control: a watched path that does not exist is a stable "missing", not UNKNOWN', guard({ stopWatch: '/work/absent' }), async ($, on) => {
     const { w } = fixture(on)
