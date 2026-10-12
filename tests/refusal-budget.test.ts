@@ -92,4 +92,3 @@ describe('through the host: the budget survives a lost, corrupted or flooded log
     expect(taskOf(h).stopHold?.refusals).toBe(2)
   })
 })
-
