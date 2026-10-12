@@ -26,7 +26,7 @@ From the host's own declarations (Claude Code 2.1.296, `UiNotifyResult`):
 Consequences, stated as expectations and not as observations:
 
 - **Fedora KDE (Konsole), native.** Konsole is not one of the host's notifying terminals, so the expectation is `no-channel` under the automatic setting and the bell with `preferredNotifChannel: terminal_bell`. What Konsole does on a bell is its own profile setting. Not observed.
-- **Claude Code in Boat over SSH.** The host writes to the remote terminal stream; the sequence or bell is carried to the local terminal, which decides. The alert sound plays on the Boat machine, so only the bell can reach the operator. Not observed.
+- **Claude Code in Boat over SSH.** The host writes to the remote terminal stream; the sequence or bell is carried to the local terminal, which decides. The alert sound plays on the Boat machine: an audio player that exits 0 there is recorded `sound` although the operator cannot hear it, and the bell (the chain's last entry, which is what could reach the operator) is tried only when no audio player answers. Not observed.
 - **Disconnect and reconnect.** The process, its environment and the session id do not change when a connection is re-established to a surviving session, so a reconnect cannot be detected. A notification written while disconnected is lost or buffered by whatever holds the session. The output tells the operator to test again after reconnecting. Not observed.
 
 No KDE popup process, service, tunnel or credential was added.
@@ -43,7 +43,7 @@ Fedora, native terminal:
 5. `/cockpit doctor` — the Cobalt Guard section should show `TRANSPORT: USER CONFIRMED` and no transport warning.
 
 Boat over SSH:
-1. Repeat steps 1–3 inside the SSH session. Expect `connection: SSH`. The sound plays on Boat, so judge only the popup or bell at your desk.
+1. Repeat steps 1–3 inside the SSH session. Expect `connection: SSH`. A recorded `sound attempted` means a player ran on Boat, not at your desk, so judge only the popup or bell you actually get.
 2. Disconnect, reconnect to the same session, and run `/cockpit guard test` again. An earlier confirmation still shows; treat only the new test as evidence.
 3. With the terminal unfocused or minimised, run one more test: this is the case a real alert meets.
 
