@@ -225,7 +225,7 @@ ALIGNMENT / PENDING
 
 ## Safety
 
-Blast-radius protection asks before recognized destructive shell commands. Repository hygiene checks attribution and unsolicited instruction-file creation. These guards supplement Claude Code permissions; they are heuristic and cannot recognize every shell program or obfuscated command. Verification gates use observed exit status and explicit reported evidence, not proof of correctness.
+Blast-radius protection asks before recognized destructive shell commands. Repository hygiene checks attribution and unsolicited instruction-file creation; while `attributionGuard` is on (the default), Cockpit's `attribution.text` hook returns empty text for commits and pull requests, so the host's AI attribution trailer and footer are not written. Cockpit also hooks `/model`, `/advisor`, `/effort`, `/init`, `/login` and `/logout` (the first two can be refused under the model policy or the strict preset, the rest are observed), and draws its own guard questions inside the host's question dialog; [SECURITY.md](SECURITY.md) lists every hook that can refuse. These guards supplement Claude Code permissions; they are heuristic and cannot recognize every shell program or obfuscated command. Verification gates use observed exit status and explicit reported evidence, not proof of correctness.
 
 Cockpit does not take part in Claude Code's permission check. It registers no hook on it and makes no permission query; its guards run before it and can only refuse a call or ask you about it, never approve one.
 
