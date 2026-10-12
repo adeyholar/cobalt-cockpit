@@ -62,7 +62,7 @@ A new condition raised while the session is silenced is now recorded (`silenced`
 - **A recurrence with persistent alerts off.** v0.5.5 records `resolved` only with `guardRepeat` on, so without it a condition that clears and holds again in the same task is one occurrence: it is not notified a second time (unchanged), and the pin then reads `notification SENT, not acknowledged` about the earlier notification. With `guardRepeat` on the recurrence is a new occurrence and is told again.
 - **A misspelled kind.** In `guardNotifyKinds` an unknown name is ignored, so `run-blocked,reveiw-hold` notifies `run-blocked` only. `/cockpit guard` and `/cockpit doctor` warn and list exactly what is and is not notified; check that line after changing the setting. A list with no known name at all notifies every kind.
 - **Silence acknowledges.** `/cockpit guard silence` acknowledges everything recorded so far, deferred alerts included, so those are not announced after `unsilence`. Only a condition first raised during the silence stays pinned.
-- **A deferral that can no longer be told** (three failed sends, the budget spent, its kind turned off, or the session silenced) is no longer counted as owed and does not keep the timer alive; it stays pinned with its real state.
+- **A deferral that can no longer be told** (three failed sends, its kind turned off, or the session silenced) is no longer counted as owed and does not keep the timer alive; it stays pinned with its real state. With the session budget spent the timer also stops, while `/cockpit guard` still lists the alert as owed and shows it `HELD BACK, cooldown or budget`: no notification follows in that session.
 
 ## Safety properties, and where they are tested
 
@@ -71,6 +71,10 @@ A new condition raised while the session is silenced is now recorded (`silenced`
 - The five new settings are refused from a plugin, the bridge or an unknown origin (`tests/guard-settings.test.ts`).
 - Notification text is a closed vocabulary and numbers; unknown kind names and bad setting values are never echoed.
 - Records stay bounded (32); new outcomes are validated on load and a malformed one is dropped. An older build that loads a ledger with `deferred` records drops those records and keeps the rest.
+
+## Independent review
+
+A separate reviewer read the complete diff and returned GO with four non-blocking findings. Three were corrected before merge: a deferral that could never be sent kept the timer alive and was still reported as owed; an acknowledgment typed while a pass was deciding did not cover the hold record that pass then wrote; and the documents said nothing changes by default although the HUD row does. The fourth, the pin reading `SENT` for a recurrence when persistent alerts are off, is v0.5.5's occurrence rule made visible and is recorded under Known limits. The reviewer then read the complete corrected diff and returned GO again, with two notes recorded here: a clock stepped back past the last acknowledgment makes a new record read as acknowledged (as a sent notice already did in v0.5.5), and the budget wording above.
 
 ## Tests
 
