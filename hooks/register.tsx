@@ -1219,7 +1219,7 @@ const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
   try {
     const settings = await $.settings.read()
     const plugins = (typeof settings['enabledPlugins'] === 'object' && settings['enabledPlugins'] !== null ? settings['enabledPlugins'] : {}) as Record<string, unknown>
-    enabled = Object.entries(plugins).filter(([key, on]) => key.startsWith('cobalt-cockpit@') && on === true).map(([key]) => key)
+    enabled = Object.entries(plugins).filter(([key, isEnabled]) => key.startsWith('cobalt-cockpit@') && isEnabled === true).map(([key]) => key)
   } catch { enabled = null }
   let listed: { files: number; bytes: number } | null = null
   const dir = await telemetryDir($)
