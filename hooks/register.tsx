@@ -42,6 +42,8 @@ import { replayTimeline, safeFile, STEP_BYTES } from './replay'
 
 import type { Activity, ActivityLog, AgentStrip, AuthState, Credential, EffortLevel, EffortRequest, GitState, GuardFinding, GuardRequest, Meter, Prefs, ReasoningMode, Task, DiscoveryLevel } from '../types'
 import { ASSETS, PLAYERS, PLAY_TIMEOUT_MS, clampVolume } from './audio'
+import { EMPTY_TRANSPORT, added as addedTest, codeOf, confirm as confirmTest, linkOf, mayTest, testMessage, transportLines, validTransport } from './transport'
+import type { TransportTest } from './transport'
 import type { Player } from './audio'
 import { EMPTY_LOG, EVENT_TTL_MS, callOf, closeOf, liveOf, push } from './activity'
 import { activityOf, readBash } from './classify'
@@ -876,7 +878,7 @@ const HELP =
   '/cockpit router     show this session\'s router, or switch it: off, nobodywho, jev (this session only)\n' +
   '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
   '/cockpit flow      the Neural Flow in words: which of input, discovery, routing, workers, verify and done are verified\n' +
-  '/cockpit guard     Cobalt Guard owner alerts: status; ack, silence or unsilence (an alert never changes a verdict)\n' +
+  '/cockpit guard     Cobalt Guard owner alerts: status; ack, silence or unsilence; test and seen check that a notification reaches you (none changes a verdict)\n' +
   '/cockpit doctor    read-only checks: installs, profile, telemetry storage, host and prompt-cache policy\n' +
   '/cockpit sound      play both cues'
 
@@ -1240,7 +1242,7 @@ const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
     cache: await cacheFacts($),
     agents: agentsOf(ledger.agents.map(a => (typeof a.start === 'number' && typeof a.end === 'number' ? a.end - a.start : null))),
     stop: await stopFacts($),
-    guard: await (async () => { const v = await guardView($); return { enabled: guardCfg.enabled, label: guardLabel(guardCfg, v.state, v.kept), used: v.state.count, max: guardCfg.maxPerSession, cooldownSec: Math.round(guardCfg.cooldownMs / 1000), repeat: guardCfg.repeat, sound: guardCfg.sound } })(),
+    guard: await (async () => { const v = await guardView($); return { enabled: guardCfg.enabled, label: guardLabel(guardCfg, v.state, v.kept), used: v.state.count, max: guardCfg.maxPerSession, cooldownSec: Math.round(guardCfg.cooldownMs / 1000), repeat: guardCfg.repeat, sound: guardCfg.sound, transport: await transportText($) } })(),
   }
 }
 
@@ -2876,6 +2878,77 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
 
 const guardView = async ($: EngineInterface) => ({ state: await read($, guardAtom), kept: (await read($, ledgerAtom)).alerts ?? [] })
 
+// --- Verified notification transport (policy and wording: transport.ts). Tests are kept apart from the alerts and change no verdict. ---
+const transportAtom = atom({ plugin: 'cobalt-cockpit', key: 'guard-transport' } as const, EMPTY_TRANSPORT)
+/** Where the person is, as far as this process can say: the session, and whether it was started in an SSH session. */
+const transportScope = async ($: EngineInterface) => ({
+  session: (await $.session.id().catch(() => '')) || '',
+  link: linkOf(await $.env.get('SSH_CONNECTION').catch(() => undefined), await $.env.get('SSH_TTY').catch(() => undefined)),
+  now: await $.clock.now(),
+})
+const transportText = async ($: EngineInterface): Promise<string[]> => {
+  try {
+    const scope = await transportScope($)
+
+    return transportLines(validTransport(await read($, transportAtom)), scope.session, scope.link, scope.now, { enabled: guardCfg.enabled, repeat: guardCfg.repeat })
+  } catch { return ['TRANSPORT: NOT TESTED (the transport state could not be read just now)'] }
+}
+/** Four random bytes for a test's code: the host's web crypto when it has one, the clock otherwise. */
+const codeBytes = (at: number): number[] => {
+  try {
+    const bytes = new Uint8Array(4)
+    globalThis.crypto.getRandomValues(bytes)
+
+    return [...bytes]
+  } catch { return [at, at / 31, at / 961, at / 29_791].map(n => Math.floor(n) % 256) }
+}
+/** One test at a time: the limit is read and the test recorded without another slipping between. */
+let isTesting = false
+/** One labelled test notification, asked for by the person. It touches no alert record, budget, gate or approval. */
+const sendTest = async ($: EngineInterface, wantsSound: boolean): Promise<string> => {
+  if (isTesting) return 'Cockpit: a test notification is being sent right now. Nothing more was sent.'
+  isTesting = true
+  try { return await sendTestNow($, wantsSound) } finally { isTesting = false }
+}
+const sendTestNow = async ($: EngineInterface, wantsSound: boolean): Promise<string> => {
+  const scope = await transportScope($)
+  const may = mayTest(validTransport(await read($, transportAtom)), scope.session, scope.now)
+  if (!may.ok) return may.why === 'cooldown' ? `Cockpit: a test was sent a moment ago; try again in ${may.waitSec}s. Nothing was sent.` : may.why === 'budget' ? 'Cockpit: this session has used all of its test notifications. Nothing was sent.' : 'Cockpit: the session could not be identified, so a test could not be tied to it. Nothing was sent.'
+  const code = codeOf(codeBytes(scope.now))
+  const told = await notifyOwner($, testMessage(code))
+  const test: TransportTest = { code, at: scope.now, session: scope.session, link: scope.link, outcome: told.outcome === 'sent' ? 'sent' : told.outcome === 'refused' ? 'refused' : 'failed', channel: told.channel, ...(told.why === undefined ? {} : { why: told.why }), sound: wantsSound ? 'pending' : 'not-requested' }
+  await update($, transportAtom, old => addedTest(validTransport(old), test))
+  if (wantsSound) {
+    // started and not waited for, like an alert's cue; the test is marked once a player answered, or none did
+    void (async () => {
+      const played = await sound($, 'checkpoint')
+      await update($, transportAtom, old => ({ tests: validTransport(old).tests.map(a => (a.code === code && a.at === scope.now && a.sound === 'pending' ? { ...a, sound: played === null ? 'none' as const : played === 'bell' ? 'bell' as const : 'sound' as const } : a)) }))
+    })().catch(() => undefined)
+  }
+
+  return [test.outcome === 'sent' ? `Cockpit: a TEST notification was SENT via ${test.channel ?? 'unknown'}. The host reported writing it; that is not proof you saw it.` : `Cockpit: a TEST notification was ATTEMPTED and not sent (${test.outcome}${test.why === undefined ? '' : `: ${test.why}`}).`,
+    test.outcome !== 'sent' ? 'There is nothing to confirm. /cockpit guard shows why.' : test.channel === 'terminal_bell' ? 'This channel only rings the bell and shows no text. If you heard or saw the bell, type /cockpit guard seen.' : 'If you saw it, type /cockpit guard seen <the code it shows>. If you did not, do not confirm.',
+    'No gate, hold, review, approval, alert record or alert budget was touched.'].join('\n')
+}
+const CONFIRM_TEXT = {
+  confirmed: 'Cockpit: recorded. You confirmed the test notification in this session. That is your statement, not proof of delivery, and it is not carried to another session.',
+  already: 'Cockpit: the latest test is already confirmed; nothing was changed.',
+  none: 'Cockpit: there is no test notification in this session to confirm. /cockpit guard test sends one. Nothing was changed.',
+  'not-sent': 'Cockpit: the host did not report writing the latest test, so it cannot be confirmed. Nothing was changed.',
+  expired: 'Cockpit: the latest test is too old to confirm (10 minutes). Send a new one with /cockpit guard test. Nothing was changed.',
+  'other-link': 'Cockpit: the connection kind changed since the test was sent, so it cannot be confirmed here. Send a new one. Nothing was changed.',
+  'wrong-code': 'Cockpit: that is not the code of the latest test; nothing was changed.',
+  'bad-code': 'Cockpit: a test code is four letters or digits. Usage: /cockpit guard seen [code]. Nothing was changed.',
+  'needs-code': 'Cockpit: this channel shows the notification text, so type the code it showed: /cockpit guard seen <code>. If you did not see it, there is nothing to confirm. Nothing was changed.',
+} as const
+const confirmSeen = async ($: EngineInterface, typed: string): Promise<string> => {
+  const scope = await transportScope($)
+  const outcome = confirmTest(validTransport(await read($, transportAtom)), scope.session, scope.link, typed, scope.now)
+  if (outcome.result === 'confirmed') await update($, transportAtom, old => confirmTest(validTransport(old), scope.session, scope.link, typed, scope.now).transport)
+
+  return CONFIRM_TEXT[outcome.result]
+}
+
 
 // --- Optional Stop-hook verification guard (policy and wording: stopguard.ts). ---
 let stopOptions: Readonly<Record<string, unknown>> = {}
@@ -4142,6 +4215,16 @@ export const register: Register = (on, options) => {
           return { text: 'Cockpit: the Stop guard hold was released. Nothing was verified: TEST is pending and the check will run at the next stop. The refusal budget starts over.' }
         }
         if ((arg === 'ack' || arg === 'silence' || arg === 'unsilence') && !isHumanAuthority(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
+        if (arg === 'test' || arg === 'seen') {
+          // a test and its confirmation are the person's alone: a confirmation typed by anything else would be worth nothing
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: a notification test is sent or confirmed only by a command you type; nothing was sent or changed.' }
+          if (arg === 'test' && words[2] !== undefined && words[2] !== 'sound') return { text: 'Usage: /cockpit guard test [sound]' }
+          if (arg === 'seen' && words.length > 3) return { text: 'Usage: /cockpit guard seen [code]' }
+          let said: string
+          try { said = arg === 'test' ? await sendTest($, words[2] === 'sound' || guardCfg.sound) : await confirmSeen($, words[2] ?? '') } catch { said = arg === 'test' ? 'Cockpit: the test could not be completed and is not recorded as sent.' : 'Cockpit: the confirmation could not be recorded; nothing was changed.' }
+
+          return { text: `${said}\n${(await transportText($)).join('\n')}` }
+        }
         if (arg === 'ack' || arg === 'silence') {
           // the moment first, then the records: a notice appended between the two is covered by one or the other
           const at = await $.clock.now()
@@ -4149,12 +4232,12 @@ export const register: Register = (on, options) => {
           await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
           await hush(() => persist($))
         } else if (arg === 'unsilence') await update($, guardAtom, old => (old.all ? { ...old, all: false } : old))
-        else if (arg !== '') return { text: 'Usage: /cockpit guard | ack | silence | unsilence | trust [hash] | untrust | release' }
+        else if (arg !== '') return { text: 'Usage: /cockpit guard | ack | silence | unsilence | test [sound] | seen [code] | trust [hash] | untrust | release' }
         // an acknowledgment or a silence ends the repeats now, not at the timer's next look
         if (arg !== '') await armReminders($)
         const view = await guardView($)
 
-        return { text: guardText(guardCfg, view.state, view.kept) + (arg === 'ack' || arg === 'silence' || arg === 'unsilence' ? '\nThe verification verdict was not changed.' : '') }
+        return { text: `${guardText(guardCfg, view.state, view.kept)}\n${(await transportText($)).join('\n')}${arg === 'ack' || arg === 'silence' || arg === 'unsilence' ? '\nThe verification verdict was not changed.' : ''}` }
       }
       case 'doctor':
         return { text: doctorText(await doctorFacts($)) }

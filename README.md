@@ -1,4 +1,4 @@
-# Cobalt Cockpit v0.5.4 — Elastic Swarm + Adaptive Intelligence
+# Cobalt Cockpit v0.5.5 — Elastic Swarm + Adaptive Intelligence
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
@@ -116,7 +116,8 @@ A `--plugin-dir` copy stops loading when you omit the flag next session.
 | `/cockpit router` / `/cockpit router off\|nobodywho\|jev` | Show this session's router, or switch it (this session only; a new session starts OFF) |
 | `/cockpit stats` / `/cockpit stats 7d\|30d\|all [--json\|--csv]` | Print the local model telemetry for a window; reads the telemetry files and nothing else |
 | `/cockpit doctor` | Read-only installation, host, Auto-mode, telemetry-storage and prompt-cache diagnostics |
-| `/cockpit guard` / `/cockpit guard ack\|silence\|unsilence\|trust [hash]\|untrust\|release` | Owner-alert status (open conditions, reminders used, persistence and sound), acknowledgment and silence, and the Stop guard's script enrollment and release (typed by a person only) |
+| `/cockpit guard` / `/cockpit guard ack\|silence\|unsilence\|trust [hash]\|untrust\|release` | Owner-alert status (open conditions, reminders used, persistence and sound, notification transport), acknowledgment and silence, and the Stop guard's script enrollment and release (typed by a person only) |
+| `/cockpit guard test [sound]` / `/cockpit guard seen [code]` | Send one labelled TEST notification (and optionally the alert sound), then record that you saw it. Typed by a person only; changes no alert, budget, gate or approval |
 | `/cockpit flow` | Print the Neural Flow row in words |
 | `/ledger` | Open local Run Ledger |
 | `/ledger export json` | Print the sanitized Run Ledger as JSON |
@@ -238,7 +239,27 @@ With `guardAlerts` and `guardRepeat` both on, an alert whose condition is still 
 - **Sound.** `guardSound` tries the existing checkpoint cue with each alert and reminder; the player chain ends with the terminal bell. It stays silent when `sounds` is off or after `/cockpit mute`.
 - **One timer.** A single 30-second host timer (`$.clock.every`) exists only while something can still be repeated. It is cancelled on acknowledgment, silence, resolution, exhaustion and session end, and re-armed from the kept records after a reload, so counts carry on instead of starting over. No background process is started.
 - **No verdict changes.** An alert, a reminder, an acknowledgment or a silence never changes a gate, a hold, a review, a release approval or the task's percentage.
-- **What is claimed.** `sent` means the host reported writing the notification to the channel it names; `sound attempted` or `bell attempted` means a local player exited 0. Neither means you saw or heard it. Desktop popups are whatever your terminal does with the host's notification (kitty, iTerm2 and Ghostty show one; others get the bell). Cockpit starts no desktop notifier of its own, and on a remote machine whether the notification reaches your local desktop depends on your terminal and connection and is not verified by Cockpit.
+- **What is claimed.** `sent` means the host reported writing the notification to the channel it names; `sound attempted` or `bell attempted` means a local player exited 0. Neither means you saw or heard it. Desktop popups are whatever your terminal does with the host's notification (the host's channels are kitty, iTerm2 and Ghostty; another terminal gets nothing under the host's automatic setting, or the bell if Claude Code's `preferredNotifChannel` is `terminal_bell`). Cockpit starts no desktop notifier of its own, and on a remote machine whether the notification reaches your local desktop depends on your terminal and connection and is not verified by Cockpit.
+
+### Verified notification transport (v0.5.5)
+
+An alert is only useful if it reaches you. Cockpit cannot see your screen, so it reports four states and never a fifth:
+
+| State | Meaning |
+| --- | --- |
+| `NOT TESTED` | no test notification was sent in this session |
+| `ATTEMPTED` | a send was made and the host did not report writing it (the reason is shown) |
+| `SENT` | the host reported the channel it wrote to; it cannot tell whether your terminal showed it |
+| `USER CONFIRMED` | you typed `/cockpit guard seen` after a test in this session. Your statement, not proof of delivery |
+
+- `/cockpit guard test` sends one notification that says it is a test and shows a four-character code. `/cockpit guard test sound` also tries the alert sound (it is tried anyway when `guardSound` is on). The sound's outcome is recorded apart from the notification's.
+- `/cockpit guard seen <code>` confirms it with the code the notification showed; the code appears nowhere else. `/cockpit guard seen` without a code is accepted only for a channel that rings the bell and shows no text, and is recorded as confirmed without the code.
+- Limits of its own: one test every 30 seconds, six per session, a confirmation within 10 minutes of its test. Tests use none of the alert budget or cooldown and are not written to the alert records.
+- A confirmation belongs to the session it was made in and to the same kind of connection (an SSH session or not), and counts for 12 hours. A new session starts `NOT TESTED`, and a newer test that was not confirmed replaces an older confirmation.
+- `/cockpit guard` and `/cockpit doctor` show the channel the host reported, whether it is the bell only, the sound outcome, the last test and its age, the last confirmation and whether it applies now, and a warning while alerts are armed and nothing was confirmed in this session.
+- Both commands are accepted only when typed by a person, and neither changes a gate, a hold, a review, a release approval, the task's percentage or an alert.
+
+What is known, from Claude Code's own declarations: its notification channels are iTerm2, kitty, Ghostty and the terminal bell, and when its automatic setting finds no notifying terminal it reports `no-channel`. What follows from that is expectation, not something tested for this release: a terminal that is none of those (KDE's Konsole, for example) should get no popup from the host, and should get the bell if you set Claude Code's `preferredNotifChannel` to `terminal_bell`; what a bell then does (a sound, a taskbar flash, a desktop notification) is your terminal's own setting; and over SSH the sequence or bell should be carried in the terminal stream to your local terminal, which decides what to do with it. None of this was observed on Konsole or over SSH. Cockpit detects that the process was started in an SSH session, cannot detect a reconnect, and cannot tell whether anything arrived. The alert sound is different: it plays on the machine Claude Code runs on. On a remote machine an audio player that answers there plays where you cannot hear it, and the bell, the last player in the chain, is tried only when no audio player answers; that bell is the only part of the sound that could reach you. Cockpit starts no desktop notifier, service or tunnel. Test where you work, and test again after reconnecting.
 
 Cockpit does not take part in Claude Code's permission check. It registers no hook on it and makes no permission query; its guards run before it and can only refuse a call or ask you about it, never approve one.
 

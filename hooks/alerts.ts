@@ -212,7 +212,7 @@ export const bounded = (kept: readonly AlertRecord[], add: AlertRecord): AlertRe
 
 export const guardText = (cfg: GuardConfig, state: GuardState, kept: readonly AlertRecord[]): string => {
   const lines = [`GUARD: ${labelOf(cfg, state, kept)}`]
-  if (!cfg.enabled) lines.push('Off. Set guardAlerts to true to be told when a run needs you. Nothing is sent while off.')
+  if (!cfg.enabled) lines.push('Off. Set guardAlerts to true to be told when a run needs you. No alert is sent while off.')
   else {
     lines.push(`Armed · ${state.count} of ${cfg.maxPerSession} alerts used this session · at most one every ${Math.round(cfg.cooldownMs / 1000)}s · same condition never twice.`)
     lines.push('Delivery: your terminal notification channel, through the host. SENT means the host wrote it to your terminal; it cannot confirm that you saw it. No webhook, email or push exists in this version.')

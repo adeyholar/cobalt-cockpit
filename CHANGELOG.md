@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased (0.5.5) — Verified notification transport
+
+Diagnostics and a person's confirmation for whether Cobalt Guard's notifications reach the current terminal. Details and the operator checklist: [docs/implementation-v0.5.5.md](docs/implementation-v0.5.5.md).
+
+- `/cockpit guard test [sound]`: one notification labelled TEST with a random four-character code; optionally the existing alert sound (always with `guardSound`). Needs no task, works with alerts off, and has its own limit (one per 30 s, six per session). It spends none of the alert budget or cooldown and writes no alert record.
+- `/cockpit guard seen [code]`: records that the person saw the latest test of this session, within 10 minutes of it. With the code it showed; without one only for a bell-only channel (kept as "confirmed without the code"). A wrong or missing code, a second confirmation, a late one, one with no test, or one after the connection kind changed changes nothing. A confirmation counts for 12 hours.
+- Four states: `NOT TESTED`, `ATTEMPTED`, `SENT`, `USER CONFIRMED`. Nothing is recorded as delivered; a confirmation is a person's statement.
+- A confirmation is held with its session id and connection kind (SSH session or not, from whether `SSH_CONNECTION` or `SSH_TTY` is set; the values are not kept). Another session starts `NOT TESTED`. A reconnect cannot be detected and the output says so.
+- `/cockpit guard` and `/cockpit doctor` show the reported channel, bell-only, the sound outcome, the last test and confirmation, whether the confirmation applies now, and a warning while alerts are armed on an unconfirmed transport.
+- Both commands are person-only and change no gate, hold, review, approval, percentage or alert. No new process, service, tunnel, network call or credential.
+- Not verified here: any real terminal. Konsole on Fedora, and Claude Code in Boat over SSH, remain for the operator to test.
+
 ## Unreleased (0.5.4) — Persistent alerts
 
 Opt-in extension of Cobalt Guard's owner alerts (`hooks/alerts.ts`). With every new option off, 0.5.3 behaviour is unchanged. Details: [docs/implementation-v0.5.4.md](docs/implementation-v0.5.4.md).
