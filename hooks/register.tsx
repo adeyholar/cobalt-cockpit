@@ -124,7 +124,7 @@ import {
 } from './orchestra'
 import type { OrchestraView } from './orchestra'
 import { BLOCK_DENY, BLOCK_LINE, EMPTY_POLICY, FABLE_RULE, answered, blocked, fableConfigured, fableRoute, isFable } from './policy'
-import { isPersonOrigin } from './origin'
+import { isHumanAuthority, isPersonOrigin } from './origin'
 import { agentsOf, readCache } from './cache'
 import type { CacheReading } from './cache'
 import { doctorText, shown as shownPath } from './doctor'
@@ -3735,7 +3735,7 @@ export const register: Register = (on, options) => {
       case 'reset':
         // Clearing the task also clears a held mandatory review, so it is the person's alone: a command another plugin ran,
         // a trigger, a peer or an origin this build does not know is refused, and nothing is changed.
-        if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: the task is cleared only by a command you type; nothing was changed.' }
+        if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: the task is cleared only by a command you type; nothing was changed.' }
         const abandoned = await read($, taskAtom)
         await hush(() => carryObligation($, abandoned, '/cockpit reset'))
         await update($, taskAtom, () => null)
@@ -3756,7 +3756,7 @@ export const register: Register = (on, options) => {
       }
       case 'discovery': {
         const pinned = value === '' ? undefined : value === 'auto' ? null : (['light', 'standard', 'deep'].includes(value) ? value.toUpperCase() as DiscoveryLevel : undefined)
-        const isPerson = isPersonOrigin(e.origin)
+        const isPerson = isHumanAuthority(e.origin)
         if (value !== '' && pinned === undefined) return { text: `Cockpit: "${value}" is not a level. Use /cockpit discovery light | standard | deep | auto.` }
         // Only the person pins a level; a command another plugin ran may look.
         if (pinned !== undefined && !isPerson) return { text: 'Cockpit: the discovery level is pinned only by a command you type; nothing was changed.' }
@@ -3774,7 +3774,7 @@ export const register: Register = (on, options) => {
         const held = await read($, routerAtom)
         let target = value === '' ? null : routerModeOf(value)
         // Only the person switches a router: a command another plugin or a trigger ran may look, not choose.
-        const isPerson = isPersonOrigin(e.origin)
+        const isPerson = isHumanAuthority(e.origin)
         if (target !== null && target !== held.mode && !isPerson) return { text: `ROUTER / ${routerLine(held)}\nCockpit: the router is switched only by a command you type; nothing was changed.` }
         if (value !== '' && target === null) return { text: `Cockpit: "${value}" is not a router. Use /cockpit router off | nobodywho | jev.\nROUTER / ${routerLine(held)}` }
         // no word given: the engine's own dialog, where there is someone to ask
@@ -3810,7 +3810,7 @@ export const register: Register = (on, options) => {
         const arg = words[1] ?? ''
         if (arg === 'trust' || arg === 'untrust') {
           // enrolling a verifier is the person's alone: a plugin, a model-triggered command or an unknown origin changes nothing
-          if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: a verification script is trusted only by a command you type; nothing was changed.' }
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: a verification script is trusted only by a command you type; nothing was changed.' }
           const c = await loadStopCfg($)
           if (c.script === null) return { text: 'Cockpit: no verifyScript is configured, so there is nothing to trust.' }
           const scope = await trustScope($, c.script)
@@ -3836,7 +3836,7 @@ export const register: Register = (on, options) => {
         }
         if (arg === 'release') {
           // lifting a hold is the person's alone, and it passes nothing: TEST goes back to pending and the budget starts over
-          if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: a Stop guard hold is released only by a command you type; nothing was changed.' }
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: a Stop guard hold is released only by a command you type; nothing was changed.' }
           const before = await read($, taskAtom)
           if (before === null || !isGuardHeld(before)) return { text: 'Cockpit: the task is not held by the Stop guard; nothing was changed.' }
           await change($, (t, now) => releaseHold(t, now))
@@ -3847,7 +3847,7 @@ export const register: Register = (on, options) => {
 
           return { text: 'Cockpit: the Stop guard hold was released. Nothing was verified: TEST is pending and the check will run at the next stop. The refusal budget starts over.' }
         }
-        if ((arg === 'ack' || arg === 'silence') && !isPersonOrigin(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
+        if ((arg === 'ack' || arg === 'silence') && !isHumanAuthority(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
         if (arg === 'ack' || arg === 'silence') {
           await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
           if (arg === 'silence') await update($, guardAtom, old => ({ ...old, all: true }))

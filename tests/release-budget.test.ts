@@ -229,14 +229,14 @@ describe('a release review through the host', () => {
 
       return state
     }
-    for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }, { kind: 'sdk' }]) {
+    for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }]) {
       test(`${origin.kind} clears the task`, LED, async ($, on) => {
         const state = await held($, on)
         expect(String((await run($, 'reset', origin)).text)).toContain('cleared')
         expect(state.get('task')?.value ?? null).toBeNull()
       })
     }
-    for (const origin of [{ kind: 'plugin', name: 'other-plugin' }, { kind: 'plugin', name: 'composer' }, { kind: 'scheduled-trigger' }, { kind: 'peer' }, { kind: 'task-notification' }, { kind: 'channel', server: 's' }, { kind: 'some-future-kind' }, { kind: 'composer ' }, { kind: 'COMPOSER' }, {}, null, undefined, 'composer']) {
+    for (const origin of [{ kind: 'plugin', name: 'other-plugin' }, { kind: 'plugin', name: 'composer' }, { kind: 'scheduled-trigger' }, { kind: 'peer' }, { kind: 'task-notification' }, { kind: 'channel', server: 's' }, { kind: 'sdk' }, { kind: 'some-future-kind' }, { kind: 'composer ' }, { kind: 'COMPOSER' }, {}, null, undefined, 'composer']) {
       test(`${JSON.stringify(origin)} is refused and the held review stays`, LED, async ($, on) => {
         const state = await held($, on)
         const before = task(state)
