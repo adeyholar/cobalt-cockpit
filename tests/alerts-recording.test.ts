@@ -502,6 +502,44 @@ describe('in a run: since your last look', () => {
   })
 })
 
+describe('record-only storage: self-healing, and the earlier formats', () => {
+  test('an occurrence another session\'s pruning removed is written again at this session\'s next write', REC(), async ($, on) => {
+    const w = world(on); const held = hostState(on, {}); session(on)
+    await start($); await planAndComplete($, 1); await failSecurity($)
+    const project = ledger(held).alertsProject!
+    const id = idOf(await say($, 'alerts'), 'security-failure')
+    expect(w.store.has(occKeyOf(project, id))).toBe(true)
+    w.store.delete(occKeyOf(project, id))
+    await w.clock.advance(31_000)
+    await block($)
+    expect(w.store.has(occKeyOf(project, id))).toBe(true)
+  })
+  test('the v0.5.8 key of a project is moved to keys of its own when recording is on, and then given up', REC(), async ($, on) => {
+    const t = blockedTask()
+    const project = await projectHash('/work/example')
+    const earlier = written(recorded(keyOfTask(t), { at: 1, taskId: t.id }))
+    const w = world(on, {}, { [`alert-history:${project}`]: { v: 1, alerts: earlier }, 'alert-history': { v: 1, projects: { [project]: earlier } } }); hostState(on, { task: t }); session(on, 's2')
+    await start($)
+    expect(w.store.has(`alert-history:${project}`)).toBe(false)
+    expect(w.store.has(occKeyOf(project, idsOf(earlier)[0]!))).toBe(true)
+    // the v0.5.7 single key is left as it was
+    expect(w.store.has('alert-history')).toBe(true)
+    expect(await say($, 'alerts')).toContain('RECORDED only, no notification')
+  })
+  test('with both settings off the earlier formats are read and nothing is copied or deleted', { options: {} }, async ($, on) => {
+    const t = blockedTask()
+    const project = await projectHash('/work/example')
+    const earlier = written(rec(keyOfTask(t), { at: 1, taskId: t.id }))
+    const w = world(on, {}, { [`alert-history:${project}`]: { v: 1, alerts: earlier } }); hostState(on, { task: t }); session(on, 's2')
+    await start($)
+    await progress($, { action: 'status' })
+    expect(await say($, 'alerts')).toContain('1 recorded')
+    expect(w.store.has(`alert-history:${project}`)).toBe(true)
+    expect([...w.store.keys()].filter(k => k.startsWith('alert-occ:'))).toEqual([])
+    expect(w.storeWrites.filter(x => x.key.startsWith('alert-'))).toEqual([])
+  })
+})
+
 describe('record-only storage: the same bounds as alerts', () => {
   test('occurrences are keys of their own, bounded per project, and carry only the closed vocabulary', REC(), async ($, on) => {
     const w = world(on); const held = hostState(on, {}); session(on)

@@ -465,17 +465,19 @@ const parseOccKey = (key: unknown): { project: string; id: string } | null => {
 /** The occurrences of a project the store holds, in the order it lists the keys (the order they were first written). */
 export const occIdsOf = (keys: readonly unknown[], project: string): string[] => keys.flatMap(k => { const o = parseOccKey(k); return o !== null && o.project === project ? [o.id] : [] })
 /**
- * The occurrence keys to forget: every key of a project beyond the newest four, and the oldest beyond 32 in a project, those
- * not in `protect` (the session's own) first. Oldest means first written, as the store lists them: no clock is read.
+ * The occurrence keys to forget: every key of a project beyond the four kept, and the oldest beyond 32 in a project, those not
+ * in `protect` (the session's own) first. The four kept are `keep` (the writing session's project, which is never given up at
+ * project level) and the others whose newest key sits latest. Oldest means first written, as the store lists them: no clock is read.
  */
-export const excessOccKeys = (keys: readonly unknown[], protect: ReadonlySet<string> = new Set()): string[] => {
+export const excessOccKeys = (keys: readonly unknown[], protect: ReadonlySet<string> = new Set(), keep?: string): string[] => {
   const items = keys.flatMap((k, i) => { const o = parseOccKey(k); return o === null ? [] : [{ key: k as string, i, project: o.project }] })
   const byProject = new Map<string, typeof items>()
   for (const it of items) byProject.set(it.project, [...(byProject.get(it.project) ?? []), it])
-  const order = [...byProject.keys()].sort((a, b) => (byProject.get(a)!.at(-1)!.i) - (byProject.get(b)!.at(-1)!.i))
-  const drop: string[] = []
-  for (const p of order.slice(0, Math.max(0, order.length - OCC_PROJECTS_MAX))) drop.push(...byProject.get(p)!.map(x => x.key))
-  for (const p of order.slice(-OCC_PROJECTS_MAX)) {
+  const others = [...byProject.keys()].filter(p => p !== keep).sort((a, b) => (byProject.get(a)!.at(-1)!.i) - (byProject.get(b)!.at(-1)!.i))
+  const room = Math.max(0, OCC_PROJECTS_MAX - (keep !== undefined ? 1 : 0))
+  const keptOthers = others.slice(others.length - Math.min(others.length, room))
+  const drop: string[] = others.filter(p => !keptOthers.includes(p)).flatMap(p => byProject.get(p)!.map(x => x.key))
+  for (const p of [...keptOthers, ...(keep !== undefined && byProject.has(keep) ? [keep] : [])]) {
     const mine = byProject.get(p)!
     const over = mine.length - OCC_PER_PROJECT
     if (over > 0) drop.push(...[...mine.filter(x => !protect.has(x.key)), ...mine.filter(x => protect.has(x.key))].slice(0, over).map(x => x.key))
@@ -483,12 +485,28 @@ export const excessOccKeys = (keys: readonly unknown[], protect: ReadonlySet<str
 
   return drop
 }
-/** The records a session starts from: the earlier format's records for occurrences the new keys do not hold, then the occurrences in key order. */
+/**
+ * The records a session starts from: the earlier format's occurrences the new keys do not hold, then the occurrences in key
+ * order. An occurrence still open when a later one of the same condition begins (its task ended, or two sessions diverged) is
+ * closed in memory by a resolved mark, so grouping by condition cannot merge the two and lose the later one's id.
+ */
 export const historyFrom = (stored: readonly { id: string; records: readonly AlertRecord[] }[], legacy: readonly AlertRecord[]): AlertRecord[] => {
   const have = new Set(stored.map(s => s.id))
-  const older = episodesOf(legacy).filter(e => !have.has(e.id)).flatMap(e => e.records)
+  const parts: { id: string; records: AlertRecord[] }[] = [
+    ...episodesOf(legacy).filter(e => !have.has(e.id)).map(e => ({ id: e.id, records: [...e.records] })),
+    ...stored.map(s => ({ id: s.id, records: [...s.records] })),
+  ]
+  const open = new Map<string, { id: string; records: AlertRecord[] }>()
+  for (const part of parts) {
+    const first = part.records[0]
+    if (first === undefined) continue
+    const earlier = open.get(first.key)
+    const last = earlier?.records.at(-1)
+    if (earlier !== undefined && last !== undefined && last.outcome !== 'resolved') earlier.records.push({ key: last.key, kind: last.kind, taskId: last.taskId, at: last.at, outcome: 'resolved', attempts: 0, channel: null, id: earlier.id })
+    open.set(first.key, part)
+  }
 
-  return [...older, ...stored.flatMap(s => s.records)].slice(-ALERT_CAP)
+  return parts.flatMap(p => p.records).slice(-ALERT_CAP)
 }
 
 // --- v0.5.8: acknowledgments as keys of their own, the history merge, and the return digest ---

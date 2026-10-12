@@ -34,6 +34,7 @@ const blockedTask = (): Task => {
 }
 const keyOfTask = (t: Task) => `${t.id}@${t.startedAt}:run-blocked:task`
 /** A small deterministic generator, so the interleavings below are the same on every run. */
+const K2 = 'u2:security-failure:SECURITY'
 const lcg = (seed: number) => () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 2 ** 32 }
 
 describe('acknowledgment keys', () => {
@@ -72,6 +73,15 @@ describe('acknowledgment keys', () => {
     expect(excessOccKeys(many, new Set(many.slice(0, 3)))).toEqual(many.slice(3, 6))
     expect(excessOccKeys([...many.slice(0, 5), 'alert-occ:../x', 'alert-occ:' + P1, ackKeyOf(P1, '00000000'), 'alert-history:' + P1])).toEqual([])
     expect(OCC_PROJECTS_MAX).toBe(4)
+  })
+  test('the writing session\'s own project is never given up at project level, even when its keys are listed first', () => {
+    const projects = ['1', '2', '3', '4', '5'].map(c => c.repeat(12))
+    const keys = projects.map(p => occKeyOf(p, 'aaaaaaaa'))
+    // project 1 is the oldest as listed and is the session's own: the oldest of the others goes instead
+    expect(excessOccKeys(keys, new Set(), projects[0])).toEqual([keys[1]])
+    expect(excessOccKeys(keys)).toEqual([keys[0]])
+    // a fifth project recording does not remove the live one
+    expect(excessOccKeys([...keys.slice(0, 4), occKeyOf('6'.repeat(12), 'bbbbbbbb')], new Set(), projects[1])).not.toContain(keys[1])
   })
   test('the ids of a project are read from the keys, in the order listed, and only for that project', () => {
     const keys = [occKeyOf(P1, 'aaaaaaaa'), occKeyOf(P2, 'bbbbbbbb'), occKeyOf(P1, 'cccccccc'), 'alert-occ:' + P1 + ':zzzzzzzz', historyKeyOf(P1)]
@@ -136,6 +146,16 @@ describe('occurrence keys: stale snapshots, interleaved sessions, conflicting ac
     expect(out.map(r => `${r.key}:${r.nth ?? 0}`)).toEqual(['t1:run-blocked:task:0', 't0:run-blocked:task:0', 't0:run-blocked:task:1'])
     expect(historyFrom([], legacy)).toEqual(legacy)
     expect(historyFrom([{ id: 'aaaaaaaa', records: mk(ALERT_CAP + 5, 0) }], []).length).toBe(ALERT_CAP)
+  })
+  test('two stored occurrences of one condition, the earlier still open, stay two: the earlier is closed in memory, not merged', () => {
+    const k = 'u1:run-blocked:task'
+    const first = written(rec(k, { at: 1000 }))
+    const second = bounded(bounded(bounded([], rec(k, { at: 3000 })), rec(k, { at: 3500, nth: 1 })), rec(K2, { at: 4000 }))
+    const out = historyFrom([{ id: idsOf(first)[0]!, records: first }, { id: idsOf(second)[0]!, records: second.filter(r => r.key === k) }], [])
+    const eps = episodesOf(out)
+    expect(eps.map(e => e.id)).toEqual([idsOf(first)[0], idsOf(second)[0]])
+    expect(eps[0]!.closed).toBe(true)
+    expect(eps[1]!.records).toHaveLength(2)
   })
   test('an acknowledgment key is never in the way of a record write, and applies to whichever copy a session assembles', () => {
     const store = new Map<string, unknown>()

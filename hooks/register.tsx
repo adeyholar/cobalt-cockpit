@@ -2661,6 +2661,7 @@ const keepAlertHistory = async ($: EngineInterface, ledger: Ledger): Promise<voi
   const records = validAlerts(ledger.alerts)
   if (project === undefined || !PROJECT_RE.test(project) || records.length === 0) return
   const episodes = episodesOf(records)
+  let wrote = false
   for (const e of episodes) {
     const key = occKeyOf(project, e.id)
     const sig = JSON.stringify(e.records)
@@ -2668,10 +2669,21 @@ const keepAlertHistory = async ($: EngineInterface, ledger: Ledger): Promise<voi
     try {
       await $.store.set(key, { v: 1, records: e.records })
       occSigs.set(key, sig)
+      wrote = true
     } catch { /* not marked written: the next persist tries again */ }
   }
+  // the store's key list is read, and old keys given up, only when something was written
+  if (!wrote) return
   await hush(async () => {
-    for (const k of excessOccKeys(await $.store.keys(), new Set(episodes.map(e => occKeyOf(project, e.id))))) { await $.store.delete(k); occSigs.delete(k) }
+    const own = new Set(episodes.map(e => occKeyOf(project, e.id)))
+    const keys = await $.store.keys()
+    for (const k of excessOccKeys(keys, own, project)) { await $.store.delete(k); occSigs.delete(k) }
+    // another session's pruning can have given up one of this session's occurrences: it is written again, from the Ledger's copy
+    const have = new Set(keys)
+    for (const e of episodes) {
+      const key = occKeyOf(project, e.id)
+      if (!have.has(key)) { await $.store.set(key, { v: 1, records: e.records }); occSigs.set(key, JSON.stringify(e.records)) }
+    }
   })
 }
 /** Once per session: a Ledger with no alerts of its own takes up what its project's history holds, with the acknowledgments the store has; either way it is tied to the project. */
@@ -2690,11 +2702,21 @@ const seedAlerts = async ($: EngineInterface): Promise<void> => {
   const parts = await storedOccurrences($, project)
   const past = applyAcks(historyFrom(parts, await legacyHistory($, project)), await storedAcks($, project))
   const mine = (held.alerts ?? []).length === 0 ? past : validAlerts(held.alerts)
-  primeSigs(project, mine, new Set(parts.map(x => x.id)))
+  // with both settings off nothing is written, so what an earlier format held is not copied into keys of its own
+  primeSigs(project, mine, isRecording(guardCfg) ? new Set(parts.map(x => x.id)) : new Set(episodesOf(mine).map(e => e.id)))
   // with nothing recorded earlier and neither alerts nor record-only on, nothing is taken up and nothing is written: no new history is kept
   if ((held.alerts ?? []).length === 0 && past.length === 0 && !isRecording(guardCfg)) return
   await update($, ledgerAtom, old => (old.alertsProject !== undefined ? old : { ...old, alertsProject: project, alerts: (old.alerts ?? []).length === 0 ? past : old.alerts }))
   await persist($)
+  // the v0.5.8 key of this project is given up once every occurrence in it has a key of its own, so it cannot bring back what is pruned later
+  if (isRecording(guardCfg)) {
+    await hush(async () => {
+      const old = (await $.store.get(historyKeyOf(project)).catch(() => undefined)) as { v?: unknown; alerts?: unknown } | undefined
+      if (old?.v !== 1) return
+      const have = new Set(occIdsOf(await $.store.keys(), project))
+      if (episodesOf(validAlerts(old.alerts)).every(e => have.has(e.id))) await $.store.delete(historyKeyOf(project))
+    })
+  }
   await syncAcks($, false)
 }
 const persist = async ($: EngineInterface): Promise<void> => {
@@ -4599,7 +4621,8 @@ export const register: Register = (on, options) => {
         const seen = await readSeen($, ledgerNow.alertsProject)
         const text = inboxText(occ, shownPage, await $.clock.now(), guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns })
         // a person's look marks what it showed; the count above was taken first. Nothing is acknowledged by looking.
-        if (isHumanAuthority(e.origin) && ledgerNow.alertsProject !== undefined && occ.length > 0) await hush(() => markSeen($, ledgerNow.alertsProject as string, seen ?? null, pageIdsOf(occ, shownPage)))
+        // with both settings off nothing new is kept, the look marker included
+        if (isRecording(guardCfg) && isHumanAuthority(e.origin) && ledgerNow.alertsProject !== undefined && occ.length > 0) await hush(() => markSeen($, ledgerNow.alertsProject as string, seen ?? null, pageIdsOf(occ, shownPage)))
 
         return { text }
       }
