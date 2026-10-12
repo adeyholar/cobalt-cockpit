@@ -59,7 +59,7 @@ import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
 import { EMPTY_GUARD, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
 import type { GuardConfig } from './alerts'
-import { uidOf, attemptsOf, boundedChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
+import { uidOf, attemptsOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
 import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
 import { basename, parseShell, unwrap } from './shell'
@@ -1449,7 +1449,7 @@ const checksOf = async ($: EngineInterface): Promise<CheckRecord[]> => {
     if (n > (inLedger.get(k) ?? 0)) missing.push(c)
   }
 
-  return [...missing, ...mine].map((c, i) => ({ c, i })).sort((a, b) => a.c.at - b.c.at || a.i - b.i).map(x => x.c).slice(-24)
+  return retainChecks([...missing, ...mine].map((c, i) => ({ c, i })).sort((a, b) => a.c.at - b.c.at || a.i - b.i).map(x => x.c))
 }
 const keepCheck = async ($: EngineInterface, rec: CheckRecord): Promise<void> => {
   await update($, ledgerAtom, old => ({ ...old, stopChecks: boundedChecks(old.stopChecks ?? [], rec) }))

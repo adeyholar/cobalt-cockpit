@@ -164,7 +164,7 @@ export const isCheckRecord = (x: unknown): x is CheckRecord => {
     && (r['exit'] === null || Number.isSafeInteger(r['exit'])) && (r['ms'] === null || typeof r['ms'] === 'number') && (r['tree'] === null || isText(r['tree'], 96))
     && isText(r['summary'], 700) && typeof r['hasSummary'] === 'boolean'
 }
-export const validChecks = (x: unknown): CheckRecord[] => (Array.isArray(x) ? x.filter(isCheckRecord).slice(-24) : [])
+export const validChecks = (x: unknown): CheckRecord[] => (Array.isArray(x) ? retainChecks(x.filter(isCheckRecord)) : [])
 
 /** The tail of a check's output, one line, bounded; the caller redacts secrets first. */
 export const outputTail = (output: string): string => {
@@ -225,7 +225,31 @@ export const verdictOf = (v: VerdictInput): Verdict => {
   }
 }
 
-export const boundedChecks = (checks: readonly CheckRecord[], add: CheckRecord, cap = 24): CheckRecord[] => [...checks, add].slice(-cap)
+export const CHECKS_PER_TASK = 16
+export const CHECKS_TOTAL = 128
+const NEWEST_TASKS = 4
+
+/**
+ * The bound on kept check records, per task and then in total, never one pool shared first-come: a task keeps its own
+ * newest CHECKS_PER_TASK records (the refusal budget is at most MAX_ATTEMPTS_CEILING, so its whole run of attempts fits),
+ * and when the total is over CHECKS_TOTAL the oldest records of the older tasks go first. The newest few tasks, the one
+ * being held among them, are never evicted by records of others. Order is kept.
+ */
+export const retainChecks = (list: readonly CheckRecord[]): CheckRecord[] => {
+  const seen = new Map<string, number>()
+  const perTask = [...list].reverse().filter(c => { const n = (seen.get(c.uid) ?? 0) + 1; seen.set(c.uid, n); return n <= CHECKS_PER_TASK }).reverse()
+  const newest = new Set<string>()
+  for (let i = perTask.length - 1; i >= 0 && newest.size < NEWEST_TASKS; i--) newest.add(perTask[i]!.uid)
+  const out = [...perTask]
+  for (let i = 0; out.length > CHECKS_TOTAL && i < out.length;) {
+    if (newest.has(out[i]!.uid)) i++
+    else out.splice(i, 1)
+  }
+
+  return out.length > CHECKS_TOTAL ? out.slice(-CHECKS_TOTAL) : out
+}
+
+export const boundedChecks = (checks: readonly CheckRecord[], add: CheckRecord): CheckRecord[] => retainChecks([...checks, add])
 
 const PREFIX = /^STOP GUARD: /
 
