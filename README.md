@@ -1,4 +1,4 @@
-# Cobalt Cockpit v0.5.9 — Elastic Swarm + Adaptive Intelligence
+# Cobalt Cockpit v0.6.0 — Mission Control Operations
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
@@ -117,6 +117,9 @@ A `--plugin-dir` copy stops loading when you omit the flag next session.
 | `/cockpit stats` / `/cockpit stats 7d\|30d\|all [--json\|--csv]` | Print the local model telemetry for a window; reads the telemetry files and nothing else |
 | `/cockpit doctor` | Read-only installation, host, Auto-mode, telemetry-storage and prompt-cache diagnostics |
 | `/cockpit guard` / `/cockpit guard ack\|silence\|unsilence\|trust [hash]\|untrust\|release` | Owner-alert status (open conditions, reminders used, persistence and sound, notification transport), acknowledgment and silence, and the Stop guard's script enrollment and release (typed by a person only) |
+| `/cockpit agents` / `/cockpit agents <task>` | The agent inspector: every swarm task with its tier, state, wave, ownership, dependencies, requested versus applied effort, last observed activity, reported versus verified outcome, and why it is waiting. Read-only |
+| `/cockpit ready` | Which recorded conditions stand between the task and DONE: milestones, the six gates (with stale and reported-only evidence called out), the Stop guard, the Opus review, the goal check, and pending agent escalations. Read-only; approves nothing |
+| `/cockpit alerts export` / `/cockpit alerts legacy [delete <code>]` | A bounded, closed-vocabulary JSON export of this project's alert occurrences (typed by you; printed, never written or sent), and a dry-run-first cleanup of the v0.5.7/v0.5.8 history keys that deletes only what exists elsewhere |
 | `/cockpit alerts [page]` / `/cockpit alerts digest` / `/cockpit alerts ack <id>` | The alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; acknowledge exactly one occurrence. Person-only to acknowledge; changes no gate, hold, review, approval or verdict |
 | `/cockpit guard test [sound]` / `/cockpit guard seen [code]` | Send one labelled TEST notification (and optionally the alert sound), then record that you saw it. Typed by a person only; changes no alert, budget, gate or approval |
 | `/cockpit flow` | Print the Neural Flow row in words |
@@ -368,6 +371,30 @@ printf '%s\n' '{"profile":"OPUS_LED"}' | claude plugin configure cobalt-cockpit@
 ```
 
 Run Ledgers and preferences stay readable in both directions. Design, measurements and the v0.5.0 corrections are in [docs/implementation-v0.5-sonnet-led.md](docs/implementation-v0.5-sonnet-led.md) and [docs/delivery-v0.5.0-hardening.md](docs/delivery-v0.5.0-hardening.md).
+
+## Mission Control operations (v0.6.0)
+
+Three read-only views of what Cockpit already records about multi-agent work. None of them changes state, starts, admits or cancels an agent, or clears a hold; none invents a figure the host did not report.
+
+- **`/cockpit agents`** lists the swarm's tasks, the ones that need attention first (stalled, escalated, blocked, queued), with the wave, the capacity in use (`3 of 4 slots · SONNET 2/2 · HAIKU 1/2`), and the host agents Cockpit did not assign. **`/cockpit agents <task>`** shows one task: objective, bound agent, model as observed (or "not observed"), effort as requested, as set on the launch, as applied and as the engine reported (four different things, each "not observed" when it was not), wave, ownership (shortened claims), dependencies, children, last observed activity, the outcome as reported versus as verified by the commander, any escalation, and the blocker.
+- **Blockers** are explained from the swarm's own admission rule, not a second scheduler: waiting for another task, a resource ownership conflict (and over what), agent capacity exhausted (with the numbers admission uses), the commander or an architect occupied, a reservation waiting for the host, a stall (ownership retained), an escalation awaiting the commander, a cancellation awaiting the host, a failure, or a completed result not yet verified. A suggestion is labelled **information only; nothing was changed**, and appears only when the recorded state supports one.
+- **`/cockpit ready`** applies the existing completion rules to the recorded task: open milestones and blockers, the six gates (a pass reported by Claude is labelled as such and never called verified; a pass that went stale is STALE), the Stop guard's hold or missing completion, an unadjudicated Opus review, the goal check's acceptance criteria and open unknowns, and, as notes, pending agent escalations and reported-but-unverified agent results. It says `PERMITS DONE` exactly when the task's own status is DONE, and is otherwise `DOES NOT PERMIT DONE` with what stands in the way. It is an explanation, not an approval.
+
+## Capabilities at a glance
+
+What the hooks module (`hooks/register.tsx`) does with the host's capabilities, for review. Every capability is Claude Code's own; none is supplied by another plugin.
+
+| Kind | What | Why |
+| --- | --- | --- |
+| Hook registrations | `session.start`, `session.end`, `turn.start`, `turn.complete`, `turn.step`, `prompt.submit`, `prompt.compose`, `attribution.text`, `tool.call`, `classic.PostToolUse`, `classic.SessionStart`, `classic.Stop`, `agent.offer`, `agent.spawn`, `config.set`, `plugin.register`, `session.measure`, `ui.render` (AbovePrompt, three panes, AskUserQuestion) | Progress, the HUD, the Run Ledger, the guards and the Stop-hook verification guard. `claude plugin validate --json` lists each and whether it has a fail-closed `.catch` |
+| Command interception | `command.run` for `/model`, `/effort`, `/advisor` (refused only under the Fable and strict-advisor policies you enable), `/login`, `/logout`, `/init` (observed, forwarded) | Policy you opted into; observation |
+| Commands and tools registered | `/cockpit`, `/ledger`, `/replay`, `/park`; tools `mcp__cobalt-cockpit__progress` and `mcp__cobalt-cockpit__swarm` | The operator's commands and the model's progress and swarm reports |
+| Refusals | the tool guard (destructive commands asked or refused), agent-offer/spawn guards, `/config` rows of the guard and alert settings (person-only), `/model`/`/advisor` under the Fable policy, Stop-hook holds under `stopGuard: ENFORCE` | See [SECURITY.md](SECURITY.md#hooks-that-refuse) |
+| Notification | `$.ui.notify` (Cobalt Guard alerts, with `guardAlerts` on; the transport test you type), `$.ui.toast` (the resume line and the `guardDigest` line), the optional checkpoint cue or terminal bell through a local audio player | Owner alerts; nothing is sent in record-only mode |
+| Files written | the host's plugin store; with `telemetry` on, `$XDG_STATE_HOME/cobalt-cockpit/telemetry/` (written with `$.fs.write`) | See below and [PRIVACY.md](PRIVACY.md) |
+| Plugin-store keys | `ledger:<session>` and `ledger-index` (Run Ledgers, eight sessions), `prefs`, `release-reviews`, `stop-checks`, `stop-trust`, `alert-occ:<project>:<id>`, `alert-ack:<project>:<id>`, `alert-seen:<project>`, `alert-digest`; read only: `alert-history` and `alert-history:<project>` (earlier formats, removable with `/cockpit alerts legacy`) | Bounded; project names are hashes of the directory, never paths |
+| Local processes | read-only `git`, `realpath`, `readlink`, `tail`, `find`, `stat`; `mkdir`/`chmod`/`stat`/`rm` on the telemetry directory only; one audio player; the `decision` router only while you select it; the verification script you enrolled, only under `stopGuard: ENFORCE` | Detailed below |
+| Network | none of its own | The decision router in JEV mode, when you select it, is the one program it starts that can |
 
 ## Session router
 

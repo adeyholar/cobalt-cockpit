@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased (0.6.0) — Mission Control operations
+
+Details, the Directory compliance work, measurements and the acceptance procedure: [docs/implementation-v0.6.0.md](docs/implementation-v0.6.0.md).
+
+- `/cockpit agents` and `/cockpit agents <task>`: a read-only agent inspector over the swarm and the Run Ledger: states, waves, capacity, ownership, dependencies, requested/launched/applied/engine-reported effort, last observed activity, reported versus verified outcomes, untracked host agents.
+- Blocker explanations from the swarm's own admission rule (dependency, ownership conflict, capacity, commander or architect occupied, awaiting spawn, stalled, escalation, cancellation, failure, unverified result), with information-only suggestions.
+- `/cockpit ready`: which recorded conditions stand between the task and DONE, from the existing completion rules; `PERMITS DONE` exactly when the task reads DONE.
+- `/cockpit alerts export` (person-only, bounded JSON, schema v1) and `/cockpit alerts legacy [delete <code>]` (dry run first; deletes only fully migrated, fully understood earlier-format keys).
+- Directory capability-inspection repair: every call that passes `$` to a helper of the module is a statement of its own (sixteen sites hoisted; a dead helper removed); the host analyzer's report is unchanged. `scripts/check-capability-shape.sh` (a self-tested local approximation of the Directory's guidance, now in CI) guards the shape.
+- `scripts/acceptance-harness.sh`: two genuine Claude Code processes against a disposable store (no model, no credentials, no operator data).
+- README capability table; SECURITY and PRIVACY updated.
+
 ## Unreleased (0.5.9) — Record-only mode and the since-last-look summary
 
 Details, the mode table, what the store does and does not guarantee, and the acceptance procedure: [docs/implementation-v0.5.9.md](docs/implementation-v0.5.9.md).
