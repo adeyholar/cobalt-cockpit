@@ -266,5 +266,12 @@ export const migrateStopHold = (task: Task, checks: readonly CheckRecord[], drop
 /** What a fingerprint comparison proves. UNKNOWN is never read as UNCHANGED, and it is not read as CHANGED either. */
 export type TreeVerdict = 'UNCHANGED' | 'CHANGED' | 'UNKNOWN'
 
+/** The project identity a fingerprint was taken in (`@id`), absent from fingerprints saved by v0.5.2. */
+const projectOf = (stamp: string): string | null => (stamp.includes('@') ? stamp.slice(stamp.lastIndexOf('@') + 1) : null)
+
+/**
+ * A fingerprint is only comparable with one taken in the same project: another checkout, worktree or repository, or a
+ * fingerprint from a build that did not record the project, is UNKNOWN (the check runs), never UNCHANGED.
+ */
 export const compareTree = (start: string | null | undefined, now: string | null): TreeVerdict =>
-  typeof start !== 'string' || now === null ? 'UNKNOWN' : start === now ? 'UNCHANGED' : 'CHANGED'
+  typeof start !== 'string' || now === null ? 'UNKNOWN' : projectOf(start) !== projectOf(now) ? 'UNKNOWN' : start === now ? 'UNCHANGED' : 'CHANGED'

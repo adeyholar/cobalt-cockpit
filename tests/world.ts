@@ -84,6 +84,8 @@ export type World = {
   tree: Record<string, string>
   /** HEAD: a commit moves it and leaves `tree` alone. */
   head: string
+  /** The work tree git reports for `rev-parse --show-toplevel`. */
+  top: string
   /** Whether `git status --porcelain` reports changes (a release candidate must be clean). */
   uncommitted: boolean
   players: Record<string, PlayerBehavior>
@@ -188,6 +190,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     excludes: '',
     tree: {},
     head: 'a'.repeat(40),
+    top: '/work/example',
     uncommitted: false,
     players: { 'pw-play': 'ok' },
     outputs: {},
@@ -390,7 +393,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       if (w.gitHangs !== null && git[0] === w.gitHangs) throw new Error('git was still running at the timeout')
       if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, `/work/example/.git/${git[git.indexOf('--git-path') + 1]}\n`)
       if (git[0] === 'config') return ran(1)
-      if (git[0] === 'rev-parse') return ran(0, git.includes('--verify') ? `${w.head}\n` : '/work/example\n')
+      if (git[0] === 'rev-parse') return ran(0, git.includes('--verify') ? `${w.head}\n` : `${w.top}\n`)
       if (git[0] === 'diff') {
         // like git, `diff` does not see a path the index is told to ignore (assume-unchanged: lowercase tag; skip-worktree: S)
         const hidden = new Set(w.indexFlags.split('\0').filter(l => l.length > 2 && (/[a-z]/.test(l[0] as string) || l[0] === 'S')).map(l => l.slice(2)))

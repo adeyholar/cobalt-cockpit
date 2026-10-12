@@ -2004,7 +2004,12 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     let a = 0x811c9dc5, b = 0x01000193
     for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); a = Math.imul(a ^ c, 0x01000193) >>> 0; b = Math.imul(b + c, 0x85ebca6b) >>> 0 }
 
-    return `${head}:${lines.length}.${a.toString(16)}${b.toString(16)}`
+    // The project is part of the fingerprint: the same measurement from another checkout, worktree or repository is another project
+    // and compares UNKNOWN (see compareTree), never as an unchanged tree.
+    let id = 0x811c9dc5
+    for (let i = 0; i < top.length; i++) id = Math.imul(id ^ top.charCodeAt(i), 0x01000193) >>> 0
+
+    return `${head}:${lines.length}.${a.toString(16)}${b.toString(16)}@${id.toString(16)}`
   } catch {
     return unknown('git raised an error or timed out')
   }
