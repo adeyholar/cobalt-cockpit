@@ -2738,14 +2738,14 @@ const seedAlerts = async ($: EngineInterface): Promise<void> => {
       // only a key every record of which this build understands, and every occurrence of which its own key holds in full (read back,
       // not merely named), is given up
       const understood = Array.isArray(old.alerts) && validAlerts(old.alerts).length === old.alerts.length
-      let held = understood
-      for (const e of understood ? episodesOf(validAlerts(old.alerts)) : []) {
+      // the key is read again first, then every occurrence key, so the last reads before the delete are of the copies it depends on
+      const again = await $.store.get(historyKeyOf(project)).catch(() => undefined)
+      let held = understood && JSON.stringify(again) === JSON.stringify(old)
+      for (const e of held ? episodesOf(validAlerts(old.alerts)) : []) {
         const value = await $.store.get(occKeyOf(project, e.id)).catch(() => undefined)
         if (!isMigratedEpisode(e.records, e.id, value)) { held = false; break }
       }
-      // and the key is still what was checked
-      const again = await $.store.get(historyKeyOf(project)).catch(() => undefined)
-      if (held && JSON.stringify(again) === JSON.stringify(old)) await $.store.delete(historyKeyOf(project))
+      if (held) await $.store.delete(historyKeyOf(project))
     })
   }
   await syncAcks($, false)

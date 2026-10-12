@@ -225,10 +225,11 @@ describe('the agents view shows what was observed and says what was not', () => 
     const text = taskText(view(s), 'P')
     expect(text).toContain('fix …/hooks/alerts.ts and …/y/z.ts now')
     expect(text).not.toContain('secret-client')
-    const short = add(emptySwarm(), input('Q', { objective: 'look in /home/alice and https://example.org/a/b/c' }))
+    const short = add(emptySwarm(), input('Q', { objective: 'look in /home/alice and /home/alice/proj and https://example.org/a/b/c' }))
     const t2 = taskText(view(short, [], 200), 'Q')
     expect(t2).not.toContain('alice')
     expect(t2).toContain('https://example.org/a/b/c')
+    expect(t2).toContain('…/proj')
   })
   test('an unknown task says so and lists what is known; a task is found whatever the case', () => {
     expect(taskText(view(swarm), 'zzz')).toBe('No task "zzz" in this session. Known: A, B, C.')

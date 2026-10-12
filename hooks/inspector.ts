@@ -20,8 +20,8 @@ const one = (text: string): string => text.replace(/\s+/g, ' ').trim()
 /** Free text written by the commander or an agent, with any path in it cut to its last two segments, as claims are. */
 export const shortenPaths = (text: string): string => text.replace(/(?<![\w:/])(?:~|\.{1,2})?\/(?:[^\s/'"`]+\/)+[^\s/'"`]*/g, m => {
   const parts = m.split('/').filter(p => p !== '' && p !== '~' && p !== '.' && p !== '..')
-  // a home directory names a person even when it is short
-  if (/^\/(?:home|Users)\//.test(m) && parts.length <= 2) return '…/'
+  // a home directory names a person: the name after /home or /Users is never shown, however deep the path
+  if (/^\/(?:home|Users)\//.test(m)) { const rest = parts.slice(2); return rest.length === 0 ? '…/' : `…/${rest.slice(-2).join('/')}` }
   return parts.length <= 2 ? m : `…/${parts.slice(-2).join('/')}`
 })
 
