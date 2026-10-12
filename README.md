@@ -1,4 +1,4 @@
-# Cobalt Cockpit v0.5.3 — Elastic Swarm + Adaptive Intelligence
+# Cobalt Cockpit v0.5.4 — Elastic Swarm + Adaptive Intelligence
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
@@ -116,7 +116,7 @@ A `--plugin-dir` copy stops loading when you omit the flag next session.
 | `/cockpit router` / `/cockpit router off\|nobodywho\|jev` | Show this session's router, or switch it (this session only; a new session starts OFF) |
 | `/cockpit stats` / `/cockpit stats 7d\|30d\|all [--json\|--csv]` | Print the local model telemetry for a window; reads the telemetry files and nothing else |
 | `/cockpit doctor` | Read-only installation, host, Auto-mode, telemetry-storage and prompt-cache diagnostics |
-| `/cockpit guard` / `/cockpit guard ack\|silence\|trust [hash]\|untrust\|release` | Owner-alert status, and the Stop guard's script enrollment and release (typed by a person only) |
+| `/cockpit guard` / `/cockpit guard ack\|silence\|unsilence\|trust [hash]\|untrust\|release` | Owner-alert status (open conditions, reminders used, persistence and sound), acknowledgment and silence, and the Stop guard's script enrollment and release (typed by a person only) |
 | `/cockpit flow` | Print the Neural Flow row in words |
 | `/ledger` | Open local Run Ledger |
 | `/ledger export json` | Print the sanitized Run Ledger as JSON |
@@ -227,6 +227,19 @@ ALIGNMENT / PENDING
 
 Blast-radius protection asks before recognized destructive shell commands. Repository hygiene checks attribution and unsolicited instruction-file creation; while `attributionGuard` is on (the default), Cockpit's `attribution.text` hook returns empty text for commits and pull requests, so the host's AI attribution trailer and footer are not written. Cockpit also hooks `/model`, `/advisor`, `/effort`, `/init`, `/login` and `/logout` (the first two can be refused under the model policy or the strict preset, the rest are observed), and draws its own guard questions inside the host's question dialog; [SECURITY.md](SECURITY.md) lists every hook that can refuse. These guards supplement Claude Code permissions; they are heuristic and cannot recognize every shell program or obfuscated command. Verification gates use observed exit status and explicit reported evidence, not proof of correctness.
 
+### Persistent alerts (v0.5.4, opt-in)
+
+With `guardAlerts` and `guardRepeat` both on, an alert whose condition is still open is repeated until you deal with it:
+
+- **Bounded.** One reminder per `guardRepeatSec` for a condition, at most `guardMaxReminders` each, never closer to any other alert than `guardCooldownSec`, and inside the session's `guardMaxAlerts`. The budget's last alert is kept for a condition that has not been told at all. A reminder that failed to send counts as one.
+- **Acknowledge.** `/cockpit guard ack` ends the reminders of everything open now. A different condition raised later is still told.
+- **Silence.** `/cockpit guard silence` acknowledges and stops all alerts for the session; `/cockpit guard unsilence` lets new conditions be told again. All three are accepted only when typed by a person.
+- **Resolved.** When a condition no longer holds (the gate passes, the hold is released, the task is reset or replaced) it is recorded `resolved` without a notification and is not repeated. If it comes back it is told as a new alert.
+- **Sound.** `guardSound` tries the existing checkpoint cue with each alert and reminder; the player chain ends with the terminal bell. It stays silent when `sounds` is off or after `/cockpit mute`.
+- **One timer.** A single 30-second host timer (`$.clock.every`) exists only while something can still be repeated. It is cancelled on acknowledgment, silence, resolution, exhaustion and session end, and re-armed from the kept records after a reload, so counts carry on instead of starting over. No background process is started.
+- **No verdict changes.** An alert, a reminder, an acknowledgment or a silence never changes a gate, a hold, a review, a release approval or the task's percentage.
+- **What is claimed.** `sent` means the host reported writing the notification to the channel it names; `sound attempted` or `bell attempted` means a local player exited 0. Neither means you saw or heard it. Desktop popups are whatever your terminal does with the host's notification (kitty, iTerm2 and Ghostty show one; others get the bell). Cockpit starts no desktop notifier of its own, and on a remote machine whether the notification reaches your local desktop depends on your terminal and connection and is not verified by Cockpit.
+
 Cockpit does not take part in Claude Code's permission check. It registers no hook on it and makes no permission query; its guards run before it and can only refuse a call or ask you about it, never approve one.
 
 ### Sonnet-led profile
@@ -317,6 +330,9 @@ Restart Claude Code after changing configuration. To enable just Fable blocking 
 | `hud`, `animation`, `sounds` | true |
 | `volume` | 0.6 |
 | `blastRadiusGuard`, `attributionGuard` | true |
+| `guardAlerts` | false; owner alerts through the host's terminal notification. `guardCooldownSec` 300, `guardMaxAlerts` 5 |
+| `guardRepeat` | false; persistent alerts (needs `guardAlerts`). `guardRepeatSec` 900 (minimum 60), `guardMaxReminders` 3 (maximum 10) |
+| `guardSound` | false; tries the checkpoint cue, or the terminal bell, with each alert (needs `guardAlerts`, honours `sounds` and `/cockpit mute`) |
 | `reducedMotion` | false; `COBALT_REDUCED_MOTION=1` also disables motion |
 | `localControl` | true, optional detection |
 | `ledgerPath` | empty, resolves from the environment |

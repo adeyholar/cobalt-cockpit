@@ -97,7 +97,7 @@ export type Milestone = {
 export type TaskStatus = 'idle' | 'active' | 'unverified' | 'blocked' | 'done'
 
 /** One owner alert as the Run Ledger keeps it: a closed vocabulary and numbers, never text from the task. */
-export type AlertRecord = { key: string; kind: 'verification-exhausted' | 'security-failure' | 'release-no-go' | 'review-hold' | 'run-blocked'; taskId: number; at: number; outcome: 'sent' | 'failed' | 'refused' | 'throttled' | 'silenced'; attempts: number; channel: string | null; /** Why nothing was sent: the host's closed reason, or `error` when the call threw. */ why?: 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error' | 'cooldown' | 'budget'; acked?: true }
+export type AlertRecord = { key: string; kind: 'verification-exhausted' | 'security-failure' | 'release-no-go' | 'review-hold' | 'run-blocked'; taskId: number; at: number; outcome: 'sent' | 'failed' | 'refused' | 'throttled' | 'silenced' | 'resolved'; attempts: number; channel: string | null; /** Why nothing was sent: the host's closed reason, or `error` when the call threw. */ why?: 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error' | 'cooldown' | 'budget'; acked?: true; /** Which reminder of its condition this is (persistent alerts); absent on the first alert. */ nth?: number; /** The audible cue a player exited 0 for. */ cue?: 'sound' | 'bell' }
 /** Cobalt Guard's session state: when the last alert was attempted, how many, and what the owner silenced. */
 export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean }
 

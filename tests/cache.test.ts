@@ -139,7 +139,7 @@ describe('installation findings', () => {
   const facts = (over: Partial<DoctorFacts>): DoctorFacts => ({
     version: '0.5.2', root: '/home/u/dev/cockpit', home: '/home/u', host: '2.1.296', hostSupported: true, profile: 'SONNET_LED', orchestration: true, reasoning: 'AUTO', router: 'OFF', permissionMode: 'auto',
     installs: [], enabled: [], otherRegistrations: [], telemetry: { enabled: true, dir: '/home/u/.local/state/cobalt-cockpit/telemetry', listed: { files: 1, bytes: 10 }, writes: 1, failures: 0, permissions: 'verified', shed: 0 },
-    cache: readCache(base), agents: agentsOf([]), stop: { policy: 'OBSERVE', script: null, pinned: false, timeoutSec: 120, maxAttempts: 3, problems: [], trust: 'not enrolled', last: null }, guard: { enabled: false, label: 'OFF', used: 0, max: 5, cooldownSec: 300 }, ...over,
+    cache: readCache(base), agents: agentsOf([]), stop: { policy: 'OBSERVE', script: null, pinned: false, timeoutSec: 120, maxAttempts: 3, problems: [], trust: 'not enrolled', last: null }, guard: { enabled: false, label: 'OFF', used: 0, max: 5, cooldownSec: 300, repeat: false, sound: false }, ...over,
   })
   test('a development copy beside an enabled install is flagged as a possible double load', () => {
     const text = doctorText(facts({ installs: [{ key: 'cobalt-cockpit@cobalt', version: '0.5.1', path: '/home/u/.claude/plugins/cache/cobalt/cobalt-cockpit/0.5.1' }], enabled: ['cobalt-cockpit@cobalt'] }))
