@@ -2714,7 +2714,9 @@ const seedAlerts = async ($: EngineInterface): Promise<void> => {
       const old = (await $.store.get(historyKeyOf(project)).catch(() => undefined)) as { v?: unknown; alerts?: unknown } | undefined
       if (old?.v !== 1) return
       const have = new Set(occIdsOf(await $.store.keys(), project))
-      if (episodesOf(validAlerts(old.alerts)).every(e => have.has(e.id))) await $.store.delete(historyKeyOf(project))
+      // only a key every record of which this build understands, and every occurrence of which has a key of its own, is given up
+      const understood = Array.isArray(old.alerts) && validAlerts(old.alerts).length === old.alerts.length
+      if (understood && episodesOf(validAlerts(old.alerts)).every(e => have.has(e.id))) await $.store.delete(historyKeyOf(project))
     })
   }
   await syncAcks($, false)
