@@ -629,6 +629,8 @@ describe('in a run: notified kinds', () => {
     const w = world(on); const held = hostState(on, {})
     await start($); await planAndComplete($, 1)
     await say($, 'guard silence')
+    // a record decided in the very millisecond of the silence is covered by it; this one comes later
+    await w.clock.advance(1000)
     await block($)
     expect(w.notified).toEqual([])
     expect(outcomes(held)).toEqual(['run-blocked:silenced'])
@@ -657,7 +659,7 @@ describe('in a run: the pinned row', () => {
     expect(await guardRow($)).toBe('GUARD: ARMED')
   })
   test('a raised condition is pinned with its level; an acknowledgment clears it; so does its resolution', { options: { guardAlerts: true, guardCooldownSec: 30 } }, async ($, on) => {
-    world(on); const held = hostState(on, {}); session(on)
+    const w = world(on); const held = hostState(on, {}); session(on)
     await start($); await planAndComplete($, 1); await failSecurity($)
     const pinned = (await guardRow($))!
     expect(pinned).toBe('GUARD ▲ CRITICAL security check failed · task 1 · notification SENT, not acknowledged · transport not confirmed')
@@ -666,7 +668,8 @@ describe('in a run: the pinned row', () => {
     expect(await guardRow($)).toBe('GUARD: ARMED · transport not confirmed · /cockpit guard test')
     // the acknowledgment cleared the pin and nothing else
     expect(task(held).gates.SECURITY.state).toBe('fail')
-    // a second condition is pinned on its own; fixing it clears it without any acknowledgment
+    // a second condition, later, is pinned on its own; fixing it clears it without any acknowledgment
+    await w.clock.advance(MIN)
     await block($)
     expect(await guardRow($)).toContain('GUARD ▲ NORMAL run blocked')
     await progress($, { action: 'unblock', milestone: 'm2' })
