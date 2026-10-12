@@ -65,6 +65,7 @@ See `PRIVACY.md` (Owner alerts). New data: the 8-hex occurrence id on each alert
 
 - **A cleared condition that recurs before any look.** A look happens at tool results, stops and the timer. A condition that clears and holds again between two looks is one occurrence, with or without persistence.
 - **A concurrent session in one project** overwrites the project's history with its own records when it records something (last write wins); each session's Ledger is intact. When a session writes, occurrences it never saw that the history holds are kept beside its own (oldest forgotten first), so a resumed older session does not erase a newer one's.
+- **A shared occurrence** that two sessions both hold is written with the writing session's copy: an acknowledgment or reminder recorded only by the other is lost from the stored history (not from its Ledger). Occurrences the writer never saw are placed before its own, not by age.
 - **Eviction and the 30-second gap.** When the records are full, the oldest held-back record goes first, which can be an open condition's only record; the next look writes it again (as in v0.5.6).
 - **Seeded but stale.** A seeded record of a task that is gone reads `ended` (and the label `SENT`) until the first look records it resolved.
 - **The HUD count** is shown when nothing is pinned; while a condition is pinned, only `+N more` is.

@@ -496,14 +496,15 @@ describe('recovery: restart, reload and project switch', () => {
     const newer = written(rec('8@8:run-blocked:task', { at: 9000 }), rec('9@9:security-failure:SECURITY', { kind: 'security-failure', at: 9500 }))
     const older = written(rec('7@7:run-blocked:task', { at: 100 }))
     const w = world(on, {}, { [KEEP]: { v: 1, projects: { [project]: newer } }, 'ledger:s1': { ...emptyLedger('s1'), alertsProject: project, alerts: older } }); const held = hostState(on, {}); session(on, 's1')
-    await start($); await planAndComplete($, 1)
-    await w.clock.advance(31_000)
-    // whatever this session writes, the newer session's occurrences are still in the project's history
+    await start($); await planAndComplete($, 1); await block($)
+    // this session records something new; the newer session's occurrences are still in the project's history
     const stored = lastStored(w, KEEP)
-    const keys = (stored?.projects[project] ?? newer).map((r: AlertRecord) => r.key)
+    expect(stored).toBeDefined()
+    const keys = stored.projects[project].map((r: AlertRecord) => r.key)
     expect(keys).toContain('8@8:run-blocked:task')
     expect(keys).toContain('9@9:security-failure:SECURITY')
-    expect(ledger(held).alerts!.every(r => r.key === '7@7:run-blocked:task')).toBe(true)
+    expect(ledger(held).alerts!.map(r => r.key)).not.toContain('8@8:run-blocked:task')
+    expect(keys).toContain('7@7:run-blocked:task')
   })
   test('a project\'s history is written back as it was found, plus what the session recorded', q, async ($, on) => {
     const earlier = written(rec('9@9:run-blocked:task', { at: 5000 }))

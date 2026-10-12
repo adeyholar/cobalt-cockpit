@@ -2598,14 +2598,14 @@ const keepAlertHistory = async ($: EngineInterface, ledger: Ledger): Promise<voi
   // only a change this session made is written: a resumed older session must not replace a newer history with its stale copy
   const sig = `${ledger.alertsProject}${JSON.stringify(records)}`
   if (sig === writtenSig) return
-  writtenSig = sig
   const all = await durableAlerts($)
   // occurrences another session of this project recorded and this one never saw are kept beside its own, oldest forgotten first
   const mine = new Set(episodesOf(records).map(e => e.id))
   const merged = [...episodesOf(all[ledger.alertsProject] ?? []).filter(e => !mine.has(e.id)).flatMap(e => e.records), ...records].slice(-ALERT_CAP)
-  if (JSON.stringify(all[ledger.alertsProject]) === JSON.stringify(merged)) return
+  if (JSON.stringify(all[ledger.alertsProject]) === JSON.stringify(merged)) { writtenSig = sig; return }
   const { [ledger.alertsProject]: _old, ...others } = all
   await $.store.set(ALERT_HISTORY_KEY, { v: 1, projects: Object.fromEntries(Object.entries({ ...others, [ledger.alertsProject]: merged }).slice(-HISTORY_PROJECTS)) })
+  writtenSig = sig
 }
 /** Once per session: a Ledger with no alerts of its own takes up what its project's history holds; either way it is tied to the project. */
 let seededFor = ''
