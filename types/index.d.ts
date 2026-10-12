@@ -99,7 +99,10 @@ export type TaskStatus = 'idle' | 'active' | 'unverified' | 'blocked' | 'done'
 /** One owner alert as the Run Ledger keeps it: a closed vocabulary and numbers, never text from the task. */
 export type AlertRecord = { key: string; kind: 'verification-exhausted' | 'security-failure' | 'release-no-go' | 'review-hold' | 'run-blocked'; taskId: number; at: number; outcome: 'sent' | 'failed' | 'refused' | 'throttled' | 'silenced' | 'resolved'; attempts: number; channel: string | null; /** Why nothing was sent: the host's closed reason, or `error` when the call threw. */ why?: 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error' | 'cooldown' | 'budget'; acked?: true; /** Which reminder of its condition this is (persistent alerts); absent on the first alert. */ nth?: number; /** The audible cue a player exited 0 for. */ cue?: 'sound' | 'bell' }
 /** Cobalt Guard's session state: when the last alert was attempted, how many, and what the owner silenced. */
-export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean }
+export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean; ackAt?: number }
+/** One notification test the person asked for, and whether they confirmed it (transport.ts). Kept apart from the alerts. */
+export type TransportTest = { code: string; at: number; session: string; link: 'local' | 'ssh'; outcome: 'sent' | 'failed' | 'refused'; channel: string | null; why?: 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error' | 'cooldown' | 'budget'; sound: 'not-requested' | 'pending' | 'sound' | 'bell' | 'none'; seenAt?: number; seenBy?: 'code' | 'no-code' }
+export type Transport = { tests: TransportTest[] }
 
 /** One run of the owner's verification script at Stop: identity, real exit code, outcome, fingerprint and a redacted tail. */
 export type StopCheck = {
@@ -512,6 +515,7 @@ declare module 'claude-code' {
       /** The operator's discovery level pin; this session only. */
       'discovery-pin': DiscoveryLevel | null
       'guard-state': GuardState
+      'guard-transport': Transport
       /** Unverified work the Stop guard still owes a check for, kept apart from the task presentation; this session only. */
       'stop-owed': { at: number; why: string } | null
     }
