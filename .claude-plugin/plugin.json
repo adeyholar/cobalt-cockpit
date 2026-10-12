@@ -81,7 +81,7 @@
     "verifyTimeoutSec": {
       "type": "number",
       "title": "Check timeout (seconds)",
-      "description": "Default 120, maximum 900. A timed-out check counts as failed.",
+      "description": "Default 120, maximum 600 (the host runs a process for ten minutes at most; a larger value is lowered to 600). A timed-out check counts as failed.",
       "default": 120
     },
     "stopMaxContinuations": {

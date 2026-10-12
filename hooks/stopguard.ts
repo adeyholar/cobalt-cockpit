@@ -32,7 +32,8 @@ export { uidOf }
 
 export type Policy = 'OBSERVE' | 'ENFORCE'
 export const MAX_ATTEMPTS_CEILING = 10
-export const TIMEOUT_CEILING_MS = 900_000
+/** The host's `process.run` allows ten minutes at most (Claude Code 2.1.296): a longer timeout would make the call fail instead of timing out. */
+export const TIMEOUT_CEILING_MS = 600_000
 export const MIN_SUMMARY_CHARS = 60
 
 export type StopConfig = {
