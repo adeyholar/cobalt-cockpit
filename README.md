@@ -1,18 +1,411 @@
-# Cobalt Cockpit v0.6.0 — Mission Control Operations
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero/cockpit-hero-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero/cockpit-hero-light.svg">
+    <img src="docs/assets/hero/cockpit-hero-dark.png" width="100%" alt="Cobalt Cockpit: Mission Control for Claude Code. Orchestrate bounded agents. Track real progress. Verify before declaring done. Illustration of a control panel: an Opus commander delegating to a Sonnet engineer pool and a Haiku scout pool, the Neural Flow from INPUT to DONE, six verification gates, the Run Ledger and Cobalt Guard.">
+  </picture>
+</h1>
+
+<p align="center">
+  <a href="#system-overview">Overview</a> ·
+  <a href="#live-interface">Live interface</a> ·
+  <a href="#mission-control-modules">Modules</a> ·
+  <a href="#swarm-architecture">Swarm</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#explore-commands">Commands</a> ·
+  <a href="#safety-and-trust">Safety</a> ·
+  <a href="#deep-documentation">Docs</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/echelong/cobalt-cockpit/actions/workflows/ci.yml"><img src="https://github.com/echelong/cobalt-cockpit/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status on main"></a>
+  <a href="https://github.com/echelong/cobalt-cockpit/actions/workflows/secret-scan.yml"><img src="https://github.com/echelong/cobalt-cockpit/actions/workflows/secret-scan.yml/badge.svg?branch=main" alt="Secret scan status on main"></a>
+</p>
+
+<p align="center"><sub>v0.6.0 · Mission Control Operations · <a href="LICENSE">MIT</a> · <a href="PRIVACY.md">Privacy</a> · <a href="SECURITY.md">Security</a> · <a href="CHANGELOG.md">Changelog</a></sub></p>
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
-[![Source branch: main](https://img.shields.io/badge/source-main-blue)](https://github.com/echelong/cobalt-cockpit/tree/main)
-[![CI](https://github.com/echelong/cobalt-cockpit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/echelong/cobalt-cockpit/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-
-[Privacy](PRIVACY.md) · [Security](SECURITY.md)
-
-## What it does
+## System overview
 
 Cobalt Cockpit adds a cyberpunk HUD, orchestration controls, and a local Run Ledger to Claude Code. It tracks **observed** milestones and verification rather than inventing progress. With orchestration enabled, Opus coordinates bounded Sonnet engineering and Haiku utility tasks, each with task-aware reasoning effort. The dashboard itself makes no model calls.
 
-## How the swarm works
+- **Observe by default.** With `orchestration: false`, Cockpit observes your existing Claude Code activity without enforcing model routing, subagent budgets, Fable blocking, or subscription-only authentication.
+- **Enforce by opt-in.** `orchestration: true` enforces the Opus/Sonnet/Haiku policy, independent pool resource budgets, and explicit task ownership. `blockFable`, `subscriptionOnly`, `cobaltStrict`, the Stop-hook guard and owner alerts are separate switches, each off until you turn it on.
+- **Evidence before DONE.** A completed turn does not complete a task. A task reads 100% and DONE only when every milestone is complete and every required gate is pass or n/a; a coding task above the LIGHT discovery level also needs its goal check to report `ALIGNED`. Missing measurements stay unknown.
+- **Never an approval.** Cockpit does not take part in Claude Code's permission check. Its guards run before it and can only refuse a call or ask you about it, never approve one.
+- **Local.** It makes no network request of its own: no fetch, no model call, no MCP call. The Run Ledger and the local model telemetry are local.
+
+<details>
+<summary><b>Full feature list</b></summary>
+
+- VECTOR / Activity Field, milestone progress, verification-gated DONE, context usage and Git/activity tracking.
+- Dynamic, task-aware reasoning effort: AUTO selection, a commander-named level per assignment, an operator ceiling and capability fallback, with requested and applied effort kept apart.
+- Main and subagent orchestration telemetry, subagent radar, observed model/effort and token usage.
+- Local Run Ledger, sanitized JSON export, bounded replay, and park/resume checkpoints.
+- Blast-radius protection, repository hygiene, optional sounds and hot reload persistence.
+- Fail-closed guards: a hook that cannot reach its decision refuses the action it guards rather than letting it run, and every such decision is judged against the event it was given.
+- Narrow-terminal and reduced-motion layouts; preserves the engine's image viewer.
+- Optional read-only NobodyWho telemetry and opt-in orchestration policy enforcement.
+- Optional Sonnet-led profile (`profile: SONNET_LED`): Sonnet 5.5 is the main model at your effort, and Opus 5.5 runs at High only as an admitted, read-only architect consultation. `OPUS_LED` stays the default.
+- Optional per-session router (`/cockpit router`): OFF by default, NobodyWho (local) or JEV (TypeSafe API) for advisory routing recommendations. Cockpit's deterministic rules stay authoritative.
+- Read-only helpers can deliver their reports: a bound helper may use the host's tool discovery and report hand-back without gaining any write, shell or delegation right, and each task records how its report arrived.
+
+</details>
+
+## Live interface
+
+<p align="center">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/demo/cockpit-demo-poster.png">
+    <img src="docs/assets/demo/cockpit-demo.gif" width="100%" alt="Animated terminal capture labelled SYNTHETIC DEMO, about 44 seconds. A prompt becomes five milestones and six gates. A Haiku scout and two Sonnet engineers run while the Neural Flow row shows live work. The Agent Inspector lists every task and explains why the reviewer is blocked. A failing test sets the TEST gate from its exit status and Verification Readiness reads DOES NOT PERMIT DONE. A blocked run raises a Cobalt Guard alert on the HUD. After the gates pass and the goal check is aligned, readiness reads PERMITS DONE, and the Mission Control pane and the Run Ledger show the record.">
+  </picture>
+</p>
+
+**Synthetic demo, genuine output.** Every row in this loop was drawn or printed by Cockpit v0.6.0 itself: the HUD band and the panes come from the plugin's own render hooks, the command output from its `/cockpit` commands and the tool replies from its `progress` and `swarm` tools, run in Claude Code's offline plugin test host (`claude plugin test`) against a scripted task. No model ran and no live session was recorded. The task, the agent tasks and the evidence strings are synthetic, and some values are the test host's own (`spawned-` agent ids, `CTX 39%`, a clock that starts at zero). The frame, the captions, the typed command line and the timing are presentation. In a terminal the HUD's own accent is red; cobalt is the colour of this page.
+
+[Static frame](docs/assets/demo/cockpit-demo-poster.png) · [How it was captured, and how to regenerate it](docs/assets/README.md) · [The captured frames as data](docs/assets/demo/frames.json)
+
+<details>
+<summary><b>Read the captured frames as text</b></summary>
+
+The HUD band while a scout and two engineers run (100 columns; the last three rows are the per-agent strips):
+
+```text
+OPUS ENGINEERING ─╼─ SONNET ×3 2 active !1 0 queued 0 done ─╼─ HAIKU ×1 1 active 0 queued 0 done
+◆────────────────────◆───━╲╲◉╮─────────────────────────────────◆────────────────────────────────────
+▐▓▌ Add per-client ra…      IMPLEMENT◉─━─│─━─━─━───────│────────────│───────◆─◆─◆─│─◆─◆────────╴ 20%
+TEST ·  TYPE ·  BUILD ·  GIT ·   CTX 39%   THINK +3 agents   opus-5-5
+● INPUT ⠶⠶⠶⠶⠶⠶⠶⠶ ● DISCOVERY ⠶⠶⠶⠶⠶⠶⠶⠶ ● ROUTING ⣤⣶◆⠶⣤⣶◆⠶ ◎ WORKERS ⠤⠤⠤⠤⠤⠤⠤⠤ ○ VERIFY ⠤⠤⠤⠤⠤⠤⠤⠤ ○ DONE
+GUARD: ARMED · transport not confirmed · /cockpit guard test
+OPUS / MAIN · IMPLEMENT   HAIKU+SONNET / SUBAGENTS 3/8
+                       01 scout       READ        13s · 1 tools      ⡬   ⡫    ⢗ ⡔   ⢱  ⠑⠞⣊⠹
+                       02 worker      EDIT        9s · 1 tools       ⡬   ⡫    ⢗ ⡔   ⢱  ⠑⠞⣊⠹
+                       03 worker      EDIT        9s · 1 tools       ⡬   ⡫    ⢗ ⡔   ⢱  ⠑⠞⣊⠹
+```
+
+Mission Control (`/cockpit`) once the task is verified:
+
+```text
+━ VECTOR  CONSOLE / MISSION
+ STATE / VERIFIED  THINK
+
+01 TASK ───────────────────────────────────────────────────────────────────────────────────────────
+ Goal         Add per-client rate limiting to the API gateway
+ Kind         coding  5 milestones
+ Started      33s ago  updated 1s ago
+
+02 PROGRESS ───────────────────────────────────────────────────────────────────────────────────────
+ Phase        DONE  ████████████████████████  100%
+ Milestones   5/5  DONE
+ Latest       4s ago  BUILD npm run build
+
+03 MILESTONES ─────────────────────────────────────────────────────────────────────────────────────
+  ✓ m1  Inspect gateway middleware  INSPECT
+  ✓ m2  Implement token-bucket limiter  IMPLEMENT
+  ✓ m3  Write limiter tests  TEST
+  ✓ m4  Fix failures  FIX
+  ✓ m5  Verify  VERIFY
+
+04 VERIFICATION ───────────────────────────────────────────────────────────────────────────────────
+  ✓ CODE      pass     src/limiter.ts and tests/limiter.test.ts reviewed by REV-1, no open findings
+  ✓ TEST      pass     npm test (exit 0)
+  ✓ TYPE      pass     npx tsc --noEmit (exit 0)
+  ✓ BUILD     pass     npm run build (exit 0)
+  – SECURITY  n/a      no new dependency, no secret, no auth path touched
+  ✓ GIT       pass     git status: only src/limiter.ts and tests/limiter.test.ts changed
+```
+
+</details>
+
+## Mission Control modules
+
+<p align="center">
+  <a href="#agent-orchestration"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/modules/01-swarm-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/modules/01-swarm-light.svg"><img src="docs/assets/modules/01-swarm-dark.svg" width="32%" alt="Module 01, Swarm: agent orchestration"></picture></a>
+  <a href="#neural-flow-and-progress"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/modules/02-flow-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/modules/02-flow-light.svg"><img src="docs/assets/modules/02-flow-dark.svg" width="32%" alt="Module 02, Flow: Neural Flow and progress"></picture></a>
+  <a href="#agent-inspector"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/modules/03-inspect-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/modules/03-inspect-light.svg"><img src="docs/assets/modules/03-inspect-dark.svg" width="32%" alt="Module 03, Inspect: the Agent Inspector"></picture></a>
+  <a href="#verification-readiness"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/modules/04-ready-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/modules/04-ready-light.svg"><img src="docs/assets/modules/04-ready-dark.svg" width="32%" alt="Module 04, Ready: Verification Readiness"></picture></a>
+  <a href="#cobalt-guard"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/modules/05-guard-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/modules/05-guard-light.svg"><img src="docs/assets/modules/05-guard-dark.svg" width="32%" alt="Module 05, Guard: Cobalt Guard"></picture></a>
+  <a href="#run-ledger-and-replay"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/modules/06-ledger-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/modules/06-ledger-light.svg"><img src="docs/assets/modules/06-ledger-dark.svg" width="32%" alt="Module 06, Ledger: Run Ledger and replay"></picture></a>
+</p>
+
+Each key links to its module below. The captured blocks inside the panels come from the same synthetic demo as the animation.
+
+### Agent orchestration
+
+`MODULE 01` `swarm tool` `orchestration: true` `default: observe`
+
+Opus remains the single commander: architecture, planning, decomposition, integration, escalation decisions and final verification. Sonnet engineers substantial bounded changes and independent reviews. Haiku scouts repositories and processes extractive, repetitive work. Small or tightly coupled work stays in the main session.
+
+- **Assigned before spawned.** The `swarm` tool records bounded assignments before spawning. Each assignment carries a task ID, parent, tier, semantic role, objective, scope, dependencies, resource ownership, read/write mode and spawn reason.
+- **Admission, not fan-out.** Queued tasks wait for resource capacity; blocked tasks wait for dependencies; intersecting write scopes are serialized. Read-only scopes may overlap.
+- **Bounded tools.** Scoped agents use Read/Grep/Glob for inspection and Edit/Write for changes. Shell or custom tools require exclusive wildcard ownership.
+- **Reported is not verified.** Agents return concise conclusion/evidence/change/check/uncertainty artifacts; commanders verify claims independently.
+
+<details>
+<summary><b>Explore the swarm</b></summary>
+
+Two replies from the demo. The first line of each pair is the synthetic call; the indented line is what Cockpit answered. The reviewer depends on both engineers, so its spawn is refused until they finish:
+
+```text
+swarm assign ENG-1 (SONNET worker)
+  Task ENG-1 queued; use Agent description [task:ENG-1]. OPUS tasks stay in main.
+Agent [task:REV-1] cobalt-cockpit:reviewer
+  {"deny":"SWARM / queued REV-1: dependency ENG-1: running; retry after dependency/ownership/resource clears"}
+```
+
+Run waves are reconnaissance → engineering → review → integration → verification. Waves are observable phases; they do not replace dependency checks. Ownership rules, queueing, escalation, cancellation and adoption in full: [docs/orchestration.md](docs/orchestration.md).
+
+</details>
+
+### Neural Flow and progress
+
+`MODULE 02` `/cockpit flow` `/cockpit status` `on by default`
+
+One row of the HUD: `INPUT → DISCOVERY → ROUTING → WORKERS → VERIFY → DONE`. Every state comes from the task's real milestones and gates and the agents the host reported; the moving marker is drawn only while work is live. Reduced motion and narrow terminals are honoured. Amber is Haiku, cyan Sonnet, violet Opus, green a verified result, and each state is also carried by its glyph, never by colour alone. Evidence that goes stale regresses the flow by itself: a gate that reverts to pending takes VERIFY back to active and DONE back to pending.
+
+Progress is completed milestones over all milestones. The HUD is in one of six states:
+
+| State | Meaning |
+| --- | --- |
+| IDLE | No active work |
+| SCAN | Main loop working without a tool in flight |
+| ACTIVE | Tool or agent activity observed |
+| QUERY | Waiting on a question put to you, or on one of Cockpit's own asks. Claude Code's permission dialog is not tracked |
+| FAULT | Failure or blocker |
+| VERIFIED | Milestones complete and required gates satisfied |
+
+A completed turn does not complete a task. Missing measurements stay unknown.
+
+<details>
+<summary><b>Read the flow in words</b></summary>
+
+`/cockpit flow` prints the row for a surface without colour. While the engineers run:
+
+```text
+FLOW  ● INPUT → ● DISCOVERY → ● ROUTING → ◉ WORKERS → ○ VERIFY → ○ DONE
+verified INPUT, DISCOVERY, ROUTING · active WORKERS · pending VERIFY, DONE
+observed running: HAIKU 1 · SONNET 2 · work is live · main model OPUS
+```
+
+After verification:
+
+```text
+FLOW  ● INPUT → ● DISCOVERY → ● ROUTING → ● WORKERS → ● VERIFY → ● DONE
+verified INPUT, DISCOVERY, ROUTING, WORKERS, VERIFY, DONE
+no agent observed running · work is live · main model OPUS
+```
+
+</details>
+
+### Agent Inspector
+
+`MODULE 03` `/cockpit agents` `/cockpit agents <task>` `read-only`
+
+Three read-only views of what Cockpit already records about multi-agent work. None of them changes state, starts, admits or cancels an agent, or clears a hold; none invents a figure the host did not report. The first two are here; the third is [Verification Readiness](#verification-readiness).
+
+- **`/cockpit agents`** lists the swarm's tasks, the ones that need attention first (stalled, escalated, blocked, queued), with the wave, the capacity in use (`3 of 4 slots · SONNET 2/2 · HAIKU 1/2`), and the host agents Cockpit did not assign. **`/cockpit agents <task>`** shows one task: objective, bound agent, model as observed (or "not observed"), effort as requested, as set on the launch, as applied and as the engine reported (four different things, each "not observed" when it was not), wave, ownership (shortened claims), dependencies, children, last observed activity, the outcome as reported versus as verified by the commander, any escalation, and the blocker.
+- **Blockers** are explained from the swarm's own admission rule, not a second scheduler: waiting for another task, a resource ownership conflict (and over what), agent capacity exhausted (with the numbers admission uses), the commander or an architect occupied, a reservation waiting for the host, a stall (ownership retained), an escalation awaiting the commander, a cancellation awaiting the host, a failure, or a completed result not yet verified. A suggestion is labelled **information only; nothing was changed**, and appears only when the recorded state supports one.
+
+<details>
+<summary><b>Inspect a task</b></summary>
+
+`/cockpit agents` while three agents run and one waits:
+
+```text
+AGENTS · wave ENGINEERING · 3 active · 1 waiting · 0 stalled · 0 escalated · 0 completed of 4
+CAPACITY · 3 of 8 slots · SONNET 2/4 · HAIKU 1/4 · OPUS in the main loop
+  REV-1 SONNET reviewer · blocked · no agent · none: not started
+    ↳ Waiting for task ENG-1 (running).
+  ENG-1 SONNET worker · running · agent spawned- · last observed just now
+  ENG-2 SONNET worker · running · agent spawned- · last observed just now
+  SCOUT-1 HAIKU scout · running · agent spawned- · last observed just now
+Read-only. /cockpit agents <task> explains one; /cockpit ready, what is left before DONE.
+```
+
+`/cockpit agents REV-1`, the task that waits:
+
+```text
+TASK REV-1 · SONNET reviewer · blocked
+objective: Review the limiter and its tests against the criteria
+agent: none bound
+model: SONNET assigned; model not observed (no agent bound)
+effort: requested AUTO · launch: none set on the call · applied: not observed
+wave: ENGINEERING
+owns: read …/src/limiter.ts, …/tests/limiter.test.ts
+depends on: ENG-1 running · ENG-2 running
+activity: none: not started
+outcome: none yet
+blocker (dependency): Waiting for task ENG-1 (running).
+suggestion (information only; nothing was changed): Wait for ENG-1; /cockpit agents ENG-1 shows whe…
+```
+
+`/cockpit agents` later: every agent has reported, and only the result the commander checked is verified:
+
+```text
+AGENTS · wave ENGINEERING · 0 active · 1 waiting · 0 stalled · 0 escalated · 3 completed of 4
+CAPACITY · 0 of 8 slots · SONNET 0/4 · HAIKU 0/4 · OPUS in the main loop
+  REV-1 SONNET reviewer · blocked · no agent · none: not started
+    ↳ Nothing recorded stops it: it is admissible now and has not been admitted.
+  ENG-1 SONNET worker · completed · agent spawned- · ended just now
+  ENG-2 SONNET worker · completed · agent spawned- · ended just now
+    ↳ reported by the agent; NOT verified (pending)
+  SCOUT-1 HAIKU scout · completed · agent spawned- · ended just now
+    ↳ reported by the agent; NOT verified (pending)
+Read-only. /cockpit agents <task> explains one; /cockpit ready, what is left before DONE.
+```
+
+</details>
+
+### Verification Readiness
+
+`MODULE 04` `/cockpit ready` `read-only` `approves nothing`
+
+- **`/cockpit ready`** applies the existing completion rules to the recorded task: open milestones and blockers, the six gates (a pass reported by Claude is labelled as such and never called verified; a pass that went stale is STALE), the Stop guard's hold or missing completion, an unadjudicated Opus review, the goal check's acceptance criteria and open unknowns, and, as notes, pending agent escalations and reported-but-unverified agent results. It says `PERMITS DONE` exactly when the task's own status is DONE, and is otherwise `DOES NOT PERMIT DONE` with what stands in the way. It is an explanation, not an approval.
+
+The six gates are CODE, TEST, TYPE, BUILD, SECURITY and GIT. Verification gates use observed exit status and explicit reported evidence, not proof of correctness. A coding task above LIGHT cannot read DONE until `align` reports `ALIGNED`: each acceptance criterion needs its own evidence, and an edit after DONE takes completion back.
+
+<details>
+<summary><b>Understand verification</b></summary>
+
+`/cockpit ready` after a failing test command:
+
+```text
+READY · DOES NOT PERMIT DONE · 40% · status ACTIVE
+STANDING IN THE WAY
+  ✗ milestones 2 of 5 done · open: m3 Write limiter tests [pending]; m4 Fix failures [active]; m5 V…
+  ✗ CODE not reported yet
+  ✗ TEST FAILED · npm test (failed)
+  ✗ TYPE not reported yet
+  ✗ BUILD not reported yet
+  ✗ SECURITY not reported yet
+  ✗ GIT not reported yet
+  ✗ goal alignment PENDING · acceptance criteria 0 of 3 met with evidence
+ALSO
+  · 2 agent results reported, not verified: SCOUT-1 (pending), ENG-2 (pending)
+  · 1 agent task waiting or stalled: REV-1 blocked · /cockpit agents explains why
+Read-only: approves nothing, clears nothing; a reported result is not a verified one.
+```
+
+`/cockpit ready` after the commands pass, the agent results are verified and the goal check is aligned:
+
+```text
+READY · PERMITS DONE · 100% · status DONE
+HOLDS
+  ✓ milestones 5 of 5 done
+  ✓ CODE pass · reported by Claude, not read from a command
+  ✓ TEST pass · read from a command
+  ✓ TYPE pass · read from a command
+  ✓ BUILD pass · read from a command
+  ✓ SECURITY n/a · no new dependency, no secret, no auth path touched
+  ✓ GIT pass · reported by Claude, not read from a command
+  ✓ goal check ALIGNED · acceptance criteria 3 of 3 met with evidence (evidence is as reported; its…
+Read-only: approves nothing, clears nothing; a reported result is not a verified one.
+```
+
+The completion gate is a hold on the progress model, not a proof of correctness. Discovery levels, decision records, the goal check, what happens after DONE and the full list of limits: [docs/verification.md](docs/verification.md).
+
+</details>
+
+### Cobalt Guard
+
+`MODULE 05` `/cockpit guard` `/cockpit alerts` `opt-in`
+
+Cobalt Guard tells a person when a run needs one, and can hold a stop until your own check passes. Both parts are off until you turn them on.
+
+- **Owner alerts** (`guardAlerts`, off by default). When on, a terminal notification (through Claude Code's own notification channel) tells you when a run needs a person: verification retries exhausted, a security check failed, a release NO-GO, an open mandatory review, or a blocked run. It never approves, releases or clears anything, and it cannot confirm that you saw it. No webhook, email or push.
+- **The alert inbox.** `/cockpit alerts` lists what Cobalt Guard recorded, so you can recover it after stepping away. With `guardRecordOnly` on and alerts off, incidents are written down for `/cockpit alerts` and the digest; no notification, sound, bell or reminder is ever sent for them.
+- **Stop-hook verification guard** (`stopGuard`, `OBSERVE` by default). `ENFORCE` runs your `verifyScript` when the agent tries to finish a task that changed files, and refuses the stop (up to the attempt limit) until the script exits 0. The script is not trusted until you enroll its sha-256 with `/cockpit guard trust`; it is re-hashed before every run and a changed script is not run.
+- **No verdict changes.** An alert, a reminder, an acknowledgment or a silence never changes a gate, a hold, a review, a release approval or the task's percentage.
+
+Two command guards are on by default and are described under [Safety and trust](#safety-and-trust): the blast-radius guard and the attribution guard.
+
+<details>
+<summary><b>Configure Guard</b></summary>
+
+Guard and alert settings are the person's alone: they can be changed only by you in the config menu (`/config`).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `guardAlerts` | `false` | Owner alerts through the host's terminal notification |
+| `guardCooldownSec`, `guardMaxAlerts` | `300`, `5` | Minimum time between alerts (minimum 30); most alerts one session may raise, reminders included (maximum 20) |
+| `guardRepeat`, `guardRepeatSec`, `guardMaxReminders` | `false`, `900`, `3` | Persistent alerts (needs `guardAlerts`); time between reminders (minimum 60); reminders per condition (maximum 10) |
+| `guardSound` | `false` | Tries the checkpoint cue, or the terminal bell, with each alert (needs `guardAlerts`, honours `sounds` and `/cockpit mute`) |
+| `guardNotifyKinds` | empty | Which kinds are notified; empty or `all` is every kind. `security-failure` cannot be turned off |
+| `guardQuietHours`, `guardQuietTimezone` | empty | A daily window such as `22:00-07:00` and the zone it is read in |
+| `guardQuietOrdinary`, `guardQuietCritical` | `defer`, `notify` | What ordinary and critical alerts do in the window |
+| `guardRecordOnly` | `false` | Record incidents without notifying |
+| `guardDigest` | `false` | One line at session start counting unacknowledged recorded alerts |
+| `stopGuard` | `OBSERVE` | `ENFORCE` runs the enrolled verification script at a stop |
+| `verifyScript`, `verifyScriptSha256` | empty | Your check script (absolute path) and an optional pinned sha-256 |
+| `verifyTimeoutSec`, `stopMaxContinuations` | `120`, `3` | Check timeout (maximum 600); refused stops before the task is marked BLOCKED and the stop is allowed (maximum 10) |
+| `stopVolatile`, `stopWatch` | empty | Ignored directories left out of the change fingerprint; files hashed into it even when git ignores them |
+
+From the demo, with `guardAlerts` on and a run blocked on a person. The notification the host was asked to write, and the row the HUD pinned:
+
+```text
+ui.notify (Cobalt Guard)
+  Cobalt Guard · task 1: the run is blocked and needs you. Nothing was approved or released. /cockpit guard
+```
+
+```text
+GUARD ▲ NORMAL run blocked · task 1 · notification SENT, not acknowledged · transport not confirmed
+```
+
+Persistence, acknowledgment, the inbox, shared history, record-only mode, priorities, quiet hours and what a notification status does and does not claim: [docs/cobalt-guard.md](docs/cobalt-guard.md). The Stop guard's trust model: [docs/implementation-v0.5.2.md](docs/implementation-v0.5.2.md).
+
+</details>
+
+### Run Ledger and replay
+
+`MODULE 06` `/ledger` `/replay` `/park` `local`
+
+Ledger records observed runs, agents, tools, usage, verification and optional local-control receipts. It keeps up to eight sessions in the host's plugin store, with a 384,000-byte budget per stored ledger and bounded detail windows. Live agents and originating runs are retained; oldest detail is evicted first. `/park` stores phase, explicit goal/milestones, blockers and Git checkpoint data. Resuming the same session restores its checkpoint; this is not an automatic new-session handoff or model summary.
+
+Replay retains at most 24 snapshots, with a 96,000-character aggregate budget and 12,000-character per-step budget. Sensitive filenames, detected credentials and oversized content are omitted. JSON export excludes snapshot bodies, agent descriptions and checkpoint prose. It includes sanitized structured task assignments, ownership, results and lifecycle evidence.
+
+<details>
+<summary><b>Explore storage and telemetry</b></summary>
+
+Cockpit writes to two places and nowhere else: the host's plugin store and, with `telemetry` on (the default), its own telemetry directory under your state directory. The full account is under [What Cockpit runs, reads and sends](#what-cockpit-runs-reads-and-sends); retention and deletion are in [PRIVACY.md](PRIVACY.md#deleting-your-data).
+
+Added in v0.5.2:
+
+`/cockpit stats` (local telemetry), `/cockpit flow` (Neural Flow), `/cockpit doctor` (installation, Auto-mode and cache-policy diagnostics), `/cockpit guard` (owner alerts), the optional Stop-hook verification guard and the hardened `/cockpit reset`. All new capabilities are local and bounded. Local model telemetry (`telemetry`) is **on by default** and writes bounded files of its own under your state directory, outside Claude Code's plugin store; the others are read-only or off by default. What it records, where it lives and how to delete it: [PRIVACY.md](PRIVACY.md). See [docs/implementation-v0.5.2.md](docs/implementation-v0.5.2.md).
+
+The top of the Run Ledger pane (`/ledger`) at the end of the demo. The test host reports no session id and no effort, so those read `unknown`; nothing is estimated:
+
+```text
+COBALT CONTROL / RUN LEDGER
+AUTH / SUBSCRIPTION
+01 RUN
+session unknown
+run unknown:main-1 · turn main-1
+status running · elapsed 33720ms
+main claude-opus-5-5 · unknown (unknown) · coordinator
+reasoning requested unknown · applied unknown · observed unknown
+02 ORCHESTRATION
+MAIN → delegate → integrate → verify (observed)
+03 SUBAGENTS
+TASK [task:SCOUT-1] SCOUT-1
+CLAUDE role SCOUT · requested unknown / unknown
+ACTUAL claude-haiku-5-5 · unknown (unknown) · observed unknown · spawned-1
+origin unknown:main-1 / main-1 · parent unknown
+NOBODYWHO decision unknown · pruning unknown (no agent correlation in receipts)
+RESULT success · 23720ms · tools 2 · reads 1 · edits 0 · writes 0 · retries unknown
+latest mcp__cobalt-cockpit__swarm TOOL
+TASK [task:ENG-1] ENG-1
+CLAUDE role WORKER · requested unknown / unknown
+ACTUAL claude-sonnet-5-5 · unknown (unknown) · observed unknown · spawned-2
+origin unknown:main-1 / main-1 · parent unknown
+NOBODYWHO decision unknown · pruning unknown (no agent correlation in receipts)
+RESULT success · 19720ms · tools 2 · reads 0 · edits 1 · writes 0 · retries unknown
+latest mcp__cobalt-cockpit__swarm TOOL
+```
+
+</details>
+
+## Swarm architecture
 
 ```mermaid
 flowchart TD
@@ -30,40 +423,127 @@ flowchart TD
     O --> V["Verification gates<br/>Tests · typecheck · build · review"]
     V --> L["Run Ledger · HUD · replay"]
     N["NobodyWho (optional)<br/>Read-only local decision/pruning receipts"] -.-> C
+
+    classDef opus fill:#2A1F52,stroke:#B18CFF,stroke-width:2px,color:#F3EDFF
+    classDef sonnet fill:#06363E,stroke:#22E3F0,stroke-width:2px,color:#E6FCFE
+    classDef haiku fill:#463000,stroke:#FFB020,stroke-width:2px,color:#FFF4DC
+    classDef cockpit fill:#0E1E4D,stroke:#3D74FF,stroke-width:2px,color:#E8EDFF
+    classDef verify fill:#0B3A1D,stroke:#3BE07F,stroke-width:2px,color:#E7FCEF
+    classDef plain fill:#161B26,stroke:#7B8496,stroke-width:1px,color:#E8EDFF
+    class O opus
+    class S sonnet
+    class H haiku
+    class C,D cockpit
+    class V,L verify
+    class U,R,N plain
 ```
 
 Opus remains **one main commander** and keeps the reasoning effort you select in Claude Code. Sonnet handles well-scoped engineering and review; Haiku handles bounded reconnaissance and repetitive processing. Cockpit tracks ownership, dependencies, escalation, and evidence. It is not an independent model router or a guarantee that every available agent slot will be used.
 
 **AUTO resource budgets:** up to 8 Sonnet, up to 16 Haiku, and **16 total subagents** under Cockpit's default admission policy. Actual Claude Code concurrency and model availability may be lower. Independent tasks can run in parallel; competing writers are serialized.
 
-## Features
+**Two profiles.** Both need orchestration enforced. `OPUS_LED` is the default; nothing about models or admission changes unless you choose the other one.
 
-- VECTOR / Activity Field, milestone progress, verification-gated DONE, context usage and Git/activity tracking.
-- Dynamic, task-aware reasoning effort: AUTO selection, a commander-named level per assignment, an operator ceiling and capability fallback, with requested and applied effort kept apart.
-- Main and subagent orchestration telemetry, subagent radar, observed model/effort and token usage.
-- Local Run Ledger, sanitized JSON export, bounded replay, and park/resume checkpoints.
-- Blast-radius protection, repository hygiene, optional sounds and hot reload persistence.
-- Fail-closed guards: a hook that cannot reach its decision refuses the action it guards rather than letting it run, and every such decision is judged against the event it was given.
-- Narrow-terminal and reduced-motion layouts; preserves the engine's image viewer.
-- Optional read-only NobodyWho telemetry and opt-in orchestration policy enforcement.
-- Optional Sonnet-led profile (`profile: SONNET_LED`): Sonnet 5.5 is the main model at your effort, and Opus 5.5 runs at High only as an admitted, read-only architect consultation. `OPUS_LED` stays the default.
-- Optional per-session router (`/cockpit router`): OFF by default, NobodyWho (local) or JEV (TypeSafe API) for advisory routing recommendations. Cockpit's deterministic rules stay authoritative.
-- Read-only helpers can deliver their reports: a bound helper may use the host's tool discovery and report hand-back without gaining any write, shell or delegation right, and each task records how its report arrived.
+| | `OPUS_LED` (default) | `SONNET_LED` |
+| --- | --- | --- |
+| Main loop | Opus 5.5, the commander, at the effort you select | Requested on Sonnet 5.5, at your own effort |
+| Engineering and review | Sonnet 5.5 pool, effort per task | Sonnet 5.5 workers, as before |
+| Scouting and utility work | Haiku 5.5 pool, effort per task | Haiku 5.5 scouts, as before |
+| Where Opus is | The main loop: plans, delegates, integrates, verifies | Never the main loop and never a background model: one admitted, read-only consultation at a time, run as `cobalt-cockpit:architect` at high effort |
+| How Opus is reached | It is the main session | The main session requests it with `swarm action consult`, giving a ground and an evidence packet; Cockpit admits it only where the ground holds on evidence |
+| AUTO budgets | 16 subagents in all: up to 8 Sonnet, up to 16 Haiku | 4 helpers in all: 2 Sonnet, 2 Haiku and 1 Opus within them |
+| Turn it on | `orchestration: true` | `orchestration: true` and `profile: SONNET_LED` |
+
+In `SONNET_LED`: **Sonnet builds. Haiku scouts. Opus reviews. A router, if you select one, advises.** A consultation's findings are advice until the main session has verified them with `swarm action verify`.
+
+<details>
+<summary><b>Set up, or roll back, SONNET_LED</b></summary>
+
+```mermaid
+flowchart TD
+    U["You: goal and effort preference"] --> S["Sonnet 5.5 · main loop<br/>Builds and verifies, at your effort"]
+    S <--> C["Cobalt Cockpit<br/>Admission · task ownership · consultation budget"]
+    C -->|"Bounded scouting"| H["Haiku 5.5 scouts"]
+    C -->|"Bounded engineering"| W["Sonnet 5.5 workers"]
+    S -->|"swarm action consult<br/>ground and evidence packet"| C
+    C -->|"Admitted only where the ground holds<br/>one at a time"| A["Opus 5.5 · cobalt-cockpit:architect<br/>Read-only · high effort"]
+    A -->|"Structured decision: advice until verified"| S
+    S --> V["swarm action verify<br/>pass or fail, with evidence"]
+
+    classDef opus fill:#2A1F52,stroke:#B18CFF,stroke-width:2px,color:#F3EDFF
+    classDef sonnet fill:#06363E,stroke:#22E3F0,stroke-width:2px,color:#E6FCFE
+    classDef haiku fill:#463000,stroke:#FFB020,stroke-width:2px,color:#FFF4DC
+    classDef cockpit fill:#0E1E4D,stroke:#3D74FF,stroke-width:2px,color:#E8EDFF
+    classDef verify fill:#0B3A1D,stroke:#3BE07F,stroke-width:2px,color:#E7FCEF
+    classDef plain fill:#161B26,stroke:#7B8496,stroke-width:1px,color:#E8EDFF
+    class A opus
+    class S,W sonnet
+    class H haiku
+    class C cockpit
+    class V verify
+    class U plain
+```
+
+**Set up SONNET_LED** (keep your other options; CLI values are strings):
+
+```sh
+printf '%s\n' '{"orchestration":"true","profile":"SONNET_LED"}' | claude plugin configure cobalt-cockpit@cobalt-cockpit --values-stdin
+```
+
+Then choose the main effort yourself (`/effort medium` is recommended), optionally `/autocompact 400k` while on Sonnet, and restart Claude Code. `/cockpit version` shows `PROFILE / SONNET_LED · main claude-sonnet-5-5 · Opus on admission`.
+
+**Roll back** to the previous behaviour by setting `profile` to `OPUS_LED` (or removing it) and restarting:
+
+```sh
+printf '%s\n' '{"profile":"OPUS_LED"}' | claude plugin configure cobalt-cockpit@cobalt-cockpit --values-stdin
+```
+
+Consultation grounds, budgets, mandatory consultations, the release-review rule and the architect's identity: [docs/sonnet-led.md](docs/sonnet-led.md).
+
+</details>
+
+<details>
+<summary><b>Reasoning effort, per task</b></summary>
+
+Model selection and effort selection are separate decisions. The 5.5 tiers still command, engineer and scout. **You control the main Opus loop's effort; Cockpit manages the subagents'**, per task rather than fixed per tier.
+
+- **AUTO** (default) names a level from the task; a commander can name a level explicitly per assignment; **MANUAL** honours the fixed per-tier levels.
+- A task's level is *requested*, not guaranteed. The Ledger distinguishes the requested level from the **engine-resolved** level and names a mismatch (`EFFORT FALLBACK`). This is host-resolution evidence, **not an independently captured wire receipt**. Unknown stays unknown.
+- **The main loop's effort is never written by Cockpit.**
+- A failing task escalates one step at a time: raise effort within the tier first, then move a tier (Haiku → Sonnet → Opus). It never jumps to the top and stops at the budget rather than retrying forever.
+
+Every rule, with the engine's order of precedence: [docs/orchestration.md](docs/orchestration.md#dynamic-reasoning).
+
+</details>
+
+<details>
+<summary><b>The same picture in eight lines of text</b></summary>
+
+```text
+Opus 5.5          — commander / integration / final verification, at your /effort
+  ├─ Sonnet 5.5     — 0..N bounded engineering and review, effort per task
+  └─ Haiku 5.5      — 0..N scouts and utility work, effort per task
+       escalation → Sonnet → Opus
+Cobalt Cockpit — ownership / waves / backpressure / HUD / ledger / replay
+NobodyWho     — local Decision / Pruning / read-only control telemetry
+```
+
+</details>
 
 ## Quick start
 
 Requires Claude Code with mods/plugins enabled. **Claude Code 2.1.292+ is needed for native per-invocation subagent effort**; native subagent effort was live-tested on Claude Code 2.1.294. Check `claude --version` first. Older hosts have reduced effort observability and compatibility fallbacks.
 
-Install from this repository's **public GitHub marketplace**:
+**1. Install** from this repository's **public GitHub marketplace**:
 
 ```sh
 claude plugin marketplace add echelong/cobalt-cockpit
 claude plugin install cobalt-cockpit@cobalt-cockpit
 ```
 
-Restart Claude Code, open `/cockpit`, and inspect `/cockpit version`. By default Cockpit **observes**; orchestration enforcement is opt-in.
+**2. Restart** Claude Code, open `/cockpit`, and inspect `/cockpit version`. By default Cockpit **observes**; orchestration enforcement is opt-in.
 
-To enable orchestration with the supported configuration CLI:
+**3. Optional: enforce orchestration** with the supported configuration CLI:
 
 ```sh
 printf '%s\n' '{"orchestration":"true"}' | claude plugin configure cobalt-cockpit@cobalt-cockpit --values-stdin
@@ -71,38 +551,71 @@ printf '%s\n' '{"orchestration":"true"}' | claude plugin configure cobalt-cockpi
 
 Restart Claude Code again after changing settings. Enabling orchestration activates model/admission and ownership policy; it does not enable Fable blocking unless you also opt into `blockFable` or `cobaltStrict`.
 
-**Updating an existing public-marketplace installation:**
+<details>
+<summary><b>Update an existing installation</b></summary>
 
 ```sh
 claude plugin marketplace update cobalt-cockpit
 claude plugin update cobalt-cockpit@cobalt-cockpit
 ```
 
-Restart Claude Code and check `/cockpit version`. Your settings, preferences and saved Run Ledgers are kept. v0.5.0 keeps `OPUS_LED` as the default profile, so the main model does not change unless you choose `SONNET_LED` (below). It adds one option, `routerConfigDir`, empty by default, and the session router is OFF in every new session.
+Restart Claude Code and check `/cockpit version`. Your settings, preferences and saved Run Ledgers are kept. v0.5.0 keeps `OPUS_LED` as the default profile, so the main model does not change unless you choose `SONNET_LED` ([Swarm architecture](#swarm-architecture)). It adds one option, `routerConfigDir`, empty by default, and the session router is OFF in every new session.
 
 The marketplace name in this repository is `cobalt-cockpit`. Some existing private/local setups use a separately registered marketplace alias such as `cobalt`; for those, use the identity shown by `claude plugin list` rather than copying the public suffix.
 
-For development or a single-session trial:
+</details>
+
+<details>
+<summary><b>Try it for one session, or develop</b></summary>
 
 ```sh
 git clone https://github.com/echelong/cobalt-cockpit.git
 claude --plugin-dir /path/to/cobalt-cockpit
 ```
 
-Disable or remove an installed copy:
+A `--plugin-dir` copy stops loading when you omit the flag next session.
+
+</details>
+
+<details>
+<summary><b>Disable or remove</b></summary>
 
 ```sh
 claude plugin disable cobalt-cockpit@cobalt-cockpit
 claude plugin uninstall cobalt-cockpit@cobalt-cockpit
 ```
 
-A `--plugin-dir` copy stops loading when you omit the flag next session.
+</details>
 
-## v0.5.2 additions
+<details>
+<summary><b>Host compatibility</b></summary>
 
-`/cockpit stats` (local telemetry), `/cockpit flow` (Neural Flow), `/cockpit doctor` (installation, Auto-mode and cache-policy diagnostics), `/cockpit guard` (owner alerts), the optional Stop-hook verification guard and the hardened `/cockpit reset`. All new capabilities are local and bounded. Local model telemetry (`telemetry`) is **on by default** and writes bounded files of its own under your state directory, outside Claude Code's plugin store; the others are read-only or off by default. What it records, where it lives and how to delete it: [PRIVACY.md](PRIVACY.md). See [docs/implementation-v0.5.2.md](docs/implementation-v0.5.2.md).
+Linux and macOS terminals use standard text/Braille rendering; Kitty or WezTerm is not required. Narrow widths drop detail progressively. Desktop uses SVG where available; terminal retains text/Raster equivalents. Core commands and guards do not need desktop graphics. Image viewing delegates to Claude Code.
 
-## Commands
+Sounds try PipeWire, PulseAudio, ALSA, ffplay, mpv, SoX, Canberra, macOS afplay, then a terminal bell. Missing/failing players fall back to silence. `/cockpit mute` disables cues. macOS behavior is covered by the engine test harness, not a physical macOS run. Windows is not tested. Mods may be disabled by organizational policy; this dashboard is intended for Claude Code, not claude.ai/Cowork.
+
+</details>
+
+## Explore commands
+
+| Command | Action |
+| --- | --- |
+| `/cockpit` | Open or close Mission Control |
+| `/cockpit status` | Print current progress |
+| `/cockpit flow` | Print the Neural Flow row in words |
+| `/cockpit agents` / `/cockpit agents <task>` | The agent inspector: every swarm task, or one in full. Read-only |
+| `/cockpit ready` | Which recorded conditions stand between the task and DONE. Read-only; approves nothing |
+| `/cockpit guard` | Owner-alert status, acknowledgment and silence, and the Stop guard's script enrollment |
+| `/cockpit alerts` | The alert inbox |
+| `/cockpit doctor` | Read-only installation, host, Auto-mode, telemetry-storage and prompt-cache diagnostics |
+| `/ledger` | Open local Run Ledger |
+| `/replay` | Browse successful edit/write snapshots |
+| `/park` | Save a deterministic checkpoint for later resume |
+
+<details>
+<summary><b>See advanced commands</b></summary>
+
+The complete reference. Commands that acknowledge, silence, enroll, release, export or delete are accepted only when typed by a person.
 
 | Command | Action |
 | --- | --- |
@@ -129,315 +642,35 @@ A `--plugin-dir` copy stops loading when you omit the flag next session.
 | `/replay` | Browse successful edit/write snapshots |
 | `/park` | Save a deterministic checkpoint for later resume |
 
-## Orchestration
+</details>
 
-**Observation is the public default.** With `orchestration: false`, Cockpit observes your existing Claude Code activity without enforcing model routing, subagent budgets, Fable blocking, or subscription-only authentication. The bundled explorer/researcher/worker/reviewer agent definitions use Sonnet 5.5; scout/utility use Haiku 5.5.
+## Safety and trust
 
-Set **`orchestration: true`** to enforce the Opus/Sonnet/Haiku policy, independent pool resource budgets, and explicit task ownership. Orchestration does not by itself block Fable outside routed work. **`blockFable` is a separate opt-in**. **`cobaltStrict`** is an optional stricter preset that also blocks Fable/external advisor selection and requires subscription-style authentication. These models must be available to your account; Cockpit cannot grant model access.
+**What Cockpit observes.** Tool calls, paths, agent events, token/context telemetry, Git state and verification. Hidden reasoning is never stored.
 
-The strict preset takes precedence over individual enforcement switches. NobodyWho remains optional: Cockpit observes its local receipts if configured and does not install it. It sends the local router a request only in a session where you selected a router with `/cockpit router`.
+**What it can refuse.** The tool guard (destructive commands asked or refused), agent-offer/spawn guards, `/config` rows of the guard and alert settings (person-only), `/model`/`/advisor` under the Fable policy, and Stop-hook holds under `stopGuard: ENFORCE`. A hook that cannot reach its decision refuses the action it guards rather than letting it run.
 
-### Elastic execution
+**What it never approves.** Cockpit does not take part in Claude Code's permission check. It registers no hook on it and makes no permission query; its guards run before it and can only refuse a call or ask you about it, never approve one. `/cockpit ready` is an explanation, not an approval, and an alert never changes a gate, a hold, a review, a release approval or a verdict.
 
-Opus remains the single commander: architecture, planning, decomposition, integration, escalation decisions and final verification. Sonnet engineers substantial bounded changes and independent reviews. Haiku scouts repositories and processes extractive, repetitive work. Small or tightly coupled work stays in the main session.
+**What is configurable.** Enforcement is opt-in, switch by switch:
 
-The `swarm` tool records bounded assignments before spawning. Each assignment carries a task ID, parent, tier, semantic role, objective, scope, dependencies, resource ownership, read/write mode and spawn reason. Include the exact `[task:ID]` marker in the Agent description. Queued tasks wait for resource capacity; blocked tasks wait for dependencies; intersecting write scopes are serialized. Read-only scopes may overlap. Scoped agents use Read/Grep/Glob for inspection and Edit/Write for changes. Shell or custom tools require exclusive wildcard ownership; a narrow set of safe Git inspection commands remains available for wildcard read-only tasks. Path canonicalization fails conservatively to wildcard when unavailable. Resource budgets replace the old three-agent ceiling; AUTO provides backpressure rather than uncontrolled fan-out.
-
-Run waves are reconnaissance → engineering → review → integration → verification. Waves are observable phases; they do not replace dependency checks. Haiku may escalate reasoning to Sonnet; Sonnet escalates ambiguity, architecture and high-risk changes to Opus. Handoffs preserve objectives, discoveries, evidence, unresolved questions, risk and next actions. Escalation is distinct from ordinary completion. Agents return concise conclusion/evidence/change/check/uncertainty artifacts; commanders verify claims independently.
-
-`/cockpit` groups observed tiers, compresses pools larger than eight agents and reports task progress, queue, blockers, ownership conflicts and escalations. The Activity Field retains its crawler/spine identity and aggregates utility pools. The Run Ledger and replay explain assignment, spawn reason, wave, completion, escalation and verification. Escalated results remain unresolved after their host stops; the commander uses `swarm resolve` with evidence before dependent work can proceed. Queued dispatch stays under the commander through Agent, rather than automatic spawn loops. Active cancellation suppresses further model/tool actions and retains ownership until host termination is observed (the host exposes no stop API). For a running pre-v0.2 agent with unknown ownership, the commander explicitly assigns its scope then uses `swarm adopt` with the observed `agent_id`; until then further agent tool effects are held. Older ledgers default to an empty swarm; unavailable telemetry stays unknown. NobodyWho boundaries remain read-only.
-
-```text
-Opus 5.5          — commander / integration / final verification, at your /effort
-  ├─ Sonnet 5.5     — 0..N bounded engineering and review, effort per task
-  └─ Haiku 5.5      — 0..N scouts and utility work, effort per task
-       escalation → Sonnet → Opus
-Cobalt Cockpit — ownership / waves / backpressure / HUD / ledger / replay
-NobodyWho     — local Decision / Pruning / read-only control telemetry
-```
-
-## Dynamic reasoning
-
-Model selection and effort selection are separate decisions. The 5.5 tiers still command, engineer and scout. **You control the main Opus loop's effort; Cockpit manages the subagents'**, per task rather than fixed per tier.
-
-- **AUTO** (default) names a level from the task: extractive inventories, classification and summaries run light; normal feature work, bug fixes and refactors run medium; complex debugging, concurrency, migrations, security analysis and high-risk architectural reasoning run high or xhigh; unusually difficult high-stakes reasoning may use max. A task that names no class falls back to its tier's baseline.
-- A commander can name a level explicitly per assignment with the `swarm` tool's `effort` field (LOW / MEDIUM / HIGH / XHIGH / MAX, or AUTO). A named level wins AUTO. **MANUAL** mode instead honours the fixed per-tier levels and leaves Haiku unspecified.
-- A task's level is *requested*, not guaranteed. The operator's `maxEffort` cap applies to subagents, and the host can apply its own limits. The Ledger distinguishes the requested level from the **engine-resolved** level and names a mismatch (`EFFORT FALLBACK`). This is host-resolution evidence, **not an independently captured wire receipt**. Unknown stays unknown.
-- A subagent's level is set natively, on its own Agent call's `effort` parameter (Claude Code 2.1.292 or newer): one level per invocation, with no global setting for parallel agents to race on. It overrides the agent definition's `effort` frontmatter and a per-model `effortLevel` for that subagent only. The engine's own limits still win — `maxEffortLevel`, an organization's cap, `CLAUDE_CODE_EFFORT_LEVEL` and the model's support — and the level the engine resolves is what the ledger records as applied. When that is not the level asked for, the difference is named with both levels; it is never rewritten back.
-- **The main loop's effort is never written by Cockpit.** A `turn.step` rewrite sits above everything in the engine's order (rewrite, then `CLAUDE_CODE_EFFORT_LEVEL`, then a session level from `/effort`, `--effort` or the model picker, then the settings' `effortLevel`, then the model's default, all under `maxEffortLevel`), and most of those cannot be seen from a plugin, so there is no way to offer a level *beneath* your own choice. The level the engine resolved is sent untouched and recorded as `engine`, with what was seen of its origin: the variable, a `/effort` typed this session, the settings, or `host` when none of those accounts for it. A cap that lowered your selection is named with both levels. AUTO and MANUAL, the `maxEffort` ceiling and every subagent launch leave it alone. With no selection of your own the main loop runs at the host's default for the model, which is not necessarily the level AUTO would name: `/cockpit version` then says what AUTO would name, as advice, and `/effort <level>` sets it.
-- A subagent on an older engine, or one that no Agent call launched, gets its level from a per-request `turn.step` rewrite instead. The engine does not report that rewrite back, so there the ledger shows the level as *requested* (`request`), leaves *observed* unknown, and learns nothing about capability from the engine's reports.
-- A failing task escalates one step at a time: raise effort within the tier first, then move a tier (Haiku → Sonnet → Opus). It never jumps to the top and stops at the budget rather than retrying forever.
-
-The HUD shows the applied effort beside the model; `/cockpit version` prints the reasoning mode, the ceiling, the main loop's host-resolved level and where it was seen to come from, how a subagent's level reaches the engine, and only the capability this session has really observed.
-
-## HUD states
-
-| State | Meaning |
-| --- | --- |
-| IDLE | No active work |
-| SCAN | Main loop working without a tool in flight |
-| ACTIVE | Tool or agent activity observed |
-| QUERY | Waiting on a question put to you, or on one of Cockpit's own asks. Claude Code's permission dialog is not tracked |
-| FAULT | Failure or blocker |
-| VERIFIED | Milestones complete and required gates satisfied |
-
-A completed turn does not complete a task. Missing measurements stay unknown.
-
-## Run Ledger
-
-Ledger records observed runs, agents, tools, usage, verification and optional local-control receipts. It keeps up to eight sessions in the host's plugin store, with a 384,000-byte budget per stored ledger and bounded detail windows. Live agents and originating runs are retained; oldest detail is evicted first. `/park` stores phase, explicit goal/milestones, blockers and Git checkpoint data. Resuming the same session restores its checkpoint; this is not an automatic new-session handoff or model summary.
-
-Replay retains at most 24 snapshots, with a 96,000-character aggregate budget and 12,000-character per-step budget. Sensitive filenames, detected credentials and oversized content are omitted. JSON export excludes snapshot bodies, agent descriptions and checkpoint prose. It includes sanitized structured task assignments, ownership, results and lifecycle evidence.
-
-## Discovery, decisions and goal check
-
-Added in v0.5.1. It is Cockpit's own heuristic, not an Anthropic workflow or endorsement, and it adds no model call: the level comes from deterministic rules over the prompt, the files the host saw edited and the consultation grounds Cockpit already reads. A router (NobodyWho or JEV) may still advise on routing; it cannot lower a level, skip a gate or waive a consultation.
-
-| Level | When | What changes |
+| Switch | Public default | What it controls |
 | --- | --- | --- |
-| `LIGHT` | A typo, a label, a rename, a question, a single obvious edit | Nothing is added to the prompt. No questions, no record. Progress and gates apply as before. |
-| `STANDARD` | A change request, a feature, real debugging, three or more files edited | One short line once: state the objective and acceptance criteria, name only unknowns that change the implementation, assume safely otherwise, record consequential choices, check the goal before DONE. |
-| `DEEP` | A migration, authentication, payments, concurrency, data integrity, architecture, or a security or architecture consultation ground | A longer line once: establish the architecture, name only the risk categories that apply, compare approaches. Any Opus consultation still goes through `swarm consult` and its admission rules. |
-
-A level only goes up during a task, and each level's guidance is given once. The progress tool gained three actions: `discover` (objective, acceptance criteria, material unknowns, relevant risks), `decide` (one decision) and `align` (the goal check). `/cockpit discovery` shows the state:
-
-```
-COBALT / DISCOVERY
-LEVEL / STANDARD
-GOAL / Implement booking cancellation
-UNKNOWNS / 2 unresolved
-DECISIONS / 1 recorded
-ALIGNMENT / PENDING
-```
-
-**Decisions.** A record holds a problem, the chosen approach, alternatives with the reason each was rejected, trade-offs, evidence and a status (`provisional`, `verified`, `revised`). Cockpit stores what the model reported and nothing else: an alternative without its reason, or a `verified` decision without evidence, is refused rather than filled in. Records are redacted for credential shapes before they enter task state or the Run Ledger, bounded (12 per task, 64 per ledger, detail dropped before records when the 384,000-byte budget is tight) and not required for LIGHT work. The ledger also keeps one entry per task saying which level was chosen and why, in short codes, with no prompt text. Cockpit never creates `DECISIONS.md` or `CLAUDE.md`; `/ledger export decisions` prints Markdown for you to paste.
-
-**Goal check.** A coding task above LIGHT cannot read DONE until `align` reports `ALIGNED`. Explicit acceptance criteria are required: with none declared the task shows `CRITERIA / MISSING`, `ALIGNMENT / BLOCKED` and DONE is refused, and Cockpit never invents criteria or evidence. Each criterion (stable id, meaningful description) needs its own `met` entry with evidence that names an observation (a quoted output, a file, a number); generic evidence such as "works" or a restatement of the criterion is refused, and the basis is recorded as `reported`, never as independently verified. Evidence goes stale, and criteria return to unevaluated, on edits (main or helper), a plan or replan, a new or revised criterion, a failing gate or a reopened unknown; read-only activity does not. Besides that, nothing reported missing, no unknown still open, every earlier milestone done, no blocker and every required gate passed. Passing tests are one input, never the whole. `PARTIAL`, `BLOCKED` and `UNKNOWN` are recorded and do not complete the task. Editing files (by the main session or a helper), failing a required gate or milestone, a new criterion or open unknown, or a new plan afterwards takes the check back. `ALIGNED` is refused before a plan exists, and a read-only plan whose edits are observed (`Edit`, `Write`, a Bash edit diff, a helper's edit) and that reaches a level above LIGHT is held for the goal check, though its gates stay not applicable. A plan restart cannot lower the level a task reached. The result is a hold on the existing progress model (the task stays UNVERIFIED below 100%), not a second percentage. LIGHT, read-only and operator-pinned LIGHT tasks, and tasks stored before v0.5.1, are never held by it. A pin of `light` waives this check for the rest of the session, for every later task, until you set `auto`; it changes only this check and the guidance: mandatory Opus consultations and the six gates are unaffected.
-
-**After DONE.** For work the goal check applies to (a coding task above LIGHT), a change to the implementation takes completion back, deterministically, whether or not the model remembers to reopen the task: the goal check returns to PENDING, every criterion evaluation is cleared, and each gate that had passed goes back to pending ("stale"). The stored task is settled at once, so the status stops reading DONE. Fresh gate results and a fresh `align` with new evidence restore DONE. Reads, searches and commands that change nothing do not, and neither does staging, committing or stashing, because the fingerprint is of file contents against the commit it was taken against. A change is seen from: an `Edit` or `Write` result (main session or a helper), a Bash edit diff, a plan or replan, and, for everything else, a fingerprint of the git working tree: taken when `ALIGNED` is accepted and compared after each later tool call and before each progress call, and taken again when gates are recorded, so `ALIGNED` is also refused when the tree changed between the checks and the goal check. `NotebookEdit`, MCP filesystem writers and shell commands that rewrite files are caught by what they changed, never by their name. Measured cost of one fingerprint: 14-16 ms in a 5-100 file repository, 50-57 ms in 2,000 and 30,000 file repositories with 5 modified and 150 untracked files, about 100 ms with 1,500 modified files. It runs only while a goal check stands, once per tool call. Returning to automatic classification with `/cockpit discovery auto` never lowers a level the task has reached.
-
-**Limits.** The completion gate is a hold on the progress model, not a proof of correctness:
-- The level is a heuristic over words and file names (the full prompt text and the plan's goal), so it can misjudge a terse or oddly worded prompt in either direction; pin it with `/cockpit discovery`. An explicit pin of `light` is the operator's choice and waives the check; it is shown as an operator pin.
-- Only prompts typed in the composer, or sent by the bridge or the SDK, are classified (classifying grants nothing; commands that change protected state accept only the composer and the bridge). A prompt from another origin leaves the stored prompt as it was, and a task that never receives a classifiable prompt starts at LIGHT until the plan's goal, the files edited or the model's `discover` raise it.
-- A model that never calls the progress tool has no milestones, no criteria and no gates: the task stays at 0% and is never held or shown DONE. Cockpit cannot stop a claim of "done" made only in prose; after two edited files it reminds once.
-- Criteria and evidence are checked for form only: present, individually evaluated, not generic, naming a file, quote or figure, not shared between criteria. Cockpit cannot tell whether a criterion is a good one or whether the evidence is true; evidence is recorded as `reported`, never as independently verified.
-- Mutation coverage: edits made through `Edit`, `Write` and Bash edit diffs are observed directly. Other writers are observed only through the git working tree, so a change is missed when the project is not a git repository or has no commit yet, git does not answer in time or its output is cut short (no fingerprint is taken, and `align` says so), the file is git-ignored or outside the repository, a tool changes a file and changes it back before the next observation, or more than 2,000 files differ from the commit. A write by a person or another program between calls is treated like any other change. Output of the test command that lands in unignored files after `ALIGNED` also reads as a change. Tool permissions and ownership are unchanged: nothing here allows or denies a call.
-- The "After DONE" protection applies to goal-checked work only. A LIGHT task, a read-only plan whose edits are not observed by `Edit`, `Write` or a Bash edit diff, and a task stored by v0.5.0 are not goal-checked: they keep their gates and DONE after later edits. Giving a coding request a read-only plan, or phrasing it as a question, can keep the level at LIGHT.
-- The fingerprint hashes raw file bytes (no git filters) and ignores file-mode changes; a dangling symlink or submodule among the changed files makes it unavailable, and build or test artifacts that are not git-ignored read as changes. Checks that passed before a task became goal-checked have no fingerprint of their own.
-- Evidence checks are weak by design: any figure satisfies "names a figure", restating a criterion is an exact-text test, and evidence that is made distinct by appending a tag still counts as distinct.
-- Decision records and discovery entries in the Run Ledger are keyed by task number, which restarts after `/cockpit reset` or `/clear`; an older task's entry can be replaced by a new task with the same number.
-- A legacy v0.5.0 task that is nearly done becomes goal-checked if `discover` or `/cockpit discovery <level>` is used on it.
-
-## Safety
+| `blastRadiusGuard` | `true` | Ask before genuinely destructive commands (hard reset, clean, force push, broad recursive deletes, database drops, production teardown) |
+| `attributionGuard` | `true` | Keep AI attribution out of commits, pull requests and files, and ask before CLAUDE.md or AGENTS.md is created unasked |
+| `orchestration` | `false` (observe) | `true` enforces model/admission policy and task ownership |
+| `blockFable`, `subscriptionOnly`, `cobaltStrict` | `false` | Fable blocking; refusal of API-style authentication; the strict preset, which enforces orchestration, blocks Fable and external advisor selection, requires subscription-style authentication and overrides the individual switches while enabled |
+| `stopGuard` | `OBSERVE` | `ENFORCE` holds a stop until the verification script you enrolled exits 0 |
+| `guardAlerts`, `guardRecordOnly` | `false` | Owner alerts; recording incidents without notifying |
+| `telemetry` | `true` | Local model telemetry: bounded files under your state directory, nothing uploaded |
+| `localControl` | `true` | Optional detection of a decision-router ledger, read-only |
 
 Blast-radius protection asks before recognized destructive shell commands. Repository hygiene checks attribution and unsolicited instruction-file creation; while `attributionGuard` is on (the default), Cockpit's `attribution.text` hook returns empty text for commits and pull requests, so the host's AI attribution trailer and footer are not written. Cockpit also hooks `/model`, `/advisor`, `/effort`, `/init`, `/login` and `/logout` (the first two can be refused under the model policy or the strict preset, the rest are observed), and draws its own guard questions inside the host's question dialog; [SECURITY.md](SECURITY.md) lists every hook that can refuse. These guards supplement Claude Code permissions; they are heuristic and cannot recognize every shell program or obfuscated command. Verification gates use observed exit status and explicit reported evidence, not proof of correctness.
 
-### Persistent alerts (v0.5.4, opt-in)
+The guards are not a sandbox: they use recognizable syntax and your confirmation. Keep Claude Code's permission controls enabled.
 
-With `guardAlerts` and `guardRepeat` both on, an alert whose condition is still open is repeated until you deal with it:
-
-- **Bounded.** One reminder per `guardRepeatSec` for a condition, at most `guardMaxReminders` each, never closer to any other alert than `guardCooldownSec`, and inside the session's `guardMaxAlerts`. The budget's last alert is kept for a condition that has not been told at all. A reminder that failed to send counts as one.
-- **Acknowledge.** `/cockpit guard ack` ends the reminders of everything open now. A different condition raised later is still told.
-- **Silence.** `/cockpit guard silence` acknowledges and stops all alerts for the session; `/cockpit guard unsilence` lets new conditions be told again. All three are accepted only when typed by a person.
-- **Resolved.** When a condition no longer holds (the gate passes, the hold is released, the task is reset or replaced) it is recorded `resolved` without a notification and is not repeated. If it comes back it is told as a new alert.
-- **Sound.** `guardSound` tries the existing checkpoint cue with each alert and reminder; the player chain ends with the terminal bell. It stays silent when `sounds` is off or after `/cockpit mute`.
-- **One timer.** A single 30-second host timer (`$.clock.every`) exists only while something can still be repeated. It is cancelled on acknowledgment, silence, resolution, exhaustion and session end, and re-armed from the kept records after a reload, so counts carry on instead of starting over. No background process is started.
-- **No verdict changes.** An alert, a reminder, an acknowledgment or a silence never changes a gate, a hold, a review, a release approval or the task's percentage.
-- **What is claimed.** `sent` means the host reported writing the notification to the channel it names; `sound attempted` or `bell attempted` means a local player exited 0. Neither means you saw or heard it. Desktop popups are whatever your terminal does with the host's notification (the host's channels are kitty, iTerm2 and Ghostty; another terminal gets nothing under the host's automatic setting, or the bell if Claude Code's `preferredNotifChannel` is `terminal_bell`). Cockpit starts no desktop notifier of its own, and on a remote machine whether the notification reaches your local desktop depends on your terminal and connection and is not verified by Cockpit.
-
-### The alert inbox (v0.5.7)
-
-`/cockpit alerts` lists what Cobalt Guard recorded, so you can recover it after stepping away. It reads the same alert records the engine already keeps; it is not a second store.
-
-```
-ALERT INBOX · 3 recorded · 2 open now · 2 unacknowledged · page 1 of 1
-OPEN NOW (read from the current task)
-  3f9a02bc CRITICAL security-failure · task 3 · recorded 2026-10-12 14:03Z (12m ago) · notification SENT via terminal_bell · not acknowledged · condition OPEN now
-  71c0de45 NORMAL run-blocked · task 3 · recorded 2026-10-12 13:40Z (35m ago) · DEFERRED, quiet hours · acknowledged · condition OPEN now
-HISTORY (recorded earlier; the condition no longer holds)
-  a1b2c3d4 HIGH review-hold · task 2 · recorded 2026-10-11 22:10Z (16h ago) · notification SENT via terminal_bell · not acknowledged · condition no longer open (recorded resolved)
-```
-
-- **Order.** Open and unacknowledged first, the gravest first; then open and acknowledged; then history, newest first. Eight to a page: `/cockpit alerts 2`.
-- **Recorded and current are told apart.** "Recorded" is what Cockpit wrote when it raised the alert, with the clock of this machine. "Condition OPEN now" is read off the task as it is now. History is not re-checked.
-- **What a status means.** `SENT` is the host saying it wrote the notification to the channel named, never that you saw it. `NOT SENT`, `DEFERRED, quiet hours`, `HELD BACK, cooldown or budget` and `NOT NOTIFIED` say why nothing was written. An alert nobody acknowledged is "not acknowledged", not "missed". Cockpit does not detect SSH disconnects or reconnects and does not say it did.
-- **Acknowledge one.** `/cockpit alerts ack <id>` (the 8-character id in the first column) acknowledges that occurrence only, ends its reminders and, if it was held back and never told, keeps it from being announced after quiet hours end. Other alerts, `/cockpit guard ack` (still everything at once), gates, reviews, approvals and the verdict are untouched. Typed by you only. An id that is malformed, unknown or has expired from the bounded history changes nothing. Acknowledging a condition that has cleared only marks its record.
-- **Occurrences.** A condition that clears and holds again is a new occurrence with its own id, told again inside the cooldown, the session budget and the retry cap (v0.5.6 did this only with `guardRepeat` on). A new task with the same number is a different occurrence: ids come from the task's identity, not its number.
-- **Recovery.** The records are in the Run Ledger and, per project (a hash of the directory), in a bounded plugin-store key, so a new session in the same project lists them. Nothing is announced again because a session restarted: what was told stays told, and only what was owed (held back by quiet hours) is still owed. The newest 32 records of up to four projects are kept; older ones expire.
-- **HUD.** Open conditions are pinned as before. When recorded alerts no longer hold and were never acknowledged, the row says `GUARD: ARMED · 2 unacknowledged in history · /cockpit alerts` until you acknowledge them. It shortens to fit and never animates.
-
-#### Shared history, the digest, and notifications off (v0.5.8)
-
-- **What is shared, and how far it can be trusted.** Claude Code's plugin store is one JSON file per plugin. Its `set` and `delete` each take a file lock, read the whole file inside it, change one key and write, so one session's `set` is serialised against another's while the lock holds (a contended `set` can be rejected) and a `set` of one key never changes another. This was read from the host's implementation, not from its documentation. It has no compare-and-set and no transaction: reading a key and then writing it back is two steps another session can fall between. Cockpit therefore keeps an **acknowledgment as a key of its own** (`alert-ack:<project>:<id>`), written once with a fixed value and never read back and rewritten. No other write can undo it, and two sessions acknowledging the same occurrence write the same thing. Other sessions find it with the store's key list and mark their own records. The **records** are kept per project in `alert-history:<project>` by a read, a merge and a write; that part is last-writer-wins, so a record written by one session between another's read and write can be missing from the stored history (never from that session's own Ledger). It cannot take an acknowledgment with it. A session that has not looked since another acknowledged shows the occurrence unacknowledged until its next look: the next tool call, command or 30-second timer, and its reminders stop then.
-- **`/cockpit alerts digest`** prints a few lines computed from the records: unacknowledged occurrences by level, how many hold now and how many are history, how many notifications were deferred, not sent or held back, and when the oldest was recorded. It holds no id, key or text from a record, and says what was recorded, never what anyone saw.
-- **`guardDigest`** (Cockpit settings, off by default, person-only) shows a one-line count by level when a session starts, if anything is unacknowledged: once per session (a plugin reload does not repeat it; a resumed session gets it again unless it was shown within half an hour), no desktop notification, no model call.
-- **Notifications off.** With `guardAlerts` off, `/cockpit alerts`, `/cockpit alerts digest`, acknowledgment and `guardDigest` still work on history recorded earlier. Nothing new is recorded or sent, no notification is turned on, and a user who never had alerts on keeps no history and no project tie.
-
-#### Record-only mode and since your last look (v0.5.9)
-
-| `guardAlerts` | `guardRecordOnly` | What happens |
-| --- | --- | --- |
-| off | off | The default. Nothing new is recorded or told. Earlier history can still be read. |
-| on | off | Alerts as always. |
-| off | on | **Recording.** Incidents are written down for `/cockpit alerts` and the digest; no notification, sound, bell or reminder is ever sent for them. |
-| on | on | Alerts as always, which take precedence: `guardRecordOnly` changes nothing, and the status says so. |
-
-- **What is recorded.** The conditions alerts are raised for (a failed security check, a release NO-GO, exhausted verification, an open review at a stop, a blocked run), once per occurrence, with their level and a stable id, resolved when they stop holding and recorded again as a new occurrence if they recur. The outcome is `recorded` (`RECORDED only, no notification`), never SENT, FAILED or DEFERRED. It uses no cooldown or budget, and silence, the notified kinds and quiet hours govern telling, not recording. A critical incident is pinned on the HUD (`GUARD ▲ CRITICAL … RECORDED, no notification`) until acknowledged or resolved.
-- **Switching.** Turning `guardAlerts` on later does not announce an incident that was already recorded; a new one is told as usual. `/cockpit guard test`, which you type, still sends its one labelled test; nothing automatic does.
-- **`SINCE LAST LOOK: 1 CRITICAL · 2 HIGH · 3 NORMAL`** heads `/cockpit alerts`, with a second line of active versus history and what became of the notifications (recorded only, SENT, DEFERRED, NOT SENT, held back, acknowledged). It counts the occurrences not shown at your last look, by id. Displaying the inbox marks what it showed; the digest, the start-of-session line and anything that is not you mark nothing; looking never acknowledges. Across two sessions the marker is best effort: a read and a write of one key, which can show an occurrence as new again but never as seen when it was not shown. It counts records, not what anyone read.
-
-### Alert priorities, quiet hours and the pinned alert row (v0.5.6)
-
-With no new option set, alerts are sent exactly as in v0.5.5. Two things differ by default while alerts are on: the HUD's `GUARD` row now adds `transport not confirmed` until you confirm a test in the session and becomes a pin while a raised condition is open, and a condition raised while the session is silenced is recorded so it stays visible.
-
-**Priorities.** Each alert kind has one fixed level. It orders the HUD row and decides what quiet hours treat as critical; it does not reorder sending.
-
-| Level | Kinds |
-| --- | --- |
-| `CRITICAL` | `security-failure` |
-| `HIGH` | `release-no-go`, `verification-exhausted`, `review-hold` |
-| `NORMAL` | `run-blocked` |
-
-**Notified kinds.** `guardNotifyKinds` is a comma-separated list of the kinds to notify (empty or `all`: every kind; `none`: only the critical one). `security-failure` cannot be turned off. A kind you leave out is not dropped: it is recorded, pinned on the HUD and listed by `/cockpit guard` as `NOT NOTIFIED, kind off`. A list that is not understood notifies every kind and says so.
-
-**Quiet hours.** `guardQuietHours` is a daily window such as `22:00-07:00` (24-hour, may cross midnight; empty is off). `guardQuietTimezone` names the zone it is read in (an IANA name such as `Europe/Berlin`); left empty it is the zone of the machine Claude Code runs on, which `/cockpit guard` shows together with the time there, and warns about over SSH. The window follows that zone's wall clock, so a night with a daylight-saving change is an hour shorter or longer.
-
-- `guardQuietOrdinary` (`defer` by default) and `guardQuietCritical` (`notify` by default) say what each class does in the window.
-- **Deferred** means nothing is written to your terminal: no notification and no sound. This matters because on a bell channel (`terminal_bell`, which is what a terminal such as WezTerm or Konsole gets) the notification *is* the bell, whether or not `guardSound` is on. Cockpit therefore does not "send quietly"; it does not send.
-- A deferred alert is recorded as `deferred`, stays pinned on the HUD for the whole window, and is told once after the window ends if it is still open and you have not acknowledged it. Several deferred conditions are told as one notification, not one each. A reminder that came due in the window is one reminder afterwards, not one per interval missed. All of it stays inside the cooldown and the session budget.
-- An alert you kept (`notify`) is sent as usual and is reported for what it is: `AUDIBLE` on a bell channel, and "whether that makes a sound is decided by your terminal and desktop" on the others. Cockpit cannot make the host deliver a notification silently and does not claim to. The separate `guardSound` cue is not played in the window.
-- A window, a zone or a mode that is not understood turns quiet hours off (`NOT IN FORCE`, with the reason): a setting that was not understood is never the reason an alert went unsent.
-- The same 30-second host timer as persistent alerts looks at the clock afresh each time; nothing is scheduled for a moment ahead, so a clock change is simply read again. No daemon, process or network call is added.
-
-**The pinned alert row.** With alerts on, the HUD's one `GUARD` row becomes a pin while a raised condition is still open and not acknowledged:
-
-```
-GUARD ▲ CRITICAL security check failed · task 3 · notification SENT, not acknowledged · +1 more
-```
-
-It names the gravest condition, the task, what became of its notification (`SENT`, `NOT SENT`, `DEFERRED`, `HELD BACK`, `NOT NOTIFIED`) and how many more are open. It also says `transport not confirmed` while alerts are armed and nobody confirmed a test in this session. It never says a notification was seen. The pin clears when the condition resolves or you run `/cockpit guard ack`; with nothing open and a confirmed transport the row is the plain `GUARD: ARMED` it always was, and with alerts off there is no row. It is one row, shortens to fit the width, is never animated, and is separate from the progress and verification rows.
-
-**Status.** `/cockpit guard` and `/cockpit doctor` show the priorities, which kinds are notified, the quiet-hours window with the zone, the time there and whether it is active, every active condition with its notification state and whether it is acknowledged, how many deferred alerts are owed, and the transport state. The five new settings, like the other alert settings, can be changed only by you in the config menu.
-
-### Verified notification transport (v0.5.5)
-
-An alert is only useful if it reaches you. Cockpit cannot see your screen, so it reports four states and never a fifth:
-
-| State | Meaning |
-| --- | --- |
-| `NOT TESTED` | no test notification was sent in this session |
-| `ATTEMPTED` | a send was made and the host did not report writing it (the reason is shown) |
-| `SENT` | the host reported the channel it wrote to; it cannot tell whether your terminal showed it |
-| `USER CONFIRMED` | you typed `/cockpit guard seen` after a test in this session. Your statement, not proof of delivery |
-
-- `/cockpit guard test` sends one notification that says it is a test and shows a four-character code. `/cockpit guard test sound` also tries the alert sound (it is tried anyway when `guardSound` is on). The sound's outcome is recorded apart from the notification's.
-- `/cockpit guard seen <code>` confirms it with the code the notification showed; the code appears nowhere else. `/cockpit guard seen` without a code is accepted only for a channel that rings the bell and shows no text, and is recorded as confirmed without the code.
-- Limits of its own: one test every 30 seconds, six per session, a confirmation within 10 minutes of its test. Tests use none of the alert budget or cooldown and are not written to the alert records.
-- A confirmation belongs to the session it was made in and to the same kind of connection (an SSH session or not), and counts for 12 hours. A new session starts `NOT TESTED`, and a newer test that was not confirmed replaces an older confirmation.
-- `/cockpit guard` and `/cockpit doctor` show the channel the host reported, whether it is the bell only, the sound outcome, the last test and its age, the last confirmation and whether it applies now, and a warning while alerts are armed and nothing was confirmed in this session.
-- Both commands are accepted only when typed by a person, and neither changes a gate, a hold, a review, a release approval, the task's percentage or an alert.
-
-What is known, from Claude Code's own declarations: its notification channels are iTerm2, kitty, Ghostty and the terminal bell, and when its automatic setting finds no notifying terminal it reports `no-channel`. What follows from that is expectation, not something tested for this release: a terminal that is none of those (KDE's Konsole, for example) should get no popup from the host, and should get the bell if you set Claude Code's `preferredNotifChannel` to `terminal_bell`; what a bell then does (a sound, a taskbar flash, a desktop notification) is your terminal's own setting; and over SSH the sequence or bell should be carried in the terminal stream to your local terminal, which decides what to do with it. None of this was observed on Konsole or over SSH. Cockpit detects that the process was started in an SSH session, cannot detect a reconnect, and cannot tell whether anything arrived. The alert sound is different: it plays on the machine Claude Code runs on. On a remote machine an audio player that answers there plays where you cannot hear it, and the bell, the last player in the chain, is tried only when no audio player answers; that bell is the only part of the sound that could reach you. Cockpit starts no desktop notifier, service or tunnel. Test where you work, and test again after reconnecting.
-
-Cockpit does not take part in Claude Code's permission check. It registers no hook on it and makes no permission query; its guards run before it and can only refuse a call or ask you about it, never approve one.
-
-### Sonnet-led profile
-
-`profile: SONNET_LED` (with orchestration enforced): **Sonnet builds. Haiku scouts. Opus reviews. A router, if you select one, advises.**
-
-- The main loop is requested on Sonnet 5.5 at your own effort (`/effort`, settings, `modelSettings`); Cockpit never rewrites that effort.
-- Haiku scouts and Sonnet workers run as before. AUTO budgets are conservative: 4 helpers in all, 2 Sonnet, 2 Haiku and 1 Opus within them. Explicit `maxSubagents`/pool values still win.
-- Opus 5.5 is never the main loop and never a background model. The main session requests it with `swarm action consult`: a ground (`architecture`, `security`, `repeated-failure`, `asked`, `release`) and a concise evidence packet (objective, architecture, files, alternatives, failures, risk, decision). Cockpit admits it only where the ground holds on evidence: a large or spread change, or architecture named in the prompt; security-sensitive files or a security prompt; the same failure three times in a row; an explicit request for Opus; a release approval. One Opus at a time, an unchanged problem consulted once, one retry after a failed run, and a budget in two separate parts: three discretionary consultations per task (twelve per session, so resetting the task gives no more) and, apart from them, a bounded release-review allowance. A release review is tied to one full commit id of a clean working tree: a returned review is the only one that commit gets, one retry follows an attempt that did not return, the allowance is six per session, and the record lives in the plugin store so a restart does not reset it. An unidentifiable commit (no repository, no commit, uncommitted changes, git silent) fails closed; the approval of one commit never covers another, and a new commit or a changed tree takes the approval back. The admitted consultation runs as `cobalt-cockpit:architect` (read-only, Opus, high effort) and returns a structured decision; Sonnet implements and verifies it. The architect is recognised by name alone: any agent type whose last segment is `architect` passes the role check, Cockpit forces the model and the read-only ownership but not the definition, and nothing is namespace-pinned or authenticated (see [SECURITY.md](SECURITY.md), "Agent identity and the architect role").
-- Opus cannot be reached around this: an unassigned Agent call naming Opus or the architect, an `assign` of tier OPUS, or the architect on a Sonnet task is refused.
-- Mandatory consultations: an explicit request for Opus, a release approval, or a change to security-sensitive files (auth, secrets, credentials, permissions, policy, guards, `.env`, keys) holds the task below 100% until a consultation has returned and the main session has verified its advice with `swarm action verify` (pass or fail, with evidence). Review findings are advice until verified.
-- No router is asked when Opus is admitted: admission is by the rules alone. The optional session router (below) is asked only at the start of a task and never decides admission.
-- HUD and Ledger name the roles (MAIN, SCOUT, ENGINEER, ARCHITECT, LOCAL CONTROL), list each consultation with its ground, whether it returned, its decision and Sonnet's verification, and report host-reported tokens per tier. Requests without usage figures are counted as unreported; nothing is estimated. `/ledger` shows the host's `/cost` total where it keeps one.
-- Context: set Sonnet's compaction window natively (`/autocompact 400k`, stored as `modelSettings["claude-sonnet-5-5"].autoCompactWindow`). Cockpit does not compact or change settings. Subagents keep their own model defaults.
-
-`OPUS_LED` remains the default: Opus commands, as in 0.4.0, and nothing about models or admission changes unless you choose the other profile. What an upgrading user does see is listed in [docs/release-v0.5.0.md](docs/release-v0.5.0.md). `cobaltStrict` turns orchestration on and adds safety restrictions; it never names a model, so strict mode with `SONNET_LED` keeps Sonnet as the main loop.
-
-**Set up SONNET_LED** (keep your other options; CLI values are strings):
-
-```sh
-printf '%s\n' '{"orchestration":"true","profile":"SONNET_LED"}' | claude plugin configure cobalt-cockpit@cobalt-cockpit --values-stdin
-```
-
-Then choose the main effort yourself (`/effort medium` is recommended), optionally `/autocompact 400k` while on Sonnet, and restart Claude Code. `/cockpit version` shows `PROFILE / SONNET_LED · main claude-sonnet-5-5 · Opus on admission`.
-
-**Roll back** to the previous behaviour by setting `profile` to `OPUS_LED` (or removing it) and restarting:
-
-```sh
-printf '%s\n' '{"profile":"OPUS_LED"}' | claude plugin configure cobalt-cockpit@cobalt-cockpit --values-stdin
-```
-
-Run Ledgers and preferences stay readable in both directions. Design, measurements and the v0.5.0 corrections are in [docs/implementation-v0.5-sonnet-led.md](docs/implementation-v0.5-sonnet-led.md) and [docs/delivery-v0.5.0-hardening.md](docs/delivery-v0.5.0-hardening.md).
-
-## Mission Control operations (v0.6.0)
-
-Three read-only views of what Cockpit already records about multi-agent work. None of them changes state, starts, admits or cancels an agent, or clears a hold; none invents a figure the host did not report.
-
-- **`/cockpit agents`** lists the swarm's tasks, the ones that need attention first (stalled, escalated, blocked, queued), with the wave, the capacity in use (`3 of 4 slots · SONNET 2/2 · HAIKU 1/2`), and the host agents Cockpit did not assign. **`/cockpit agents <task>`** shows one task: objective, bound agent, model as observed (or "not observed"), effort as requested, as set on the launch, as applied and as the engine reported (four different things, each "not observed" when it was not), wave, ownership (shortened claims), dependencies, children, last observed activity, the outcome as reported versus as verified by the commander, any escalation, and the blocker.
-- **Blockers** are explained from the swarm's own admission rule, not a second scheduler: waiting for another task, a resource ownership conflict (and over what), agent capacity exhausted (with the numbers admission uses), the commander or an architect occupied, a reservation waiting for the host, a stall (ownership retained), an escalation awaiting the commander, a cancellation awaiting the host, a failure, or a completed result not yet verified. A suggestion is labelled **information only; nothing was changed**, and appears only when the recorded state supports one.
-- **`/cockpit ready`** applies the existing completion rules to the recorded task: open milestones and blockers, the six gates (a pass reported by Claude is labelled as such and never called verified; a pass that went stale is STALE), the Stop guard's hold or missing completion, an unadjudicated Opus review, the goal check's acceptance criteria and open unknowns, and, as notes, pending agent escalations and reported-but-unverified agent results. It says `PERMITS DONE` exactly when the task's own status is DONE, and is otherwise `DOES NOT PERMIT DONE` with what stands in the way. It is an explanation, not an approval.
-
-## Capabilities at a glance
-
-What the hooks module (`hooks/register.tsx`) does with the host's capabilities, for review. Every capability is Claude Code's own; none is supplied by another plugin.
-
-| Kind | What | Why |
-| --- | --- | --- |
-| Hook registrations | `session.start`, `session.end`, `turn.start`, `turn.complete`, `turn.step`, `prompt.submit`, `prompt.compose`, `attribution.text`, `tool.call`, `classic.PostToolUse`, `classic.SessionStart`, `classic.Stop`, `agent.offer`, `agent.spawn`, `config.set`, `plugin.register`, `session.measure`, `ui.render` (AbovePrompt, three panes, AskUserQuestion) | Progress, the HUD, the Run Ledger, the guards and the Stop-hook verification guard. `claude plugin validate --json` lists each and whether it has a fail-closed `.catch` |
-| Command interception | `command.run` for `/model`, `/effort`, `/advisor` (refused only under the Fable and strict-advisor policies you enable), `/login`, `/logout`, `/init` (observed, forwarded) | Policy you opted into; observation |
-| Commands and tools registered | `/cockpit`, `/ledger`, `/replay`, `/park`; tools `mcp__cobalt-cockpit__progress` and `mcp__cobalt-cockpit__swarm` | The operator's commands and the model's progress and swarm reports |
-| Refusals | the tool guard (destructive commands asked or refused), agent-offer/spawn guards, `/config` rows of the guard and alert settings (person-only), `/model`/`/advisor` under the Fable policy, Stop-hook holds under `stopGuard: ENFORCE` | See [SECURITY.md](SECURITY.md#hooks-that-refuse) |
-| Notification | `$.ui.notify` (Cobalt Guard alerts, with `guardAlerts` on; the transport test you type), `$.ui.toast` (the resume line and the `guardDigest` line), the optional checkpoint cue or terminal bell through a local audio player | Owner alerts; nothing is sent in record-only mode |
-| Files written | the host's plugin store; with `telemetry` on, `$XDG_STATE_HOME/cobalt-cockpit/telemetry/` (written with `$.fs.write`) | See below and [PRIVACY.md](PRIVACY.md) |
-| Plugin-store keys | `ledger:<session>` and `ledger-index` (Run Ledgers, eight sessions), `prefs`, `release-reviews`, `stop-checks`, `stop-trust`, `alert-occ:<project>:<id>`, `alert-ack:<project>:<id>`, `alert-seen:<project>`, `alert-digest`; read only: `alert-history` and `alert-history:<project>` (earlier formats, removable with `/cockpit alerts legacy`) | Bounded; project names are hashes of the directory, never paths |
-| Local processes | read-only `git`, `realpath`, `readlink`, `tail`, `find`, `stat`; `mkdir`/`chmod`/`stat`/`rm` on the telemetry directory only; one audio player; the `decision` router only while you select it; the verification script you enrolled, only under `stopGuard: ENFORCE` | Detailed below |
-| Network | none of its own | The decision router in JEV mode, when you select it, is the one program it starts that can |
-
-## Session router
-
-A router is an optional, lightweight classifier that **recommends** how to handle a new task. You choose it per session:
-
-```
-/cockpit router              show the active router (and choose one, in an interactive session)
-/cockpit router off          Cockpit's deterministic policy only (every new session starts here)
-/cockpit router nobodywho    the local decision router, local provider only
-/cockpit router jev          the same router's TypeSafe JEV provider (an external API)
-```
-
-The choice lasts for the session and is never saved. One router is active at a time, and switching discards everything the previous one said. `/cockpit` and `/cockpit version` show it: `ROUTER / OFF`, `ROUTER / NOBODYWHO · LOCAL`, `ROUTER / JEV · CONNECTED`.
-
-What a router may do is recommend one of five routes: handle it in the main session, scout with Haiku, delegate bounded parts to Sonnet, consider a higher effort, or consider an Opus consultation. What it may not do is anything else. It never starts an agent, admits or skips an Opus consultation, or changes a model, an effort, a permission, an ownership rule or a verification gate. Cockpit's rules judge every recommendation:
-
-- The rules go first. When they already settle the route (a mandatory consultation, or a route read off the prompt), no router is asked at all.
-- A recommendation for Opus is refused unless a consultation ground already holds on evidence. You are shown a notice instead, and asking for Opus yourself is a ground the rules honour.
-- An accepted recommendation adds one advisory line to the task. A scout or worker it suggests still goes through assignment and admission.
-- If the router is down, slow, or its answer does not hold up, the deterministic policy decides and the fallback is recorded.
-
-A router is asked once per task, at its start, when the rules do not settle it; never for a tool call, a helper or an Opus admission. What counts as a task: with a plan in progress, the whole plan is one task and prompts inside it are not asked about. Without a plan, each prompt you submit (of 16 characters or more) is a task of its own, so each is asked about. The question is five fixed yes/no features of the task, each asked in both orders. A feature counts only when both orders agree, and the whole reading is discarded when fewer than four of five agree or more than three are affirmed. That is what makes the answer independent of option position: the local classifiers measurably follow position otherwise.
-
-Measured for v0.5.0 on 56 balanced synthetic tasks (details and limits in [docs/delivery-v0.5.0-router.md](docs/delivery-v0.5.0-router.md)): the rules alone classified 45; the router's reading alone was right for 49 with the local Qwen3 4B model and 51 with JEV, and 8 with the router's 0.6B tier-1 specialist, which is why NobodyWho mode uses the router's plain local provider. With the rules going first, as shipped, the outcome was right for 47 (NobodyWho) and 46 (JEV): most of what a router adds is "this is one for Opus", which it may only tell you. JEV answered in about 250 ms per request (p50 246 ms, p95 297 ms), not the 16 ms sometimes quoted.
-
-**JEV sends data off your machine.** In JEV mode ten small requests go to the TypeSafe API through your own decision router. They carry only words from a fixed engineering vocabulary found in the prompt that starts a task, and a size bucket: never prompt text, names, paths or numbers. A prompt in which credential-shaped text is recognised is not sent to any router. See PRIVACY.md.
-
-```sh
-# one time: a copy of your router config with JEV enabled, used by Cockpit's JEV mode only
-mkdir -m 700 -p ~/.config/cobalt-cockpit/router-jev
-python3 -c "import json,os;h=os.path.expanduser;c=json.load(open(h('~/.config/decision-router/config.json')));c.setdefault('jev',{})['enabled']=True;open(h('~/.config/cobalt-cockpit/router-jev/config.json'),'w').write(json.dumps(c,indent=1)+'\n')"
-printf '%s\n' '{"routerConfigDir":"~/.config/cobalt-cockpit/router-jev"}' | claude plugin configure cobalt-cockpit@cobalt-cockpit --values-stdin
-```
-
-Your global router configuration is untouched, so nothing else on the machine reaches JEV. The directory must be your own: one inside the project you are working in is refused, so a repository can never choose where the router sends a request. Without `routerConfigDir`, JEV mode reports `JEV · UNAVAILABLE (jev_disabled)` whenever the router's own switch is off.
-
-## NobodyWho integration
-
-This section is the read-only telemetry; the router you can select is described above. By default, Cockpit checks `$XDG_STATE_HOME/decision-router/ledger.jsonl`, or `$HOME/.local/state/decision-router/ledger.jsonl`. Set `ledgerPath` to override it; set `localControl` false to stop reading.
-
-Only `caller: "claude"` receipts arriving after startup are shown. Decision comes from an `ask` receipt; Pruning comes from a `prune` receipt. They stay separate. Missing, malformed or unavailable ledgers are silent; LOCAL CONTROL is omitted when nothing is observed. This telemetry shows no fake activity, has no cloud fallback and does not depend on local control. (JEV is reachable only as the session router you may select, described above.) Raw prompts, hidden reasoning, receipt details and credential values are not copied into this adapter's telemetry.
-
-## Configuration
+<details>
+<summary><b>All options and their public defaults</b></summary>
 
 Use `/config` or `claude plugin configure cobalt-cockpit@cobalt-cockpit` to inspect options. CLI input values are strings, even for Boolean options:
 
@@ -468,13 +701,53 @@ Restart Claude Code after changing configuration. To enable just Fable blocking 
 | `profile` | `OPUS_LED` (legacy: Opus main loop); `SONNET_LED` runs the main loop on Sonnet and consults Opus on admission |
 | `routerConfigDir` | empty; a decision-router configuration directory you created for the JEV router mode, used only while a session's router is JEV |
 
-## Compatibility
+Every option with its type and full description, including the Stop guard and alert options this summary leaves out: [docs/configuration.md](docs/configuration.md).
 
-Linux and macOS terminals use standard text/Braille rendering; Kitty or WezTerm is not required. Narrow widths drop detail progressively. Desktop uses SVG where available; terminal retains text/Raster equivalents. Core commands and guards do not need desktop graphics. Image viewing delegates to Claude Code.
+</details>
 
-Sounds try PipeWire, PulseAudio, ALSA, ffplay, mpv, SoX, Canberra, macOS afplay, then a terminal bell. Missing/failing players fall back to silence. `/cockpit mute` disables cues. macOS behavior is covered by the engine test harness, not a physical macOS run. Windows is not tested. Mods may be disabled by organizational policy; this dashboard is intended for Claude Code, not claude.ai/Cowork.
+<details>
+<summary><b>Read security guarantees</b></summary>
 
-## Privacy
+- [Hooks that refuse](SECURITY.md#hooks-that-refuse): every hook that can refuse an action, and that each fails closed.
+- [Environment and process access](SECURITY.md#environment-and-process-access): the processes Cockpit starts and the variables it reads by name.
+- [Agent identity and the architect role](SECURITY.md#agent-identity-and-the-architect-role): what is and is not authenticated about a subagent.
+- [Guard limitations](SECURITY.md#guard-limitations): what the heuristics cannot recognize.
+- [Local persistence](SECURITY.md#local-persistence) and [Export and sharing](SECURITY.md#export-and-sharing).
+- [Reporting a vulnerability](SECURITY.md#reporting-a-vulnerability) and [Secret scanning](SECURITY.md#secret-scanning).
+
+</details>
+
+<details>
+<summary><b>Known limits, and what is not verified</b></summary>
+
+- Verification gates use observed exit status and explicit reported evidence, not proof of correctness. Goal-check evidence is recorded as `reported`, never as independently verified.
+- The guards are heuristic and cannot recognize every shell program or obfuscated command. They are not a sandbox.
+- Redaction is heuristic: review exports before sharing, and never export secrets.
+- An effort level is requested, not guaranteed; the level the Ledger shows as applied is host-resolution evidence, not an independently captured wire receipt.
+- A notification marked `SENT` means the host reported writing it to the channel it names, never that you saw it. Terminal behaviour on Konsole and over SSH is expectation, not something observed.
+- macOS behavior is covered by the engine test harness, not a physical macOS run. Windows is not tested.
+- CI runs strict validation, the offline tests, the public audit and the whitespace check but does **not** type-check; TypeScript is a separate manual release gate.
+- Anthropic Plugin Directory status: NOT VERIFIED. Installation is from this repository's own marketplace, and this README makes no claim of a Directory listing or approval ([docs/implementation-v0.6.0.md](docs/implementation-v0.6.0.md)).
+
+</details>
+
+### Capabilities at a glance
+
+What the hooks module (`hooks/register.tsx`) does with the host's capabilities, for review. Every capability is Claude Code's own; none is supplied by another plugin.
+
+| Kind | What | Why |
+| --- | --- | --- |
+| Hook registrations | `session.start`, `session.end`, `turn.start`, `turn.complete`, `turn.step`, `prompt.submit`, `prompt.compose`, `attribution.text`, `tool.call`, `classic.PostToolUse`, `classic.SessionStart`, `classic.Stop`, `agent.offer`, `agent.spawn`, `config.set`, `plugin.register`, `session.measure`, `ui.render` (AbovePrompt, three panes, AskUserQuestion) | Progress, the HUD, the Run Ledger, the guards and the Stop-hook verification guard. `claude plugin validate --json` lists each and whether it has a fail-closed `.catch` |
+| Command interception | `command.run` for `/model`, `/effort`, `/advisor` (refused only under the Fable and strict-advisor policies you enable), `/login`, `/logout`, `/init` (observed, forwarded) | Policy you opted into; observation |
+| Commands and tools registered | `/cockpit`, `/ledger`, `/replay`, `/park`; tools `mcp__cobalt-cockpit__progress` and `mcp__cobalt-cockpit__swarm` | The operator's commands and the model's progress and swarm reports |
+| Refusals | the tool guard (destructive commands asked or refused), agent-offer/spawn guards, `/config` rows of the guard and alert settings (person-only), `/model`/`/advisor` under the Fable policy, Stop-hook holds under `stopGuard: ENFORCE` | See [SECURITY.md](SECURITY.md#hooks-that-refuse) |
+| Notification | `$.ui.notify` (Cobalt Guard alerts, with `guardAlerts` on; the transport test you type), `$.ui.toast` (the resume line and the `guardDigest` line), the optional checkpoint cue or terminal bell through a local audio player | Owner alerts; nothing is sent in record-only mode |
+| Files written | the host's plugin store; with `telemetry` on, `$XDG_STATE_HOME/cobalt-cockpit/telemetry/` (written with `$.fs.write`) | See below and [PRIVACY.md](PRIVACY.md) |
+| Plugin-store keys | `ledger:<session>` and `ledger-index` (Run Ledgers, eight sessions), `prefs`, `release-reviews`, `stop-checks`, `stop-trust`, `alert-occ:<project>:<id>`, `alert-ack:<project>:<id>`, `alert-seen:<project>`, `alert-digest`; read only: `alert-history` and `alert-history:<project>` (earlier formats, removable with `/cockpit alerts legacy`) | Bounded; project names are hashes of the directory, never paths |
+| Local processes | read-only `git`, `realpath`, `readlink`, `tail`, `find`, `stat`; `mkdir`/`chmod`/`stat`/`rm` on the telemetry directory only; one audio player; the `decision` router only while you select it; the verification script you enrolled, only under `stopGuard: ENFORCE` | Detailed below |
+| Network | none of its own | The decision router in JEV mode, when you select it, is the one program it starts that can |
+
+### Privacy
 
 The Run Ledger and the local model telemetry are local. Cockpit observes tool calls, paths, agent events, token/context telemetry, Git state and verification. In-session task state can contain user text; persisted checkpoints retain explicit goals and milestone labels. Hidden reasoning is never stored. Redaction is heuristic: review exports before sharing, and never export secrets. The full policy is in [PRIVACY.md](PRIVACY.md); see also [SECURITY.md](SECURITY.md).
 
@@ -486,11 +759,59 @@ It reads files: the decision-router ledger (read-only, optional, `localControl`)
 
 It makes no network request of its own: no fetch, no model call, no MCP call. The one program it starts that can is the decision router in JEV mode, in a session where you selected it. Its two prompt hooks add text to the request Claude Code already sends — the discipline, safety and policy sections of the system prompt, and one line of task status — which is the only route by which anything Cockpit observed reaches a model. The call sites of the paths that existed in 0.3.2 are listed in [docs/implementation-v0.3.2.md](docs/implementation-v0.3.2.md); the fingerprint, telemetry, doctor and Stop-guard additions are described in [docs/implementation-v0.5.2.md](docs/implementation-v0.5.2.md).
 
-The guards are not a sandbox: they use recognizable syntax and your confirmation. Keep Claude Code's permission controls enabled.
+### Session router
 
-## Development
+A router is an optional, lightweight classifier that **recommends** how to handle a new task. You choose it per session:
 
-Load the folder once in an interactive session (`claude --plugin-dir /path/to/cobalt-cockpit`, folder trusted by you) so the host writes its API declarations; a headless launch does not write them on Claude Code 2.1.295 or later. CI runs strict validation, the offline tests, the public audit and the whitespace check on Claude Code 2.1.296 but does **not** type-check: `scripts/typecheck-host.sh` is the mandatory manual TypeScript gate for a release ([docs/release-checklist-v0.5.3.md](docs/release-checklist-v0.5.3.md)). TypeScript 5.9.3 is the pinned compiler; Python 3 runs the portability audit. The suite's default host version is 2.1.288, and the native-effort and directory-validation paths are exercised at 2.1.294.
+```
+/cockpit router              show the active router (and choose one, in an interactive session)
+/cockpit router off          Cockpit's deterministic policy only (every new session starts here)
+/cockpit router nobodywho    the local decision router, local provider only
+/cockpit router jev          the same router's TypeSafe JEV provider (an external API)
+```
+
+The choice lasts for the session and is never saved. One router is active at a time, and switching discards everything the previous one said. `/cockpit` and `/cockpit version` show it: `ROUTER / OFF`, `ROUTER / NOBODYWHO · LOCAL`, `ROUTER / JEV · CONNECTED`.
+
+**JEV sends data off your machine.** In JEV mode ten small requests go to the TypeSafe API through your own decision router. They carry only words from a fixed engineering vocabulary found in the prompt that starts a task, and a size bucket: never prompt text, names, paths or numbers. A prompt in which credential-shaped text is recognised is not sent to any router. See PRIVACY.md.
+
+```sh
+# one time: a copy of your router config with JEV enabled, used by Cockpit's JEV mode only
+mkdir -m 700 -p ~/.config/cobalt-cockpit/router-jev
+python3 -c "import json,os;h=os.path.expanduser;c=json.load(open(h('~/.config/decision-router/config.json')));c.setdefault('jev',{})['enabled']=True;open(h('~/.config/cobalt-cockpit/router-jev/config.json'),'w').write(json.dumps(c,indent=1)+'\n')"
+printf '%s\n' '{"routerConfigDir":"~/.config/cobalt-cockpit/router-jev"}' | claude plugin configure cobalt-cockpit@cobalt-cockpit --values-stdin
+```
+
+Your global router configuration is untouched, so nothing else on the machine reaches JEV. The directory must be your own: one inside the project you are working in is refused, so a repository can never choose where the router sends a request. Without `routerConfigDir`, JEV mode reports `JEV · UNAVAILABLE (jev_disabled)` whenever the router's own switch is off.
+
+What a router may recommend, how Cockpit's rules judge its answer, what was measured, and the read-only NobodyWho telemetry (`localControl`): [docs/session-router.md](docs/session-router.md).
+
+## Deep documentation
+
+Nothing was dropped from the earlier README: the long sections live in topic files, and this page links to each.
+
+| Topic | Where |
+| --- | --- |
+| Orchestration, elastic execution, ownership, dynamic reasoning | [docs/orchestration.md](docs/orchestration.md) |
+| The Sonnet-led profile | [docs/sonnet-led.md](docs/sonnet-led.md) |
+| Discovery, decisions, the goal check and its limits | [docs/verification.md](docs/verification.md) |
+| Owner alerts, the inbox, quiet hours, notification transport | [docs/cobalt-guard.md](docs/cobalt-guard.md) |
+| Session router and NobodyWho telemetry | [docs/session-router.md](docs/session-router.md) |
+| Every option and default | [docs/configuration.md](docs/configuration.md) |
+| Development and release gates | [docs/development.md](docs/development.md) |
+| Privacy and security policies | [PRIVACY.md](PRIVACY.md) · [SECURITY.md](SECURITY.md) |
+| Changes by version | [CHANGELOG.md](CHANGELOG.md) |
+| Implementation notes, release notes, delivery reports, submission preparation | [docs/README.md](docs/README.md) |
+| This page's artwork and demo | [docs/assets/README.md](docs/assets/README.md) |
+
+### Optional companion: memory and browser
+
+Cockpit is complete on its own: it needs no memory service, no browser, no database and no extra inference, and this repository contains none of that code.
+
+[`cobalt-capabilities`](https://github.com/echelong/cobalt-capabilities) is a separate plugin, in its own repository with its own releases, for people who want explicit project memory (through a Hindsight service they run) or bounded browser evidence (through an Obscura service they run) alongside Cockpit v0.4.0 or later. It is not installed with Cockpit, both of its capabilities are off until configured, and its privacy and security documentation is its own. Install instructions and limits are in that repository's README.
+
+## Contributing
+
+All fixtures are synthetic. Test with an isolated HOME/config/state directory. Do not use a real telemetry ledger or private session capture in fixtures.
 
 ```sh
 claude plugin validate --strict .
@@ -502,16 +823,8 @@ python3 scripts/audit-public.py
 python3 scripts/make-icon.py    # re-render the listing icon from the HUD portrait
 ```
 
-To develop under Auto mode, launch with `scripts/dev-launch.sh`, which loads an out-of-tree snapshot of the plugin and refuses to start if the snapshot is empty or overlaps the repository. An empty `--plugin-dir` resolves to the working directory and makes Claude Code protect the repository from Auto-mode edits. Root cause, preflight and the release acceptance procedure: [docs/development-auto-mode.md](docs/development-auto-mode.md).
-
-All fixtures are synthetic. Test with an isolated HOME/config/state directory. Do not use a real telemetry ledger or private session capture in fixtures.
+Loading the plugin for development, the manual TypeScript gate and development under Auto mode: [docs/development.md](docs/development.md). To report a vulnerability, see [SECURITY.md](SECURITY.md#reporting-a-vulnerability).
 
 ## License
 
 MIT. Adapted work and required upstream MIT notices are preserved in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
-
-## Optional companion: memory and browser
-
-Cockpit is complete on its own: it needs no memory service, no browser, no database and no extra inference, and this repository contains none of that code.
-
-[`cobalt-capabilities`](https://github.com/echelong/cobalt-capabilities) is a separate plugin, in its own repository with its own releases, for people who want explicit project memory (through a Hindsight service they run) or bounded browser evidence (through an Obscura service they run) alongside Cockpit v0.4.0 or later. It is not installed with Cockpit, both of its capabilities are off until configured, and its privacy and security documentation is its own. Install instructions and limits are in that repository's README.

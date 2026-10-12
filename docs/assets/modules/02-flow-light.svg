@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 232" width="400" height="232" role="img" aria-label="02 FLOW">
+<defs><clipPath id="box"><rect x="-0.41" y="-0.41" width="4.82" height="6.82"/></clipPath><style>text{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace;font-kerning:none}</style></defs>
+<path d="M14 1H399V217L385 231H1V14Z" fill="#FFFFFF" stroke="#B4C1E0" stroke-width="1.5"/>
+<path d="M1 44V14L14 1H52" fill="none" stroke="#0B7C93" stroke-width="3"/>
+<path d="M399 184V217L385 231H348" fill="none" stroke="#0B7C93" stroke-width="3" opacity=".55"/>
+<text x="30" y="52" font-size="26" fill="#0B7C93" textLength="31.2" font-weight="700">02</text>
+<text x="73.2" y="52" font-size="13" fill="#646A7E" textLength="58.8">MODULE</text>
+<g transform="translate(318 76) scale(1.25)"><circle cx="-30" cy="4" r="7" fill="#0B7C93"/><path d="M-18 1H-8M-18 7H-8" stroke="#0B7C93" stroke-width="2.2" stroke-dasharray="2 4" stroke-linecap="round"/><path d="M0 -6l10 10l-10 10l-10 -10z" fill="#0B7C93"/><path d="M14 7H24" stroke="#646A7E" stroke-width="2.2" stroke-dasharray="2 4" stroke-linecap="round"/><circle cx="32" cy="4" r="6.5" fill="none" stroke="#646A7E" stroke-width="2"/></g>
+<g transform="translate(33.12 123.12) scale(7.6)" fill="none" stroke="#0B1020" stroke-width="0.82" stroke-linecap="square" stroke-linejoin="miter"><path d="M4 0H0V6M0 3H3"/><path d="M0 0V6H4" transform="translate(5.38 0)"/><path d="M1 0H3L4 1V5L3 6H1L0 5V1Z" transform="translate(10.76 0)"/><path d="M0 0V6L2 3.4L4 6V0" transform="translate(16.14 0)" clip-path="url(#box)"/></g>
+<path d="M30 186H370" stroke="#CCD6EE" stroke-width="1.5"/>
+<text x="30" y="210" font-size="17" fill="#646A7E" textLength="137.4">/cockpit flow</text>
+</svg>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 232" width="400" height="232" role="img" aria-label="03 INSPECT">
+<defs><clipPath id="box"><rect x="-0.41" y="-0.41" width="4.82" height="6.82"/></clipPath><style>text{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace;font-kerning:none}</style></defs>
+<path d="M14 1H399V217L385 231H1V14Z" fill="#FFFFFF" stroke="#B4C1E0" stroke-width="1.5"/>
+<path d="M1 44V14L14 1H52" fill="none" stroke="#3D74FF" stroke-width="3"/>
+<path d="M399 184V217L385 231H348" fill="none" stroke="#3D74FF" stroke-width="3" opacity=".55"/>
+<text x="30" y="52" font-size="26" fill="#3D74FF" textLength="31.2" font-weight="700">03</text>
+<text x="73.2" y="52" font-size="13" fill="#646A7E" textLength="58.8">MODULE</text>
+<g transform="translate(318 76) scale(1.25)"><circle cx="0" cy="4" r="22" fill="none" stroke="#3D74FF" stroke-width="2.4"/><path d="M0 -26V-12M0 20V34M-30 4H-16M16 4H30" stroke="#3D74FF" stroke-width="2.4" stroke-linecap="round"/><rect x="-5" y="-1" width="10" height="10" fill="#3D74FF"/></g>
+<g transform="translate(33.12 123.12) scale(7.6)" fill="none" stroke="#0B1020" stroke-width="0.82" stroke-linecap="square" stroke-linejoin="miter"><path d="M0 0V6"/><path d="M0 6V0L4 6V0" transform="translate(1.38 0)" clip-path="url(#box)"/><path d="M4 0H1L0 1V2L1 3H3L4 4V5L3 6H0" transform="translate(6.76 0)"/><path d="M0 6V0H3L4 1V2.7L3 3.7H0" transform="translate(12.14 0)"/><path d="M4 0H0V6H4M0 3H3" transform="translate(17.52 0)"/><path d="M4 0H1L0 1V5L1 6H4" transform="translate(22.9 0)"/><path d="M0 0H4M2 0V6" transform="translate(28.28 0)"/></g>
+<path d="M30 186H370" stroke="#CCD6EE" stroke-width="1.5"/>
+<text x="30" y="210" font-size="17" fill="#646A7E" textLength="158.6">/cockpit agents</text>
+</svg>

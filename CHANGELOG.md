@@ -11,6 +11,7 @@ Details, the Directory compliance work, measurements and the acceptance procedur
 - Directory capability-inspection repair: every call that passes `$` to a helper of the module is a statement of its own (sixteen sites hoisted; a dead helper removed); the host analyzer's report is unchanged. `scripts/check-capability-shape.sh` (a self-tested local approximation of the Directory's guidance, now in CI) guards the shape.
 - `scripts/acceptance-harness.sh`: two genuine Claude Code processes against a disposable store (no model, no credentials, no operator data).
 - README capability table; SECURITY and PRIVACY updated.
+- Documentation only, no runtime change: the README is restructured as a front page (banner, a captured demo, module panels, a profile comparison, expandable reference), and its long sections moved word for word into topic files under `docs/` ([docs/README.md](docs/README.md)). The capability table and the account of what Cockpit runs, reads and sends stay in the README. The demo is synthetic input run through the plugin's own renderers in the offline test host, and is labelled so ([docs/assets/README.md](docs/assets/README.md)).
 
 ## Unreleased (0.5.9) — Record-only mode and the since-last-look summary
 
