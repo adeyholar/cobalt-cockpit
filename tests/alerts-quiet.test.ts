@@ -451,15 +451,16 @@ describe('in a run: quiet hours', () => {
     await progress($, { action: 'status' })
     expect(w.notified.length).toBe(1)
   })
-  test('with reminders on, a long window owes one reminder afterwards, not one per interval missed', { options: { guardAlerts: true, guardCooldownSec: 30, guardRepeat: true, guardRepeatSec: 600, guardMaxReminders: 3, guardMaxAlerts: 10, guardQuietHours: '00:20-06:00', guardQuietTimezone: 'UTC' } }, async ($, on) => {
+  test('with reminders on, a long window owes one reminder afterwards, not one per interval missed', { options: { guardAlerts: true, guardCooldownSec: 30, guardRepeat: true, guardRepeatSec: 600, guardMaxReminders: 3, guardMaxAlerts: 10, guardQuietHours: '00:20-01:20', guardQuietTimezone: 'UTC' } }, async ($, on) => {
     const w = world(on); const held = hostState(on, {})
     await start($); await planAndComplete($, 1); await block($)
     // 00:16: before the window, so it is sent
     expect(w.notified.length).toBe(1)
-    await w.clock.advance(5 * HOUR)
+    // an hour of window is five reminder intervals missed (the timer looks every 30 seconds throughout)
+    await w.clock.advance(55 * MIN)
     expect(w.notified.length).toBe(1)
-    // 06:00 passes: exactly one reminder, then the next a whole interval later
-    await w.clock.advance(45 * MIN)
+    // 01:20 passes: exactly one reminder, then the next a whole interval later
+    await w.clock.advance(10 * MIN)
     expect(w.notified.length).toBe(2)
     expect(w.notified[1]!.text).toContain('still open (reminder 1 of 3)')
     await w.clock.advance(8 * MIN)
