@@ -258,7 +258,7 @@ const finishObserved = (s: Swarm, id: string, reason: string, conclusion: string
 type Candidate = { sha: string } | { sha: null; why: 'dirty' | 'unknown' }
 const candidateOf = async ($: EngineInterface): Promise<Candidate> => {
   try {
-    const run = (argv: string[]) => $.process.run(['git', '--no-optional-locks', ...argv], { timeoutMs: GIT_TIMEOUT_MS })
+    const run = (argv: string[]) => $.process.run(['git', ...GIT_SAFE, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
     const head = await run(['rev-parse', '--verify', 'HEAD'])
     if (head.exitCode !== 0 || head.isStdoutTruncated) return { sha: null, why: 'unknown' }
     const status = await run(['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'])

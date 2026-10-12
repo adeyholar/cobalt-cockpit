@@ -86,6 +86,8 @@ export type World = {
   head: string
   /** The work tree git reports for `rev-parse --show-toplevel`. */
   top: string
+  /** A repository-controlled fsmonitor / replace ref: `status` reports clean unless git is run with the hardened flags (see GIT_SAFE). */
+  statusHidden: boolean
   /** Whether `git status --porcelain` reports changes (a release candidate must be clean). */
   uncommitted: boolean
   players: Record<string, PlayerBehavior>
@@ -191,6 +193,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     tree: {},
     head: 'a'.repeat(40),
     top: '/work/example',
+    statusHidden: false,
     uncommitted: false,
     players: { 'pw-play': 'ok' },
     outputs: {},
@@ -401,7 +404,11 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
         return ran(0, git.includes('--diff-filter=D') ? '' : seen.join('\0') + (seen.length ? '\0' : ''))
       }
-      if (git[0] === 'status' && git.includes('--porcelain')) return ran(0, w.uncommitted ? ' M src/api.js\n' : '')
+      if (git[0] === 'status' && git.includes('--porcelain')) {
+        const hardened = e.argv.includes('--no-replace-objects') && e.argv.includes('core.fsmonitor=false') && e.argv.includes('core.untrackedCache=false')
+
+        return ran(0, w.uncommitted && !(w.statusHidden && !hardened) ? ' M src/api.js\n' : '')
+      }
       if (git[0] === 'ls-files' && git.includes('-o') && w.lsFilesWarning !== null) {
         const out = git.includes('-i') ? w.ignoredEntries : w.untracked
 
