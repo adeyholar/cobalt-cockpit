@@ -50,7 +50,7 @@ HUD rows and command output are drawn exactly as captured. The three colour name
 - The banner's motion is CSS inside the SVG: a scan across the swarm panel, two pulses of evidence travelling up to the commander, the Neural Flow marker, a breathing commander node and a cursor. The picture is complete without any of it, and `prefers-reduced-motion: reduce` switches all of it off. There is no script and no external font or image in any SVG.
 - Text in the SVG files uses the viewer's monospace font with a pinned `textLength`, so another font changes the letterforms and never the layout. The title and the module words are drawn shapes, and so are the marks, checks and diamonds; the middle dot is the one typed character outside ASCII.
 - The demo is a GIF because a terminal's Braille, block and box-drawing glyphs fall back to different fonts on different systems, and a raster is exact everywhere. A GIF cannot honour `prefers-reduced-motion` on its own, so the README offers the poster to browsers that ask for reduced motion and links it as a static frame.
-- On a narrow screen the loop is too small to read. The README says so beside it and gives the same frames as text.
+- On a narrow screen the loop is too small to read. The README says so beside it and gives the main frames as text.
 
 ## Regenerating
 
