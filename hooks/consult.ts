@@ -377,8 +377,8 @@ export type GitCandidate = { sha: string } | { sha: null; why: 'dirty' | 'unknow
 /**
  * A review's release ground against what git now says. Cleared for a commit that has moved or a tree that has changed:
  * withdrawn. Not cleared, and git names the clean commit of an eligible stored review: cleared again, marked reused.
- * Git not answering is neither: a held approval is kept (nothing shows it moved), none is granted or restored, and the
- * stored records are never touched. An approval with no commit behind it (stored before v0.5.1) does not stand.
+ * An unknown current candidate suspends clearance without changing stored history. Nothing is granted or restored until
+ * the exact reviewed commit is reliably clean again. An approval with no commit behind it does not stand.
  */
 export const revalidateRelease = (review: ReviewRequirement, now: GitCandidate, history: readonly ReleaseRecord[]): ReviewRequirement => {
   if (!review.grounds.includes('release')) return review
@@ -388,7 +388,7 @@ export const revalidateRelease = (review: ReviewRequirement, now: GitCandidate, 
   const withoutRelease = (list: readonly ClearedGround[] | undefined): ClearedGround[] => (list ?? []).filter(x => x.ground !== 'release' && x.via !== 'release')
   if (held === undefined && review.state === 'adjudicated') return { ...rest, cleared: withoutRelease(review.cleared), consult: null, state: 'required' }
   if (held !== undefined) {
-    if (now.sha === held.candidate || (now.sha === null && now.why === 'unknown')) return review
+    if (now.sha === held.candidate) return review
 
     return { ...rest, cleared: withoutRelease(review.cleared), consult: open ? review.consult : null, state: open ? review.state : 'required' }
   }

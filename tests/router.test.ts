@@ -336,7 +336,7 @@ describe('the session router through the host', () => {
     const before = routerRuns(w).length
     const reply = await text(command($, 'router jev'))
     expect(reply).toContain('ROUTER / JEV · CONNECTED · jev-1.13.0')
-    expect(reply).toContain('its first 400 characters are sent to JEV in ten small requests')
+    expect(reply).toContain('only fixed-vocabulary engineering keywords and a size bucket are sent to JEV in ten small requests')
     expect(reply).toContain('Each prompt you submit outside a planned task counts as a new task')
     expect(reply).toContain('with the router configuration at /home/op/.config/cobalt-cockpit/router-jev (routerConfigDir)')
     expect(reply).toContain('not a guarantee')

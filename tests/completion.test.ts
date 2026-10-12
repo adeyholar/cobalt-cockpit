@@ -377,7 +377,8 @@ describe('ignored files: relevance, volatility and coverage', () => {
     expect(scriptRuns(w)).toBe(0)
     expect(taskOf(h).status).toBe('done')
     expect(w.statCalls).toBeLessThanOrEqual(2)                                        // 30000 volatile entries were never stat'ed
-    expect(gitRuns(w) - before).toBeLessThanOrEqual(16)
+    // Root identity and effective-filter preflight add bounded reads independent of cache size.
+    expect(gitRuns(w) - before).toBeLessThanOrEqual(20)
   })
   test('volatile does not exclude an untracked file, whatever the prefix', guard({ stopVolatile: 'dist/' }), async ($, on) => {
     const { w, h } = await roTask($, on)
@@ -447,6 +448,15 @@ describe('M-2: a clean filter or an attributes file cannot hide a modified track
     await stop($)
     expect(scriptRuns(w)).toBe(0)
     expect(taskOf(h).status).toBe('done')
+  })
+  test('raw tracked bytes change while status, diff and the cached dirty listing remain empty: CHANGED', guard(), async ($, on) => {
+    const { w, h } = await roTask($, on, w => { w.headBlobs['src/a.ts'] = blobOf('original'); w.watched['src/a.ts'] = 'original'; w.indexFlags = 'H src/a.ts\0' })
+    w.watched['src/a.ts'] = 'changed bytes'
+    w.statDirty = []; w.uncommitted = false
+    await stop($)
+    expect(taskOf(h).kind).toBe('coding')
+    expect(scriptRuns(w)).toBeGreaterThan(0)
+    notFinished(taskOf(h))
   })
   test('an attributes line added mid-task is a change in itself', guard(), async ($, on) => {
     const { w, h } = await roTask($, on)
@@ -584,7 +594,7 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     await finishAll($)
     const before = gitRuns(w)
     await stop($)
-    expect(gitRuns(w) - before).toBeLessThanOrEqual(30)
+    expect(gitRuns(w) - before).toBeLessThanOrEqual(32) // includes authoritative commit-tree enumeration
     expect(scriptRuns(w)).toBe(0)
     expect(taskOf(h).status).toBe('done')
   })
@@ -714,6 +724,19 @@ describe('F3: a background change after the guard completed a task', () => {
     w.tree['src/bg.ts'] = 'changed by a background process'
     const text = await progress($, { action: 'status' })
     expect(text).not.toMatch(/\bDONE\b|100%/)
+    notFinished(taskOf(h))
+  })
+})
+
+describe('active clean-filter refreshed-index protection', () => {
+  test('a filter-normalized index cannot make an edited readonly task complete without a check', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await prompt($, 'explain the parser'); await enroll($)
+    await progress($, { action: 'plan', kind: 'readonly', milestones: FIVE }); await finishAll($)
+    w.gitFilterConfig = 'filter.hide.clean\nprintf original\0'; w.gitFilterAttributes = 'a\0filter\0hide\0'; w.indexFlags = 'H a\0'
+    w.uncommitted = false; w.statDirty = []; w.watched.a = 'MALICIOUS CHANGE'
+    await stop($)
+    expect(w.runs.filter(argv => argv[0] === SCRIPT).length).toBeGreaterThan(0)
     notFinished(taskOf(h))
   })
 })

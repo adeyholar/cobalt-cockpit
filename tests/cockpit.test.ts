@@ -210,7 +210,7 @@ describe('sounds', () => {
     await prompt($, 'x')
     await planAndComplete($, 4)
     await w.clock.settle()
-    expect(w.runs.filter(argv => argv[0] !== 'git').map(argv => argv[0])).toEqual(['pw-play', 'paplay'])
+    expect(w.runs.filter(argv => argv.some(arg => arg.endsWith('.wav'))).map(argv => argv[0])).toEqual(['pw-play', 'paplay'])
 
     await passAllGates($)
     await progress($, { action: 'complete', milestone: 'm5' })
@@ -247,11 +247,11 @@ describe('sounds', () => {
     await prompt($, 'x')
     await planAndComplete($, 4)
     await w.clock.settle()
-    const tried = w.runs.filter(argv => argv[0] !== 'git').length
+    const tried = w.runs.filter(argv => argv.some(arg => arg.endsWith('.wav'))).length
     await passAllGates($)
     await progress($, { action: 'complete', milestone: 'm5' })
     await w.clock.settle()
-    expect(w.runs.filter(argv => argv[0] !== 'git')).toHaveLength(tried)
+    expect(w.runs.filter(argv => argv.some(arg => arg.endsWith('.wav')))).toHaveLength(tried)
   })
 
   test('sounds off in the configuration: no player is run', { options: { sounds: false } }, async ($, on) => {
@@ -260,7 +260,7 @@ describe('sounds', () => {
     await prompt($, 'x')
     await planAndComplete($, 4)
     await w.clock.settle()
-    expect(w.runs.filter(argv => argv[0] !== 'git')).toEqual([])
+    expect(w.runs.filter(argv => argv.some(arg => arg.endsWith('.wav')))).toEqual([])
   })
 
   test('/cockpit mute silences the cues', async ($, on) => {

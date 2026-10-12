@@ -42,9 +42,11 @@ Tests: `tests/guard-settings.test.ts`.
 
 The refusal budget of a held task is authoritative on the task: `spentOf` is the larger of the run of unfinished checks in the log and the hold's own `refusals` counter, which is written in the same step as the hold and survives a restart with the task. A log that was evicted, flooded by other tasks, lost, corrupted or never written cannot give a held task its attempts back. A person's release removes the hold and with it the counter, as before. The log is still bounded per task (16) and in total (128, the newest four tasks protected), but nothing depends on it for the budget.
 
-Not claimed: cross-process consistency. The plugin store has no atomic compare-and-set, so two sessions writing the durable check log at the same moment can lose a record; the counter lives in the task state, which is why the budget does not depend on that log. A durable store that cannot be written is covered by the same property (the write is best-effort); the host test world has no hook to fail `store.set`, so this is argued from the code and from the lost-log tests, not exercised by a failing write.
+Hold replacement preserves `max(existingRefusals, newRefusals)`, including the Stop exception handler. An unreadable existing counter exhausts the allowance. Each attempt is reserved on the task before executing the verifier or writing its log. A rejected task-state write prevents that execution; a failed result-ledger write or durable write cannot restore the reserved attempt. `tests/refusal-recovery.test.ts` injects these failures; five of its six regressions fail against the original candidate. Pre-field legacy holds with demonstrated unreadable records also exhaust the unknown allowance until a person releases them; valid v0.5.2 explicit counters retain their value.
 
-Tests: `tests/check-retention.test.ts`, `tests/refusal-budget.test.ts` (1,000 unrelated checks, a missing, corrupted, wrong-version or garbage log, an existing 0.5.2 hold).
+Not claimed: cross-process consistency. The durable store has no atomic compare-and-set. Different host sessions can overwrite saved task/checkpoint state; a process terminated before successful persistence can lose its in-session reservation at restart. No code can establish durability when the host rejects all state/store writes. These limitations are not solved by a same-process hold counter or by versioned host-state updates.
+
+Tests: `tests/refusal-recovery.test.ts`, `tests/stophold.test.ts`, `tests/check-retention.test.ts`, `tests/refusal-budget.test.ts` (1,000 unrelated checks, a missing, corrupted, wrong-version or garbage log, an existing 0.5.2 hold).
 
 ## L3. Index flags and git configuration in the release clean-tree check
 
@@ -67,4 +69,20 @@ Tests: `tests/stopguard.test.ts`.
 
 ## Marketplace
 
-`hooks/register.tsx` is above 256 KiB. That threshold is a reported figure, not a confirmed directory requirement, and no split is part of this release. See `docs/marketplace-submission.md`.
+The current official pre-submission checklist confirms non-image/font files at least 256 KiB require manual reviewer inspection. `hooks/register.tsx` and the two bundled WAV cues are disclosed manual-review holds, not locally certifiable approvals. No split is required by that rule. See `docs/submission-compliance-v0.5.3.md` and `docs/marketplace-submission.md`.
+
+## Final recovery: Git identity and clean-tree evidence
+
+A local clean filter plus `git add` was reproduced hiding changed file bytes with clean status, ordinary `H` index flags and an empty stat-dirty listing. The old raw stat-dirty check therefore was insufficient after an index refresh. `core.worktree` was reproduced redirecting a dirty intended folder to a clean copy. Candidate and fingerprint checks now match canonical Git root plus prefix to the host session directory, and reject effective clean/process commands active on tracked attributes before status/diff. Dormant global LFS configuration, explicit empty filter overrides, valid subdirectories and linked worktrees remain supported. The HUD uses the same preflight. Candidate HEAD/status/index reads reject stderr and truncation; an unreadable untracked directory was independently reproduced producing empty status with a warning, now UNKNOWN. Replace-object, fsmonitor, untracked-cache and index-flag protections remain. Tests: `tests/git-identity.test.ts`, `tests/completion.test.ts`.
+
+The fingerprint remains a change detector, not a sandbox or atomic snapshot: another process can change configuration, attributes or content between these reads. Index metadata alone is not authoritative; tracked content is measured independently. A concurrent filesystem writer can race content/stat observations; no atomic snapshot guarantee is claimed.
+
+## Defensive final verification
+
+Candidate cleanliness now enumerates the intended commit with `ls-tree -r -z --full-tree` and reads every committed working-tree file directly, independently of cached index statistics. File bytes and link-target bytes are compared with committed object ids. Native Git EOL/encoding normalization is allowed only after effective external filters are ruled out on the union of commit and index paths. Executable-mode comparisons honor `core.filemode`; `core.symlinks=false` checkouts retain normal behavior. The fingerprint uses raw bytes from every intended tracked path, including changes absent from all cached listings; ordinary deletions and type/mode changes are represented explicitly. Missing evidence, warnings, truncation, unsupported special files, or bounds exhaustion return UNKNOWN. Current release clearance is suspended on UNKNOWN while historical review records stay intact.
+
+Tracked-content measurement is bounded to 100,000 commit paths, 400 per batch, six seconds per process call and 25 seconds per measurement, with checks inside per-path fallback/link loops. Repositories with gitlinks/submodules currently return UNKNOWN because nested tracked-content verification is not implemented; a nested status/index result is not accepted as substitute proof. Concurrent filesystem/configuration writes remain outside an atomic-snapshot guarantee.
+
+Read-only helper Git Bash inspections now undergo root/filter preflight and are rebuilt from parsed literal arguments with the same Git hardening, preserving quoted search strings. Current release consultations already have narrower resource ownership; this correction also protects wildcard read helpers. Internal process calls remain argument arrays.
+
+The host's local capability analysis rejected passing `$` to imported measurement functions. Those calls are now in the same registration source so the supported host can recognize them; the helper module contains only pure tree parsing/constants. This measured local failure and correction do not establish closure of the original external `MOD_CAPABILITY_USE_NOT_PLAIN` report, whose full details remain unavailable. Persistent Alerts are excluded.

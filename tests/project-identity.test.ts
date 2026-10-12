@@ -92,6 +92,7 @@ describe('M2: the fingerprint through the host', () => {
     const a = taskOf(h).startTree as string
     await command($, 'reset')
     w.top = '/work/example2'
+    w.cwd = w.top // a real second project changes both the host directory and Git's reported root
     await prompt($, 'explain another thing')
     const b = taskOf(h).startTree as string
     expect(a.slice(0, a.indexOf('@'))).toBe(b.slice(0, b.indexOf('@')))

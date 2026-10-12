@@ -27,11 +27,11 @@
 // reason, never DONE.
 
 import type { Task } from '../types'
-import { holdTask, oneLine, uidOf } from './model'
+import { heldRefusals, holdTask, MAX_REFUSALS, oneLine, uidOf } from './model'
 export { uidOf }
 
 export type Policy = 'OBSERVE' | 'ENFORCE'
-export const MAX_ATTEMPTS_CEILING = 10
+export const MAX_ATTEMPTS_CEILING = MAX_REFUSALS
 /** The host's `process.run` allows ten minutes at most (Claude Code 2.1.296): a longer timeout would make the call fail instead of timing out. */
 export const TIMEOUT_CEILING_MS = 600_000
 export const MIN_SUMMARY_CHARS = 60
@@ -229,14 +229,11 @@ export const verdictOf = (v: VerdictInput): Verdict => {
 /**
  * The attempts spent on this task: the larger of the run of unfinished checks in the log and the hold's own refusal counter.
  * The counter lives in the task state, written in the same step as the hold, so a log that was evicted, flooded by other tasks,
- * lost with a restart, corrupted or never written cannot hand a held task its attempts back. A counter that is not a whole
- * number from 0 to the ceiling is not believed. A person's release removes the hold, and with it the counter.
+ * lost with a restart, corrupted or never written cannot hand a held task its attempts back. An unreadable existing
+ * counter exhausts the allowance. A person's release removes the hold, and with it the counter.
  */
 export const spentOf = (checks: readonly CheckRecord[], task: Task): number => {
-  const held = task.stopHold?.refusals
-  const counted = typeof held === 'number' && Number.isSafeInteger(held) ? Math.min(Math.max(held, 0), MAX_ATTEMPTS_CEILING) : 0
-
-  return Math.max(attemptsOf(checks, uidOf(task)), counted)
+  return Math.max(attemptsOf(checks, uidOf(task)), heldRefusals(task))
 }
 
 export const CHECKS_PER_TASK = 16
@@ -273,8 +270,8 @@ const PREFIX = /^STOP GUARD: /
  *
  * Evidence is the guard's own check records in the Run Ledger, which the model cannot write, never the blocker text, which it can:
  *  - a non-complete record for this task AND the guard's blocker, or the budget spent, or a check that could not run: HELD;
- *  - a guard blocker whose records all completed, or whose records were unreadable: HELD as ambiguous (needs a fresh check or
- *    a person's release; nothing is granted);
+ *  - a guard blocker whose records all completed: HELD as ambiguous; unreadable records exhaust the allowance until a person's
+ *    release, since no remaining attempts can be established;
  *  - a guard-looking blocker with no record at all is an ordinary blocker and stays one;
  *  - everything else (OBSERVE, completed, other blockers, failed gates) is unchanged.
  * No script trust is invented: trust lives in its own store and is not read from here.
@@ -291,7 +288,7 @@ export const migrateStopHold = (task: Task, checks: readonly CheckRecord[], drop
   const spent = attemptsOf(checks, uid)
   if (last === undefined) {
     // no record: a forged or foreign blocker is ordinary, unless records were lost, when it cannot be told apart
-    return looksHeld && dropped > 0 ? holdTask(settled, 'legacy Stop guard state could not be read; run the check again or release it', 0, now) : settled
+    return looksHeld && dropped > 0 ? holdTask(settled, 'legacy Stop guard state could not be read; a person must release it before checking again', MAX_ATTEMPTS_CEILING, now) : settled
   }
   if (last.complete) return looksHeld ? holdTask(settled, `legacy state is ambiguous (${reason}); run the check again or release it`, spent, now) : settled
   if (looksHeld || spent >= maxAttempts || last.outcome === 'error' || last.outcome === 'untrusted') {

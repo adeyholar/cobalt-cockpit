@@ -298,8 +298,10 @@ describe('migration of saved tasks', () => {
     const t = migrate(legacy({ blocker: 'STOP GUARD: all fine' }), [rec({ outcome: 'pass', exit: 0, complete: true })])
     expect(t.stopHold?.reason).toContain('ambiguous')
   })
-  test('unreadable records with a guard-looking blocker are ambiguous: held', () => {
-    expect(migrate(legacy({ blocker: 'STOP GUARD: x' }), [], 2).stopHold?.reason).toContain('could not be read')
+  test('unreadable records with a guard-looking blocker exhaust the unknown allowance', () => {
+    const migrated = migrate(legacy({ blocker: 'STOP GUARD: x' }), [], 2)
+    expect(migrated.stopHold?.reason).toContain('could not be read')
+    expect(migrated.stopHold?.refusals).toBe(10)
   })
   test('a forged guard blocker with no record at all is an ordinary blocker', () => {
     const t = migrate(legacy({ blocker: 'STOP GUARD: check exit 1 after 3 attempts' }), [])
@@ -351,12 +353,16 @@ describe('migration through the host', () => {
 
     return hostState(on, { task, 'run-ledger': { ...emptyLedger('s1'), stopChecks: checks, stopDropped: dropped } })
   }
-  test('a legacy hold with unreadable records is cleared only by a fresh, enrolled, passing check, even on a clean tree', guard({ stopMaxContinuations: 3 }), async ($, on) => {
+  test('a legacy hold with unreadable records needs a person to release it before a fresh check, even on a clean tree', guard({ stopMaxContinuations: 3 }), async ($, on) => {
     const w = world(on); w.files[SCRIPT] = 'exit 0'; w.players[SCRIPT] = 'ok'
     const h = legacySession(on, w, legacy({ blocker: 'STOP GUARD: x' }), [], 2)
     await start($); await $.classic.SessionStart({ source: 'startup' } as never)
     expect(taskOf(h).stopHold?.reason).toContain('could not be read')
     await enroll($)
+    await stop($)
+    expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(0)
+    expect(taskOf(h).stopHold?.refusals).toBe(10)
+    await command($, 'guard release')
     await stop($)
     expect(w.runs.filter(r => r[0] === SCRIPT).length).toBe(1)
     expect(taskOf(h).stopHold).toBeUndefined()

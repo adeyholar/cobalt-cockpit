@@ -318,7 +318,7 @@ describe('a release review through the host', () => {
     expect(task(held).review?.candidate).toBeUndefined()
     expect(task(held).review?.consult).not.toBe(id)
   })
-  test('uncommitted changes withdraw an approval, an unanswering git does not, and the same clean commit gives it back', LED, async ($, on) => {
+  test('unknown Git and uncommitted changes suspend approval; the same verified clean commit restores it', LED, async ($, on) => {
     const w = world(on); const held = hostState(on, {}); await releaseTask($)
     await call($, releasePacket)
     const id = await approve($, held)
@@ -326,7 +326,7 @@ describe('a release review through the host', () => {
     const saved = w.gitStatus
     w.gitStatus = null
     await progress($, { action: 'status' })
-    expect(task(held).review?.state).toBe('adjudicated')
+    expect(task(held).review?.state).toBe('required')
     w.gitStatus = saved
     w.uncommitted = true
     await progress($, { action: 'status' })

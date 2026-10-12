@@ -53,6 +53,12 @@ export type World = {
   statDirty: string[]
   /** The blob id the base commit holds for a path, as `ls-tree` reports it (absent: none). */
   headBlobs: Record<string, string>
+  /** Commit entry modes and actual disk file modes, independent of any cached index state. */
+  headModes: Record<string, string>
+  diskModes: Record<string, number>
+  /** Native Git normalization result; raw hashing still observes the original bytes. */
+  normalized: Record<string, string>
+  gitConfig: Record<string, string>
   /** The content of .git/info/attributes. */
   attributes: string
   /** `size mtime` per ignored entry, as stat reports it; absent means `1 1`. */
@@ -86,8 +92,14 @@ export type World = {
   head: string
   /** The work tree git reports for `rev-parse --show-toplevel`. */
   top: string
+  gitPrefix: string
+  gitFilterConfig: string
+  gitFilterAttributes: string
   /** A repository-controlled fsmonitor / replace ref: `status` reports clean unless git is run with the hardened flags (see GIT_SAFE). */
   statusHidden: boolean
+  /** A status warning or truncated stderr means the supposedly clean listing is incomplete. */
+  statusWarning: string
+  statusStderrTruncated: boolean
   /** Whether `git status --porcelain` reports changes (a release candidate must be clean). */
   uncommitted: boolean
   players: Record<string, PlayerBehavior>
@@ -139,6 +151,8 @@ export type World = {
   /** Every value the plugin handed to `$.store.set`, in order: what it persisted
    * beyond the session, so a test can read back a stored ledger. */
   storeWrites: { key: string; value: unknown }[]
+  /** Durable store keys whose write raises an error, for persistence recovery tests. */
+  failStoreWrites: string[]
   /** Runs inside a process call, before it answers: a host event racing a process (a command typed while a router request is in flight). */
   duringRun: ((argv: readonly string[]) => void | Promise<void>) | null
   /** Runs inside the native tool call, before it answers: a host event racing a
@@ -164,6 +178,9 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     failWrites: false,
     notified: [],
     cwd: '/work/example',
+    gitPrefix: '',
+    gitFilterConfig: '',
+    gitFilterAttributes: '',
     notifyMode: 'sent',
     runEnvs: [],
     ran: [],
@@ -177,6 +194,10 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     ignoredEntries: [],
     statDirty: [],
     headBlobs: {},
+    headModes: {},
+    diskModes: {},
+    normalized: {},
+    gitConfig: {},
     attributes: '',
     ignoredMeta: {},
     ignoredFiles: {},
@@ -194,6 +215,8 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     head: 'a'.repeat(40),
     top: '/work/example',
     statusHidden: false,
+    statusWarning: '',
+    statusStderrTruncated: false,
     uncommitted: false,
     players: { 'pw-play': 'ok' },
     outputs: {},
@@ -219,6 +242,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     configured: [],
     outbound: [],
     storeWrites: [],
+    failStoreWrites: [],
     duringToolCall: null,
     duringRun: null,
     ...overrides,
@@ -228,7 +252,10 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   // handing the event down to it. It records only `store.set` and passes all
   // other events through untouched.
   on('*', ($, e, next) => {
-    if (next.is('store.set', e)) w.storeWrites.push({ key: e.key, value: e.value })
+    if (next.is('store.set', e)) {
+      if (w.failStoreWrites.includes(e.key)) throw new Error('injected store write failure')
+      w.storeWrites.push({ key: e.key, value: e.value })
+    }
 
     return next(e)
   })
@@ -362,6 +389,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     if (program === 'stat' && e.argv.includes('--printf') && w.players['stat'] !== 'fails') {
       w.statCalls++
       const names = e.argv.slice(e.argv.indexOf('--') + 1)
+      if (e.argv[e.argv.indexOf('--printf') + 1] === '%f\\0') return ran(0, names.map(n => `${(w.diskModes[n.replace(/^\.\//, '')] ?? 0x81a4).toString(16)}\0`).join(''))
 
       return ran(0, names.map(n => `${w.ignoredFiles[n] ?? w.dirMeta[n] ?? w.ignoredMeta[n] ?? '1 1'} ${n}\0`).join(''))
     }
@@ -380,7 +408,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
       return { value: { exitCode: 1, stdout: '', stderr: `stat: cannot statx '${asked}': ${why}\n`, isStdoutTruncated: false, isStderrTruncated: false } }
     }
-    if (program === 'realpath') return ran(0, String(e.argv.at(-1)) + '\n')
+    if (program === 'realpath') return ran(0, String(e.argv.at(-1)).replace(/\/+$/, '') + '\n')
     if (program === 'git') {
       if (w.gitStatus === null) return ran(128)
 
@@ -389,13 +417,15 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       while (at < e.argv.length) {
         const a = e.argv[at] as string
         if (a === '-c' || a === '-C') at += 2
-        else if (a.startsWith('--no-')) at += 1
+        else if (a.startsWith('--no-') || a === '--literal-pathspecs') at += 1
         else break
       }
       const git = e.argv.slice(at)
       if (w.gitHangs !== null && git[0] === w.gitHangs) throw new Error('git was still running at the timeout')
       if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, `/work/example/.git/${git[git.indexOf('--git-path') + 1]}\n`)
-      if (git[0] === 'config') return ran(1)
+      if (git[0] === 'config') return git.includes('--get-regexp') && w.gitFilterConfig !== '' ? ran(0, w.gitFilterConfig) : w.gitConfig[git.at(-1)!] !== undefined ? ran(0, w.gitConfig[git.at(-1)!] + '\n') : ran(1)
+      if (git[0] === 'check-attr') return ran(0, w.gitFilterAttributes)
+      if (git[0] === 'rev-parse' && git.includes('--show-prefix')) return ran(0, w.gitPrefix + '\n')
       if (git[0] === 'rev-parse') return ran(0, git.includes('--verify') ? `${w.head}\n` : `${w.top}\n`)
       if (git[0] === 'diff') {
         // like git, `diff` does not see a path the index is told to ignore (assume-unchanged: lowercase tag; skip-worktree: S)
@@ -407,7 +437,10 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       if (git[0] === 'status' && git.includes('--porcelain')) {
         const hardened = e.argv.includes('--no-replace-objects') && e.argv.includes('core.fsmonitor=false') && e.argv.includes('core.untrackedCache=false')
 
-        return ran(0, w.uncommitted && !(w.statusHidden && !hardened) ? ' M src/api.js\n' : '')
+        const answer = ran(0, w.uncommitted && !(w.statusHidden && !hardened) ? ' M src/api.js\n' : '')
+        answer.value.stderr = w.statusWarning
+        answer.value.isStderrTruncated = w.statusStderrTruncated
+        return answer
       }
       if (git[0] === 'ls-files' && git.includes('-o') && w.lsFilesWarning !== null) {
         const out = git.includes('-i') ? w.ignoredEntries : w.untracked
@@ -422,13 +455,18 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
         return ran(0, [...listed, ...Object.keys(w.embeddedRepos), ...w.ignoredEntries].join('\0') + '\0')
       }
       if (git[0] === 'hash-object' && git.slice(git.indexOf('--') + 1).some(p => w.watchedDirs[p] !== undefined || w.watchedDenied.includes(p))) return ran(128)
-      if (git[0] === 'ls-files') return ran(0, git.includes('-m') ? w.statDirty.join('\0') + (w.statDirty.length ? '\0' : '') : git.includes('-i') ? w.ignoredEntries.join('\0') + (w.ignoredEntries.length ? '\0' : '') : git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : '')
+      if (git[0] === 'ls-files') return ran(0, git.includes('-m') ? w.statDirty.join('\0') + (w.statDirty.length ? '\0' : '') : git.includes('-i') ? w.ignoredEntries.join('\0') + (w.ignoredEntries.length ? '\0' : '') : git.includes('-v') ? w.indexFlags : git.includes('-o') ? w.untracked.join('\0') + (w.untracked.length ? '\0' : '') : w.indexFlags.split('\0').filter(Boolean).map(entry => entry.slice(2)).join('\0') + (w.indexFlags ? '\0' : ''))
       if (git[0] === 'ls-tree') {
-        const names = git.slice(git.indexOf('--') + 1)
+        const names = git.includes('--full-tree') ? Object.keys(w.headBlobs) : git.slice(git.indexOf('--') + 1)
 
-        return ran(0, names.filter(n => w.headBlobs[n] !== undefined).map(n => `100644 blob ${w.headBlobs[n]}\t${n}\0`).join(''))
+        return ran(0, names.filter(n => w.headBlobs[n] !== undefined).map(n => `${w.headModes[n] ?? '100644'} ${w.headModes[n] === '160000' ? 'commit' : 'blob'} ${w.headBlobs[n]}\t${n}\0`).join(''))
       }
-      if (git[0] === 'hash-object') return ran(0, git.slice(git.indexOf('--') + 1).map(path => `h${[...(path.endsWith('info/exclude') ? w.excludes : path.endsWith('info/attributes') ? w.attributes : (w.watched[path] ?? w.tree[path] ?? (w.untracked.includes(path) ? 'u' : '')))].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`).join('\n') + '\n')
+      if (git[0] === 'hash-object' && git.includes('--stdin')) return ran(0, blobOf(e.init?.stdin ?? '') + '\n')
+      if (git[0] === 'hash-object') return ran(0, git.slice(git.indexOf('--') + 1).map(raw => {
+        const path = raw.replace(/^\.\//, '')
+        const contents = path.endsWith('info/exclude') ? w.excludes : path.endsWith('info/attributes') ? w.attributes : (!git.includes('--no-filters') && w.normalized[path] !== undefined ? w.normalized[path]! : w.watched[path] ?? w.tree[path] ?? (w.untracked.includes(path) ? 'u' : ''))
+        return blobOf(contents)
+      }).join('\n') + '\n')
 
       return ran(0, w.gitStatus)
     }
@@ -693,9 +731,10 @@ export const plays = (w: World, cue: 'checkpoint' | 'complete'): string[][] =>
  * State the host already holds when the module loads: what a hot reload
  * finds. Answers `$.state` beneath the plugin from a map seeded with it.
  */
-export const hostState = (on: On, seed: Record<string, unknown>): Map<string, { value: unknown; version: number }> => {
+export const hostState = (on: On, seed: Record<string, unknown>, faults: { get?: (key: string) => boolean; set?: (key: string) => boolean } = {}): Map<string, { value: unknown; version: number }> => {
   const held = new Map(Object.entries(seed).map(([key, value]) => [key, { value, version: 1 }]))
   on('state.get', ($, e) => {
+    if (faults.get?.(e.key)) throw new Error('injected state read failure')
     const one = held.get(e.key)
 
     return { value: { value: one?.value, version: one?.version ?? 0 } } as never
@@ -703,6 +742,7 @@ export const hostState = (on: On, seed: Record<string, unknown>): Map<string, { 
   on('state.set', ($, e) => {
     const write = e as unknown as { key: string; value: unknown; ifVersion?: number }
     const standing = held.get(write.key)?.version ?? 0
+    if (faults.set?.(e.key)) return { value: { isSet: false, version: standing } } as never
     if (write.ifVersion !== undefined && write.ifVersion !== standing) {
       return { value: { isSet: false, version: standing } } as never
     }
@@ -715,7 +755,7 @@ export const hostState = (on: On, seed: Record<string, unknown>): Map<string, { 
 }
 
 /** The id the test world's `hash-object` gives a file with this content, for seeding `headBlobs`. */
-export const blobOf = (content: string): string => `h${[...content].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7)}`
+export const blobOf = (content: string): string => [...content].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(40, '0')
 
 export const command = ($: Engine, args: string) =>
   $.command.run({ command: 'cockpit', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })

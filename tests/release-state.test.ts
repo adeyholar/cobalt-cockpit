@@ -261,12 +261,14 @@ describe('M4: an unknown git answer neither grants, restores, nor promotes an ap
     await progress($, { action: 'status' })
     expect(task(held).review).toMatchObject({ state: 'adjudicated', candidate: A, cleared: [{ ground: 'release', consult: id, candidate: A, reused: true }] })
   })
-  test('an approval already held is kept, not withdrawn, while git does not answer', LED, async ($, on) => {
+  test('an unknown current candidate suspends clearance and preserves the immutable approval history', LED, async ($, on) => {
     const w = world(on); const held = hostState(on, {}); await releaseTask($)
-    await review($, held, GO, 'go')
+    const { id } = await review($, held, GO, 'go')
     w.gitStatus = null
     await progress($, { action: 'status' })
-    expect(task(held).review?.state).toBe('adjudicated')
+    expect(task(held).review?.state).toBe('required')
+    expect(task(held).review?.cleared ?? []).toEqual([])
+    expect(records(w)?.find(r => r.id === id)).toMatchObject({ candidate: A, verified: 'pass', outcome: 'go' })
   })
   test('reverting to the reviewed commit gives the approval back; a different one does not', LED, async ($, on) => {
     const w = world(on); const held = hostState(on, {}); await releaseTask($)

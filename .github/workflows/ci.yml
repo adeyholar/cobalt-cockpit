@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           # Deliberately not a pass: nothing is type-checked in this job and it never reports TypeScript as passing.
-          echo "::warning title=TypeScript not verified by CI::Automated TypeScript verification is unavailable because Claude Code 2.1.296 does not expose a verified unattended generator for plugin host declarations. TypeScript is a separate mandatory release gate (scripts/typecheck-host.sh, attested in docs/release-checklist-v0.5.2.md)."
+          echo "::warning title=TypeScript not verified by CI::Automated TypeScript verification is unavailable because Claude Code 2.1.296 does not expose a verified unattended generator for plugin host declarations. TypeScript is a separate mandatory release gate (scripts/typecheck-host.sh, attested in docs/release-checklist-v0.5.3.md)."
           {
             echo "### TypeScript: NOT VERIFIED by this job"
             echo "Automated TypeScript verification is unavailable because Claude Code 2.1.296 does not expose a verified unattended generator for plugin host declarations. TypeScript is a separate mandatory release gate: run \`scripts/typecheck-host.sh\` on the exact release SHA from a host that generated its declarations through an authorized interactive development-plugin load, and record the attestation."

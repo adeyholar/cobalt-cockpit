@@ -1,7 +1,6 @@
 // v0.5.3 L2/D: the refusal budget of a held task is authoritative on the task itself (`stopHold.refusals`), not only a count
 // over a bounded log. Losing, corrupting or flooding the check log cannot give a held task its attempts back.
-// A durable store that cannot be written (the host test world has no hook to fail `store.set`) is covered by the same property
-// as a lost log: the durable write is best-effort (`hush`) and the budget never depends on it.
+// Refusal-recovery tests also inject rejected state writes and failed durable writes: reservation precedes the verifier.
 // Not claimed: cross-process atomicity. The plugin store has no compare-and-set, so two sessions writing the durable log at the
 // same moment can lose a record; the hold's counter lives in the task state, which is why the budget does not depend on it.
 
@@ -32,9 +31,9 @@ describe('spentOf: the larger of the log and the hold\'s own counter', () => {
     expect(spentOf([rec(uid, 1), rec(uid, 2), rec(uid, 3)], heldTask(1))).toBe(3)
     expect(spentOf([], t)).toBe(0)
   })
-  test('a damaged counter is not believed upward or below zero', () => {
+  test('a damaged held counter is exhausted rather than granting new attempts', () => {
     for (const bad of [-5, Number.NaN, Infinity, '9', null, 1.5]) expect(spentOf([], { ...heldTask(0), stopHold: { reason: 'r', at: 1, refusals: bad as never } })).toBeLessThanOrEqual(10)
-    expect(spentOf([], { ...heldTask(0), stopHold: { reason: 'r', at: 1, refusals: -5 } })).toBe(0)
+    expect(spentOf([], { ...heldTask(0), stopHold: { reason: 'r', at: 1, refusals: -5 } })).toBe(10)
   })
   test('1000 unrelated checks across many tasks cannot lower a held task\'s budget', () => {
     let list: CheckRecord[] = []
