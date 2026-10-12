@@ -566,7 +566,8 @@ describe('recovery: restart, reload and project switch', () => {
   test('the Ledger and the history stay within their caps however many alerts are raised', q, async ($, on) => {
     const w = world(on); const held = hostState(on, {}); session(on)
     await start($); await planAndComplete($, 1)
-    for (let i = 0; i < 40; i++) {
+    // 17 rounds are 34 records, past the cap of 32; the pure test below holds the same bound at 100
+    for (let i = 0; i < 17; i++) {
       await failSecurity($); await passSecurity($); await progress($, { action: 'status' })
       await w.clock.advance(31_000)
     }
@@ -575,6 +576,16 @@ describe('recovery: restart, reload and project switch', () => {
     expect(stored.projects[ledger(held).alertsProject!].length).toBeLessThanOrEqual(ALERT_CAP)
     expect(JSON.stringify(stored).length).toBeLessThan(40_000)
     expect(ids(await say($, 'alerts')).length).toBeLessThanOrEqual(INBOX_PAGE)
+  })
+})
+
+describe('storage bounds', () => {
+  test('however many records are added the kept ones stay within the cap, and an open condition\'s newest record is among them', () => {
+    let kept: AlertRecord[] = []
+    for (let i = 0; i < 100; i++) kept = bounded(kept, rec(`t${i}:security-failure:SECURITY`, { kind: 'security-failure', at: 1000 + i, taskId: i }))
+    expect(kept.length).toBe(ALERT_CAP)
+    expect(kept.at(-1)!.key).toBe('t99:security-failure:SECURITY')
+    expect(new Set(episodesOf(kept).map(e => e.id)).size).toBe(ALERT_CAP)
   })
 })
 
