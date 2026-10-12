@@ -7,8 +7,9 @@
 // host reported the channel it wrote to) and USER CONFIRMED (the person typed that they saw or heard it). Nothing is
 // ever called DELIVERED. A confirmation is what a person said, in this session, soon after the test; it is not proof.
 //
-// The notification carries a short code that is shown nowhere else, so typing it back means the text was read. A
-// channel that only rings a bell shows no text; that confirmation is kept as one made without the code.
+// The notification carries a short code that is shown nowhere else, so typing it back means the text was read. The
+// code is required, except on a channel that only rings a bell and shows no text; that confirmation is kept as one
+// made without the code. A confirmation also ages: after twelve hours it no longer speaks for the transport.
 //
 // Nothing here carries a prompt, code, path, command or secret: the text is a closed sentence and a random code.
 
@@ -38,6 +39,10 @@ export const TEST_COOLDOWN_MS = 30_000
 export const TEST_MAX = 6
 export const TEST_KEEP = 8
 export const SEEN_WINDOW_MS = 600_000
+/** How long a confirmation speaks for the transport: a terminal, a connection or a desk can change without this process seeing it. */
+export const CONFIRM_TTL_MS = 12 * 3_600_000
+/** After this long a sound still marked as started is reported as unknown: its player is gone or the module was reloaded. */
+export const SOUND_PENDING_MS = 60_000
 export type TransportStatus = 'NOT TESTED' | 'ATTEMPTED' | 'SENT' | 'USER CONFIRMED'
 
 // no 0/O, 1/I/L: the code is read off a popup and typed
@@ -59,7 +64,7 @@ const isTest = (x: unknown): x is TransportTest => {
   if (x === null || typeof x !== 'object') return false
   const r = x as Record<string, unknown>
 
-  return typeof r['code'] === 'string' && CODE_RE.test(r['code']) && typeof r['at'] === 'number' && Number.isFinite(r['at']) && typeof r['session'] === 'string' && r['session'].length <= 128
+  return typeof r['code'] === 'string' && CODE_RE.test(r['code']) && typeof r['at'] === 'number' && Number.isFinite(r['at']) && typeof r['session'] === 'string' && r['session'] !== '' && r['session'].length <= 128
     && (r['link'] === 'local' || r['link'] === 'ssh') && OUTCOMES.includes(r['outcome'] as string) && (r['channel'] === null || (typeof r['channel'] === 'string' && r['channel'].length <= 32))
     && (r['why'] === undefined || WHYS.includes(r['why'] as string)) && SOUNDS.includes(r['sound'] as string)
     && (r['seenAt'] === undefined || (typeof r['seenAt'] === 'number' && Number.isFinite(r['seenAt']))) && (r['seenBy'] === undefined || r['seenBy'] === 'code' || r['seenBy'] === 'no-code')
@@ -73,7 +78,7 @@ export const validTransport = (x: unknown): Transport => {
 }
 
 /** The tests of this session, oldest first: another session's test is never counted, shown as current or confirmed. */
-export const mine = (t: Transport, session: string): TransportTest[] => t.tests.filter(a => a.session === session)
+export const mine = (t: Transport, session: string): TransportTest[] => (session === '' ? [] : t.tests.filter(a => a.session === session))
 
 export type MayTest = { ok: true } | { ok: false; why: 'cooldown'; waitSec: number } | { ok: false; why: 'budget' } | { ok: false; why: 'unknown-session' }
 /** Whether a test may be sent now: a limit of its own, apart from the alerts' budget and cooldown. */
@@ -94,11 +99,12 @@ export const mayTest = (t: Transport, session: string, now: number): MayTest => 
 
 export const added = (t: Transport, test: TransportTest): Transport => ({ tests: [...t.tests, test].slice(-TEST_KEEP) })
 
-export type Confirmed = 'confirmed' | 'already' | 'none' | 'not-sent' | 'expired' | 'other-link' | 'wrong-code' | 'bad-code'
+export type Confirmed = 'confirmed' | 'already' | 'none' | 'not-sent' | 'expired' | 'other-link' | 'wrong-code' | 'bad-code' | 'needs-code'
 /**
  * The person says they saw or heard the latest test of this session. Refused, and nothing changed, when there is none,
  * when the host never reported writing it, when it was already confirmed, when it is older than the window, when the
- * connection kind changed since, or when a code was typed that is not its code.
+ * connection kind changed since, when a code was typed that is not its code, or when none was typed although the
+ * channel shows the text (only a bell-only channel is confirmed without one).
  */
 export const confirm = (t: Transport, session: string, link: Link, typed: string, now: number): { transport: Transport; result: Confirmed } => {
   const last = mine(t, session).at(-1)
@@ -110,24 +116,24 @@ export const confirm = (t: Transport, session: string, link: Link, typed: string
   const code = typed.trim().toUpperCase()
   if (code !== '' && !CODE_RE.test(code)) return { transport: t, result: 'bad-code' }
   if (code !== '' && code !== last.code) return { transport: t, result: 'wrong-code' }
+  if (code === '' && !isBellOnly(last.channel)) return { transport: t, result: 'needs-code' }
   const seen: TransportTest = { ...last, seenAt: now, seenBy: code === '' ? 'no-code' : 'code' }
 
   return { transport: { tests: t.tests.map(a => (a === last ? seen : a)) }, result: 'confirmed' }
 }
 
-/** Whether a confirmed test still speaks for where the person is now: this session and the same kind of connection. */
-const applies = (a: TransportTest, session: string, link: Link): boolean => a.session === session && a.link === link && a.seenAt !== undefined
+/** Whether a confirmed test still speaks for where the person is now: this session, the same kind of connection, and not too long ago. */
+const applies = (a: TransportTest, session: string, link: Link, now: number): boolean =>
+  session !== '' && a.session === session && a.link === link && a.seenAt !== undefined && now - a.seenAt >= 0 && now - a.seenAt <= CONFIRM_TTL_MS
 
-/** The transport's state for this session, from its latest test. */
-export const statusOf = (t: Transport, session: string, link: Link): TransportStatus => {
+/** The transport's state for this session, from its latest test. A confirmation of an older test says nothing about a newer one. */
+export const statusOf = (t: Transport, session: string, link: Link, now: number): TransportStatus => {
   const last = mine(t, session).at(-1)
   if (last === undefined) return 'NOT TESTED'
-  if (applies(last, session, link)) return 'USER CONFIRMED'
+  if (applies(last, session, link, now)) return 'USER CONFIRMED'
 
   return last.outcome === 'sent' ? 'SENT' : 'ATTEMPTED'
 }
-/** Whether any test of this session, on this kind of connection, was confirmed by the person. */
-export const isConfirmedHere = (t: Transport, session: string, link: Link): boolean => t.tests.some(a => applies(a, session, link))
 
 const ago = (now: number, at: number): string => {
   const s = Math.max(0, Math.round((now - at) / 1000))
@@ -144,7 +150,7 @@ const SOUND_TEXT: Record<SoundState, string> = {
 
 /** The transport diagnostics, for `/cockpit guard` and `/cockpit doctor`. Closed words, numbers and the host's channel name only; the code is never shown. */
 export const transportLines = (t: Transport, session: string, link: Link, now: number, armed: { enabled: boolean; repeat: boolean }): string[] => {
-  const status = statusOf(t, session, link)
+  const status = statusOf(t, session, link, now)
   const own = mine(t, session)
   const last = own.at(-1)
   const lines = [`TRANSPORT: ${status}`]
@@ -152,8 +158,9 @@ export const transportLines = (t: Transport, session: string, link: Link, now: n
   else {
     const how = last.outcome === 'sent' ? `SENT via ${last.channel ?? 'unknown'} (the host reported writing it; it cannot tell whether it was shown)` : `ATTEMPTED, not sent (${last.outcome}${last.why === undefined ? '' : `: ${last.why}`})`
     lines.push(`  last test: ${how} · ${ago(now, last.at)}`)
-    lines.push(`  ${SOUND_TEXT[last.sound]}`)
+    lines.push(`  ${last.sound === 'pending' && !(now - last.at <= SOUND_PENDING_MS) ? 'sound outcome unknown (it was started and no result was recorded)' : SOUND_TEXT[last.sound]}`)
     if (last.outcome === 'sent' && isBellOnly(last.channel)) lines.push('  WARN the channel is the terminal bell only: it rings and shows neither the text nor the code. Confirm with /cockpit guard seen (no code) if you heard it.')
+    if (last.outcome !== 'sent' && last.why === 'refused') lines.push('  WARN another hook answered the notification without sending it.')
     if (last.outcome !== 'sent' && last.why === 'no-channel') lines.push('  WARN the host found no terminal notification channel here. Its channels are iTerm2, kitty, Ghostty and the terminal bell; another terminal needs preferredNotifChannel set to terminal_bell in Claude Code to get the bell.')
     if (last.outcome !== 'sent' && last.why === 'disabled') lines.push('  WARN notifications are turned off in Claude Code for this user.')
     if (last.outcome !== 'sent' && last.why === 'no-surface') lines.push('  WARN this session has no terminal to notify (a headless, SDK or desktop run).')
@@ -161,10 +168,13 @@ export const transportLines = (t: Transport, session: string, link: Link, now: n
   const seen = [...own].reverse().find(a => a.seenAt !== undefined)
   if (seen === undefined) lines.push('  human confirmation: none in this session')
   else {
-    const fits = seen.link === link
-    lines.push(`  human confirmation: ${ago(now, seen.seenAt ?? now)} · ${seen.seenBy === 'code' ? 'the code shown was typed back' : 'confirmed without the code'} · via ${seen.channel ?? 'unknown'} · ${fits ? 'applies to this session' : 'made on a different kind of connection; does not apply now'}`)
+    const fits = seen.link !== link ? 'made on a different kind of connection; does not apply now'
+      : !applies(seen, session, link, now) ? `older than ${CONFIRM_TTL_MS / 3_600_000}h; no longer counted, test again`
+        : link === 'ssh' ? 'applies to this session, unless you reconnected since (that cannot be detected)' : 'applies to this session'
+    lines.push(`  human confirmation: ${ago(now, seen.seenAt ?? now)} · ${seen.seenBy === 'code' ? 'the code shown was typed back' : 'confirmed without the code'} · via ${seen.channel ?? 'unknown'} · ${fits}`)
     if (last !== undefined && seen !== last) lines.push('  a newer test has not been confirmed.')
   }
+  if (session === '') lines.push('  WARN the session could not be identified, so no test can be tied to it.')
   if (t.tests.some(a => a.session !== session)) lines.push('  an earlier session\'s tests are not counted here.')
   lines.push(`  connection: ${link === 'ssh' ? 'SSH (this process was started in an SSH session). Whether a notification or bell crosses it to your desktop depends on your local terminal; a reconnect cannot be detected, so test again after one.' : 'no SSH session detected for this process.'}`)
   if (armed.enabled && status !== 'USER CONFIRMED') lines.push(`  WARN transport unverified: ${armed.repeat ? 'persistent alerts are' : 'alerts are'} armed, and nobody has confirmed seeing a notification in this session.`)

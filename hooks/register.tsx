@@ -2891,7 +2891,7 @@ const transportText = async ($: EngineInterface): Promise<string[]> => {
     const scope = await transportScope($)
 
     return transportLines(validTransport(await read($, transportAtom)), scope.session, scope.link, scope.now, { enabled: guardCfg.enabled, repeat: guardCfg.repeat })
-  } catch { return ['TRANSPORT: UNKNOWN (the state could not be read)'] }
+  } catch { return ['TRANSPORT: NOT TESTED (the transport state could not be read just now)'] }
 }
 /** Four random bytes for a test's code: the host's web crypto when it has one, the clock otherwise. */
 const codeBytes = (at: number): number[] => {
@@ -2902,8 +2902,15 @@ const codeBytes = (at: number): number[] => {
     return [...bytes]
   } catch { return [at, at / 31, at / 961, at / 29_791].map(n => Math.floor(n) % 256) }
 }
+/** One test at a time: the limit is read and the test recorded without another slipping between. */
+let isTesting = false
 /** One labelled test notification, asked for by the person. It touches no alert record, budget, gate or approval. */
 const sendTest = async ($: EngineInterface, wantsSound: boolean): Promise<string> => {
+  if (isTesting) return 'Cockpit: a test notification is being sent right now. Nothing more was sent.'
+  isTesting = true
+  try { return await sendTestNow($, wantsSound) } finally { isTesting = false }
+}
+const sendTestNow = async ($: EngineInterface, wantsSound: boolean): Promise<string> => {
   const scope = await transportScope($)
   const may = mayTest(validTransport(await read($, transportAtom)), scope.session, scope.now)
   if (!may.ok) return may.why === 'cooldown' ? `Cockpit: a test was sent a moment ago; try again in ${may.waitSec}s. Nothing was sent.` : may.why === 'budget' ? 'Cockpit: this session has used all of its test notifications. Nothing was sent.' : 'Cockpit: the session could not be identified, so a test could not be tied to it. Nothing was sent.'
@@ -2920,7 +2927,7 @@ const sendTest = async ($: EngineInterface, wantsSound: boolean): Promise<string
   }
 
   return [test.outcome === 'sent' ? `Cockpit: a TEST notification was SENT via ${test.channel ?? 'unknown'}. The host reported writing it; that is not proof you saw it.` : `Cockpit: a TEST notification was ATTEMPTED and not sent (${test.outcome}${test.why === undefined ? '' : `: ${test.why}`}).`,
-    test.outcome === 'sent' ? 'If you saw it, type /cockpit guard seen <the code it shows>. If you only heard a bell, type /cockpit guard seen.' : 'There is nothing to confirm. /cockpit guard shows why.',
+    test.outcome !== 'sent' ? 'There is nothing to confirm. /cockpit guard shows why.' : test.channel === 'terminal_bell' ? 'This channel only rings the bell and shows no text. If you heard or saw the bell, type /cockpit guard seen.' : 'If you saw it, type /cockpit guard seen <the code it shows>. If you did not, do not confirm.',
     'No gate, hold, review, approval, alert record or alert budget was touched.'].join('\n')
 }
 const CONFIRM_TEXT = {
@@ -2932,6 +2939,7 @@ const CONFIRM_TEXT = {
   'other-link': 'Cockpit: the connection kind changed since the test was sent, so it cannot be confirmed here. Send a new one. Nothing was changed.',
   'wrong-code': 'Cockpit: that is not the code of the latest test; nothing was changed.',
   'bad-code': 'Cockpit: a test code is four letters or digits. Usage: /cockpit guard seen [code]. Nothing was changed.',
+  'needs-code': 'Cockpit: this channel shows the notification text, so type the code it showed: /cockpit guard seen <code>. If you did not see it, there is nothing to confirm. Nothing was changed.',
 } as const
 const confirmSeen = async ($: EngineInterface, typed: string): Promise<string> => {
   const scope = await transportScope($)
@@ -4212,7 +4220,8 @@ export const register: Register = (on, options) => {
           if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: a notification test is sent or confirmed only by a command you type; nothing was sent or changed.' }
           if (arg === 'test' && words[2] !== undefined && words[2] !== 'sound') return { text: 'Usage: /cockpit guard test [sound]' }
           if (arg === 'seen' && words.length > 3) return { text: 'Usage: /cockpit guard seen [code]' }
-          const said = arg === 'test' ? await sendTest($, words[2] === 'sound' || guardCfg.sound) : await confirmSeen($, words[2] ?? '')
+          let said: string
+          try { said = arg === 'test' ? await sendTest($, words[2] === 'sound' || guardCfg.sound) : await confirmSeen($, words[2] ?? '') } catch { said = arg === 'test' ? 'Cockpit: the test could not be completed and is not recorded as sent.' : 'Cockpit: the confirmation could not be recorded; nothing was changed.' }
 
           return { text: `${said}\n${(await transportText($)).join('\n')}` }
         }

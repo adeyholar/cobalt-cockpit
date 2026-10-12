@@ -30,6 +30,8 @@ export type World = {
   notifyMode: 'sent' | 'throws' | 'disabled'
   /** Runs while a notification is being written, before the host answers: what a person does in that moment. */
   duringNotify?: () => Promise<unknown>
+  /** The channel the host says it wrote to (default kitty). */
+  notifyChannel?: 'iterm2' | 'iterm2_with_bell' | 'kitty' | 'ghostty' | 'terminal_bell'
   /** The environment each process was started with over the host's own, in the order of `runs`; undefined when none was given. */
   runEnvs: (Readonly<Record<string, string>> | undefined)[]
   /** The tool calls that reached the engine, in order: what actually ran. */
@@ -516,7 +518,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     if (w.duringNotify !== undefined) { const act = w.duringNotify; delete w.duringNotify; return act().then(() => (w.notifyMode === 'disabled' ? { value: { isSent: false as const, reason: 'disabled' as const } } : { value: { isSent: true as const, channel: 'kitty' as const } })) }
     if (w.notifyMode === 'throws') throw new Error('notification write failed')
 
-    return { value: w.notifyMode === 'disabled' ? { isSent: false as const, reason: 'disabled' as const } : { isSent: true as const, channel: 'kitty' as const } }
+    return { value: w.notifyMode === 'disabled' ? { isSent: false as const, reason: 'disabled' as const } : { isSent: true as const, channel: w.notifyChannel ?? ('kitty' as const) } }
   })
 
   on('tool.call', async ($, e) => {

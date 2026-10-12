@@ -9,10 +9,10 @@ v0.5.4 could repeat an alert but could not say whether any alert reaches the per
 ## Design
 
 - **Apart from alerts.** Tests live in their own session-state key (`guard-transport`), never in the Run Ledger's alert records, and never read or write the alert state (`guard-state`). So they cannot spend the alert budget, start a cooldown, acknowledge an alert, or be mistaken for an incident.
-- **The code.** The notification carries four characters from an unambiguous alphabet, drawn from the host's web crypto (the clock if it has none). It is shown in the notification and nowhere else, not in any command output, so typing it back means the text was read. A bell-only channel shows no text; `seen` without a code is accepted and kept as `no-code`.
+- **The code.** The notification carries four characters from an unambiguous alphabet, drawn from the host's web crypto (the clock if it has none). It is shown in the notification and nowhere else, not in any command output, so typing it back means the text was read. The code is required whenever the channel shows text; only a bell-only channel (`terminal_bell`) is confirmed without one, kept as `no-code`.
 - **Scope.** Each test holds the session id and a connection kind: `ssh` when `SSH_CONNECTION` or `SSH_TTY` is set for the process, else `local`. Only set-or-not is kept. Counting, status and confirmation use only this session's tests; a confirmation made on another connection kind is shown as not applying.
-- **Limits.** One test per 30 s and six per session; a confirmation within 10 minutes; eight tests held. A clock that goes backwards waits or expires rather than passing.
-- **Sound.** Requested with `test sound`, or implied by `guardSound`. It reuses `sound()` and is not waited for; the test reads `pending` until a player answers, then `sound`, `bell` or `none`.
+- **Limits.** One test per 30 s and six per session, one at a time; a confirmation within 10 minutes; a confirmation counts for 12 hours; eight tests held. `/clear` or a resume starts a new session id and so a new count. A clock that goes backwards waits or expires rather than passing.
+- **Sound.** Requested with `test sound`, or implied by `guardSound`. It reuses `sound()` and is not waited for; the test reads `pending` until a player answers, then `sound`, `bell` or `none`; a `pending` older than a minute is shown as outcome unknown.
 - **Authority.** `test` and `seen` are refused unless typed by a person (composer or bridge), like `ack` and `silence`.
 
 ## What was investigated, and what was not observed
@@ -52,5 +52,9 @@ Then, with `guardAlerts` and `guardRepeat` on, block a task once and check that 
 ## Tests
 
 `tests/transport.test.ts`: code and message shape; the four states; rate limit; confirmation rules (none, not sent, wrong or malformed code, expired, backwards clock, other session, other connection kind, duplicate, older code); diagnostics wording; malformed stored state; the command end to end; person-only; sound not requested, played, bell, none, muted, off, failing, hanging; new session; hot reload; SSH; independence from the alert budget, cooldown, records, gates and reminders.
+
+## Independent review
+
+A separate reviewer approved the complete diff with three non-blocking findings, corrected before merge: the README stated terminal behaviour as fact where it is expectation; a confirmation never aged; and a read failure printed a fifth label. Its notes were also taken: the code is now required except on a bell-only channel, an empty session id is refused everywhere, a stale `pending` sound is reported as unknown, tests cannot overlap, and a failing clock cannot throw out of the command. The corrected diff was reviewed again.
 
 No automated test here shows that a person saw or heard anything. Real-terminal acceptance is NOT VERIFIED until the checklist is run.

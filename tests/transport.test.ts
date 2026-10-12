@@ -3,7 +3,7 @@
 // none of it touches an alert record, the alert budget, a gate, a hold or an approval.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { CODE_RE, EMPTY_TRANSPORT, SEEN_WINDOW_MS, TEST_COOLDOWN_MS, TEST_KEEP, TEST_MAX, added, codeOf, confirm, isBellOnly, isConfirmedHere, linkOf, mayTest, statusOf, testMessage, transportLines, validTransport } from '../hooks/transport'
+import { CODE_RE, EMPTY_TRANSPORT, SEEN_WINDOW_MS, TEST_COOLDOWN_MS, CONFIRM_TTL_MS, SOUND_PENDING_MS, TEST_KEEP, TEST_MAX, added, codeOf, confirm, isBellOnly, linkOf, mayTest, statusOf, testMessage, transportLines, validTransport } from '../hooks/transport'
 import type { Transport, TransportTest } from '../hooks/transport'
 import type { Ledger, Task } from '../types'
 import { command, hostState, planAndComplete, plays, progress, start, world } from './world'
@@ -39,11 +39,11 @@ describe('policy', () => {
     expect(isBellOnly(null)).toBe(false)
   })
   test('the four states, and never a fifth', () => {
-    expect(statusOf(EMPTY_TRANSPORT, 's1', 'local')).toBe('NOT TESTED')
-    expect(statusOf(of(one({ outcome: 'failed', channel: null, why: 'no-channel' })), 's1', 'local')).toBe('ATTEMPTED')
-    expect(statusOf(of(one({ outcome: 'refused', channel: null, why: 'refused' })), 's1', 'local')).toBe('ATTEMPTED')
-    expect(statusOf(of(one()), 's1', 'local')).toBe('SENT')
-    expect(statusOf(of(one({ seenAt: 2000, seenBy: 'code' })), 's1', 'local')).toBe('USER CONFIRMED')
+    expect(statusOf(EMPTY_TRANSPORT, 's1', 'local', 3000)).toBe('NOT TESTED')
+    expect(statusOf(of(one({ outcome: 'failed', channel: null, why: 'no-channel' })), 's1', 'local', 3000)).toBe('ATTEMPTED')
+    expect(statusOf(of(one({ outcome: 'refused', channel: null, why: 'refused' })), 's1', 'local', 3000)).toBe('ATTEMPTED')
+    expect(statusOf(of(one()), 's1', 'local', 3000)).toBe('SENT')
+    expect(statusOf(of(one({ seenAt: 2000, seenBy: 'code' })), 's1', 'local', 3000)).toBe('USER CONFIRMED')
     const all = text(transportLines(of(one({ seenAt: 2000, seenBy: 'code' })), 's1', 'local', 3000, armed))
     expect(all).not.toMatch(/DELIVERED/i)
     expect(all).toContain('not proof of delivery')
@@ -78,24 +78,51 @@ describe('policy', () => {
     expect(yes.result).toBe('confirmed')
     expect(yes.transport.tests[0]).toMatchObject({ seenAt: 2000, seenBy: 'code' })
     expect(confirm(yes.transport, 's1', 'local', 'ABCD', 3000).result).toBe('already')
-    expect(confirm(t, 's1', 'local', '', 2000).transport.tests[0]).toMatchObject({ seenBy: 'no-code' })
+    // a channel that shows the text needs its code; only the bell is confirmed without one
+    expect(confirm(t, 's1', 'local', '', 2000)).toEqual({ transport: t, result: 'needs-code' })
+    expect(confirm(of(one({ channel: 'terminal_bell' })), 's1', 'local', '', 2000).transport.tests[0]).toMatchObject({ seenBy: 'no-code' })
+    // an unidentified session owns nothing, whatever is stored
+    expect(confirm(of(one({ session: '' })), '', 'local', 'ABCD', 2000).result).toBe('none')
+    expect(statusOf(of(one({ session: '', seenAt: 2000, seenBy: 'code' })), '', 'local', 3000)).toBe('NOT TESTED')
+    expect(mayTest(of(one({ session: '' })), '', 9e9)).toEqual({ ok: false, why: 'unknown-session' })
     // an older confirmed test does not make a newer one confirmed
     const two = added(yes.transport, one({ code: 'WXYZ', at: 50_000 }))
-    expect(statusOf(two, 's1', 'local')).toBe('SENT')
+    expect(statusOf(two, 's1', 'local', 3000)).toBe('SENT')
     expect(confirm(two, 's1', 'local', 'ABCD', 51_000).result).toBe('wrong-code')
   })
   test('a confirmation does not follow the person to another session or another kind of connection', () => {
     const t = of(one({ seenAt: 2000, seenBy: 'code' }))
-    expect(isConfirmedHere(t, 's1', 'local')).toBe(true)
-    expect(isConfirmedHere(t, 's2', 'local')).toBe(false)
-    expect(isConfirmedHere(t, 's1', 'ssh')).toBe(false)
-    expect(statusOf(t, 's2', 'local')).toBe('NOT TESTED')
-    expect(statusOf(t, 's1', 'ssh')).toBe('SENT')
+    expect(statusOf(t, 's1', 'local', 3000)).toBe('USER CONFIRMED')
+    expect(statusOf(t, 's2', 'local', 3000)).toBe('NOT TESTED')
+    expect(statusOf(t, 's1', 'ssh', 3000)).toBe('SENT')
     expect(text(transportLines(t, 's1', 'ssh', 3000, armed))).toContain('made on a different kind of connection; does not apply now')
     const other = text(transportLines(t, 's2', 'local', 3000, armed))
     expect(other).toContain('TRANSPORT: NOT TESTED')
     expect(other).toContain('an earlier session\'s tests are not counted here')
     expect(other).toContain('WARN transport unverified')
+  })
+  test('a confirmation ages: after twelve hours it no longer counts, and a clock that went backwards does not count it either', () => {
+    const t = of(one({ seenAt: 2000, seenBy: 'code' }))
+    expect(statusOf(t, 's1', 'local', 2000 + CONFIRM_TTL_MS)).toBe('USER CONFIRMED')
+    expect(statusOf(t, 's1', 'local', 2000 + CONFIRM_TTL_MS + 1)).toBe('SENT')
+    expect(statusOf(t, 's1', 'local', 1999)).toBe('SENT')
+    expect(statusOf(t, 's1', 'local', Number.NaN)).toBe('SENT')
+    const old = text(transportLines(t, 's1', 'local', 2000 + CONFIRM_TTL_MS + 1, armed))
+    expect(old).toContain('older than 12h; no longer counted, test again')
+    expect(old).toContain('WARN transport unverified')
+    expect(text(transportLines(of(one({ link: 'ssh', seenAt: 2000, seenBy: 'code' })), 's1', 'ssh', 3000, armed))).toContain('applies to this session, unless you reconnected since (that cannot be detected)')
+  })
+  test('a newer test that failed replaces an older confirmation: ATTEMPTED, and the warning returns', () => {
+    const t = of(one({ seenAt: 2000, seenBy: 'code' }), one({ code: 'WXYZ', at: 60_000, outcome: 'failed', channel: null, why: 'no-channel' }))
+    expect(statusOf(t, 's1', 'local', 61_000)).toBe('ATTEMPTED')
+    const out = text(transportLines(t, 's1', 'local', 61_000, armed))
+    expect(out).toContain('a newer test has not been confirmed')
+    expect(out).toContain('WARN transport unverified')
+  })
+  test('a sound left as started is reported as unknown once its player must be gone', () => {
+    const t = of(one({ sound: 'pending' }))
+    expect(text(transportLines(t, 's1', 'local', 1000 + SOUND_PENDING_MS, armed))).toContain('sound started, no player has answered yet')
+    expect(text(transportLines(t, 's1', 'local', 1000 + SOUND_PENDING_MS + 1, armed))).toContain('sound outcome unknown')
   })
   test('the diagnostics name the channel, the sound, bell-only, the connection and what is not known', () => {
     const bell = text(transportLines(of(one({ channel: 'terminal_bell', sound: 'bell' })), 's1', 'ssh', 61_000, armed))
@@ -123,7 +150,7 @@ describe('policy', () => {
   })
   test('malformed stored transport state is dropped, never believed; the list is bounded', () => {
     const good = one({ seenAt: 5, seenBy: 'code' })
-    const bad = [null, 7, 'x', {}, { ...one(), code: 'abcd' }, { ...one(), code: '../../etc' }, { ...one(), at: 'now' }, { ...one(), at: Number.POSITIVE_INFINITY }, { ...one(), session: 5 }, { ...one(), session: 'x'.repeat(200) }, { ...one(), link: 'vpn' },
+    const bad = [null, 7, 'x', {}, { ...one(), code: 'abcd' }, { ...one(), code: '../../etc' }, { ...one(), at: 'now' }, { ...one(), at: Number.POSITIVE_INFINITY }, { ...one(), session: 5 }, { ...one(), session: '' }, { ...one(), session: 'x'.repeat(200) }, { ...one(), link: 'vpn' },
       { ...one(), outcome: 'delivered' }, { ...one(), channel: 'x'.repeat(40) }, { ...one(), why: 'because' }, { ...one(), sound: 'loud' }, { ...one(), seenAt: 5 }, { ...one(), seenBy: 'code' }, { ...one(), seenAt: 5, seenBy: 'robot' }]
     expect(validTransport({ tests: [good, ...bad] })).toEqual({ tests: [good] })
     for (const x of [undefined, null, 5, 'x', [], { tests: 'x' }, { tests: null }]) expect(validTransport(x)).toEqual(EMPTY_TRANSPORT)
@@ -273,11 +300,33 @@ describe('/cockpit guard seen', () => {
     expect(held(h).tests[0]).toMatchObject({ seenBy: 'code' })
     expect(await say($, 'doctor')).toContain('TRANSPORT: USER CONFIRMED')
   })
-  test('without a code (a bell shows no text) it is kept as confirmed without the code', async ($, on) => {
+  test('a bell-only channel shows no text: it is confirmed without a code and kept as such', async ($, on) => {
+    const w = world(on); w.notifyChannel = 'terminal_bell'; const h = hostState(on, {}); session(on)
+    await start($)
+    const sent = await say($, 'guard test')
+    expect(sent).toContain('SENT via terminal_bell')
+    expect(sent).toContain('only rings the bell and shows no text')
+    expect(sent).toContain('the channel is the terminal bell only')
+    expect(await say($, 'guard seen')).toContain('confirmed without the code')
+    expect(held(h).tests[0]).toMatchObject({ seenBy: 'no-code', channel: 'terminal_bell' })
+  })
+  test('a channel that shows the text is not confirmed without its code', async ($, on) => {
     world(on); const h = hostState(on, {}); session(on)
     await start($); await say($, 'guard test')
-    expect(await say($, 'guard seen')).toContain('confirmed without the code')
-    expect(held(h).tests[0]).toMatchObject({ seenBy: 'no-code' })
+    const out = await say($, 'guard seen')
+    expect(out).toContain('type the code it showed')
+    expect(out).toContain('TRANSPORT: SENT')
+    expect(held(h).tests[0]!.seenAt).toBeUndefined()
+  })
+  test('a confirmation stops counting after twelve hours', { options: { guardAlerts: true } }, async ($, on) => {
+    const w = world(on); session(on)
+    await start($); await say($, 'guard test'); await say($, `guard seen ${codeIn(w)}`)
+    expect(await say($, 'guard')).toContain('TRANSPORT: USER CONFIRMED')
+    await w.clock.advance(CONFIRM_TTL_MS + 60_000)
+    const out = await say($, 'guard')
+    expect(out).toContain('TRANSPORT: SENT')
+    expect(out).toContain('no longer counted, test again')
+    expect(out).toContain('WARN transport unverified')
   })
   test('with no test, a wrong code or a malformed one, nothing is recorded', async ($, on) => {
     const w = world(on); const h = hostState(on, {}); session(on)
@@ -309,9 +358,11 @@ describe('/cockpit guard seen', () => {
     const w = world(on); const h = hostState(on, {}); session(on)
     await start($); await say($, 'guard test')
     const first = codeIn(w)
-    await w.clock.advance(TEST_COOLDOWN_MS); await say($, 'guard test')
-    if (codeIn(w) !== first) expect(await say($, `guard seen ${first}`)).toContain('that is not the code of the latest test')
-    expect(held(h).tests.every(t => t.seenAt === undefined)).toBe(codeIn(w) !== first)
+    // the codes are random: send again until the latest differs from the first (one more is enough in practice)
+    for (let n = 0; n < 4 && (n === 0 || codeIn(w) === first); n++) { await w.clock.advance(TEST_COOLDOWN_MS); await say($, 'guard test') }
+    expect(codeIn(w)).not.toBe(first)
+    expect(await say($, `guard seen ${first}`)).toContain('that is not the code of the latest test')
+    expect(held(h).tests.every(t => t.seenAt === undefined)).toBe(true)
   })
 })
 
@@ -361,6 +412,36 @@ describe('session, reload and connection', () => {
     await start($); await say($, 'guard test')
     expect(held(h).tests[0]!.link).toBe('ssh')
     expect(await say($, `guard seen ${codeIn(w)}`)).toContain('TRANSPORT: USER CONFIRMED')
+  })
+  test('a session that cannot be identified sends nothing and confirms nothing', async ($, on) => {
+    const w = world(on); const h = hostState(on, { 'guard-transport': { tests: [one({ at: 999_000 })] } })
+    on('session.id', () => { throw new Error('no session') })
+    await start($)
+    const out = await say($, 'guard test')
+    expect(out).toContain('the session could not be identified')
+    expect(out).toContain('TRANSPORT: NOT TESTED')
+    expect(w.notified).toEqual([])
+    expect(await say($, 'guard seen ABCD')).toContain('there is no test notification in this session')
+    expect(held(h).tests[0]!.seenAt).toBeUndefined()
+  })
+  test('/clear starts a new session: its tests are counted afresh and the old confirmation is gone', async ($, on) => {
+    const w = world(on); const id = session(on)
+    await start($)
+    for (let n = 0; n < TEST_MAX; n++) { await say($, 'guard test'); await w.clock.advance(TEST_COOLDOWN_MS) }
+    expect(await say($, 'guard test')).toContain('used all of its test notifications')
+    id.value = 's2'
+    expect(await say($, 'guard')).toContain(`tests used: 0 of ${TEST_MAX}`)
+    expect(await say($, 'guard test')).toContain('SENT via kitty')
+  })
+  test('doctor shows the transport rows, warnings as warnings', { options: { guardAlerts: true } }, async ($, on) => {
+    const w = world(on); w.notifyChannel = 'terminal_bell'; session(on)
+    await start($); await say($, 'guard test')
+    const out = await say($, 'doctor')
+    expect(out).toMatch(/INFO\s+TRANSPORT: SENT/)
+    expect(out).toMatch(/WARN\s+the channel is the terminal bell only/)
+    expect(out).toMatch(/WARN\s+transport unverified: alerts are armed/)
+    expect(out).toMatch(/INFO\s+last test: SENT via terminal_bell/)
+    expect(out).not.toMatch(/WARN\s+WARN|INFO\s+WARN/)
   })
   test('malformed stored state neither throws nor counts', async ($, on) => {
     const w = world(on); hostState(on, { 'guard-transport': { tests: [{ code: 7 }, null, { ...one(), outcome: 'delivered', seenAt: 1, seenBy: 'code' }] } }); session(on)
