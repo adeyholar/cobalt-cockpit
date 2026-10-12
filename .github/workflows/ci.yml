@@ -67,6 +67,12 @@ jobs:
           set -euo pipefail
           claude plugin test .
 
+      - name: Capability shape (a local approximation of the Directory's guidance, not its validator)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/check-capability-shape.sh
+
       - name: TypeScript gate (not automated; separate mandatory release gate)
         shell: bash
         run: |
