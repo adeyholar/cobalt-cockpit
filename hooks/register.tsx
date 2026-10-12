@@ -59,7 +59,7 @@ import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
 import { EMPTY_GUARD, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
 import type { GuardConfig } from './alerts'
-import { uidOf, attemptsOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
+import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
 import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
 import { basename, parseShell, unwrap } from './shell'
@@ -2869,7 +2869,7 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
   const uid = uidOf(task)
   // the Ledger is where the attempts are kept, so a resumed session finds the budget as it was left
   const checks = await checksOf($)
-  const spent = attemptsOf(checks, uid)
+  const spent = spentOf(checks, task)
   const hasSummary = hasChangeSummary(e.last_assistant_message)
   const lastRun = [...checks].reverse().find(c => c.uid === uid)
   // every check since the last one that completed the task is an attempt, whatever it said: the budget cannot be reset by a pass.

@@ -226,6 +226,19 @@ export const verdictOf = (v: VerdictInput): Verdict => {
   }
 }
 
+/**
+ * The attempts spent on this task: the larger of the run of unfinished checks in the log and the hold's own refusal counter.
+ * The counter lives in the task state, written in the same step as the hold, so a log that was evicted, flooded by other tasks,
+ * lost with a restart, corrupted or never written cannot hand a held task its attempts back. A counter that is not a whole
+ * number from 0 to the ceiling is not believed. A person's release removes the hold, and with it the counter.
+ */
+export const spentOf = (checks: readonly CheckRecord[], task: Task): number => {
+  const held = task.stopHold?.refusals
+  const counted = typeof held === 'number' && Number.isSafeInteger(held) ? Math.min(Math.max(held, 0), MAX_ATTEMPTS_CEILING) : 0
+
+  return Math.max(attemptsOf(checks, uidOf(task)), counted)
+}
+
 export const CHECKS_PER_TASK = 16
 export const CHECKS_TOTAL = 128
 const NEWEST_TASKS = 4
