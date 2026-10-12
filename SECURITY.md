@@ -46,6 +46,8 @@ An admitted Sonnet-led Opus consultation binds its `[task:ID]` and host agent id
 
 Command safety and repository hygiene use recognizable syntax and user confirmation. They are not a sandbox or an exhaustive security boundary. Verification records observations and user/agent-reported evidence; it cannot guarantee code correctness. Keep Claude Code permission controls enabled.
 
+Owner alerts are advisory. Quiet hours and `guardNotifyKinds` are your decision not to be notified: an alert that is deferred or whose kind is off is shown only on the HUD and by `/cockpit guard` until the window ends, and nobody is told if no one is looking. A critical (`security-failure`) alert is deferred only if you set `guardQuietCritical` to `defer`. None of these settings changes a gate, a hold, a review or a release approval, and they are accepted only from you in the config menu, never from a plugin or a model. Quiet hours trust the machine's clock and time-zone data; a zone or window that cannot be read turns them off rather than holding an alert back.
+
 ## Reporting a vulnerability
 
 Use GitHub's private vulnerability reporting for this repository if available. Otherwise contact the repository maintainer through their GitHub profile to arrange a private channel. Do not post secrets, private ledgers or exploit details in a public issue. Include affected version, a minimal synthetic reproduction and expected impact.

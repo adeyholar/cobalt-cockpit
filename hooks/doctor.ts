@@ -29,7 +29,7 @@ export type DoctorFacts = {
   cache: CacheReading
   agents: Agents
   stop: StopFacts
-  guard: { enabled: boolean; label: string; used: number; max: number; cooldownSec: number; repeat: boolean; sound: boolean; /** The transport diagnostics, already worded. */ transport: string[] }
+  guard: { enabled: boolean; label: string; used: number; max: number; cooldownSec: number; repeat: boolean; sound: boolean; /** The transport diagnostics, already worded. */ transport: string[]; /** Priorities, notified kinds, quiet hours and active conditions, already worded. */ policy?: string[] }
 }
 
 export type StopFacts = {
@@ -115,6 +115,7 @@ export const doctorText = (f: DoctorFacts): string => {
   }
   out.push('', 'COBALT GUARD · owner alerts')
   out.push(line('INFO', f.guard.enabled ? `ARMED (${f.guard.label}) · ${f.guard.used} of ${f.guard.max} alerts used · one per ${f.guard.cooldownSec}s at most · delivery is the host's terminal notification; it cannot confirm that you saw it · persistent ${f.guard.repeat ? 'on' : 'off'} · sound ${f.guard.sound ? 'on' : 'off'}` : 'OFF (guardAlerts=false); nothing is sent'))
+  for (const row of f.guard.policy ?? []) out.push(row.startsWith('  WARN ') ? line('WARN', row.slice(7)) : line('INFO', row.trim()))
   for (const row of f.guard.transport) out.push(row.startsWith('  WARN ') ? line('WARN', row.slice(7)) : row.startsWith('  ') ? line('INFO', row.slice(2)) : line('INFO', row))
   out.push('', 'Cockpit edits no settings file and sets no variable; any cache change is yours to make.')
 

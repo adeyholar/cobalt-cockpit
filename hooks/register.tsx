@@ -42,7 +42,7 @@ import { replayTimeline, safeFile, STEP_BYTES } from './replay'
 
 import type { Activity, ActivityLog, AgentStrip, AuthState, Credential, EffortLevel, EffortRequest, GitState, GuardFinding, GuardRequest, Meter, Prefs, ReasoningMode, Task, DiscoveryLevel } from '../types'
 import { ASSETS, PLAYERS, PLAY_TIMEOUT_MS, clampVolume } from './audio'
-import { EMPTY_TRANSPORT, added as addedTest, codeOf, confirm as confirmTest, linkOf, mayTest, testMessage, transportLines, validTransport } from './transport'
+import { EMPTY_TRANSPORT, added as addedTest, codeOf, confirm as confirmTest, linkOf, mayTest, mine as myTests, statusOf as transportStatus, testMessage, transportLines, validTransport } from './transport'
 import type { TransportTest } from './transport'
 import type { Player } from './audio'
 import { EMPTY_LOG, EVENT_TTL_MS, callOf, closeOf, liveOf, push } from './activity'
@@ -61,8 +61,9 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { EMPTY_GUARD, isAckedAt, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, hasReminderLeft, labelOf as guardLabel, messageOf as alertMessage, remind, reminderOf } from './alerts'
-import type { GuardConfig } from './alerts'
+import { EMPTY_GUARD, isAckedAt, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
+import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
 import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
@@ -878,7 +879,7 @@ const HELP =
   '/cockpit router     show this session\'s router, or switch it: off, nobodywho, jev (this session only)\n' +
   '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
   '/cockpit flow      the Neural Flow in words: which of input, discovery, routing, workers, verify and done are verified\n' +
-  '/cockpit guard     Cobalt Guard owner alerts: status; ack, silence or unsilence; test and seen check that a notification reaches you (none changes a verdict)\n' +
+  '/cockpit guard     Cobalt Guard owner alerts: status, priorities, quiet hours and active conditions; ack, silence or unsilence; test and seen check that a notification reaches you (none changes a verdict)\n' +
   '/cockpit doctor    read-only checks: installs, profile, telemetry storage, host and prompt-cache policy\n' +
   '/cockpit sound      play both cues'
 
@@ -1242,7 +1243,7 @@ const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
     cache: await cacheFacts($),
     agents: agentsOf(ledger.agents.map(a => (typeof a.start === 'number' && typeof a.end === 'number' ? a.end - a.start : null))),
     stop: await stopFacts($),
-    guard: await (async () => { const v = await guardView($); return { enabled: guardCfg.enabled, label: guardLabel(guardCfg, v.state, v.kept), used: v.state.count, max: guardCfg.maxPerSession, cooldownSec: Math.round(guardCfg.cooldownMs / 1000), repeat: guardCfg.repeat, sound: guardCfg.sound, transport: await transportText($) } })(),
+    guard: await (async () => { const v = await guardView($); return { enabled: guardCfg.enabled, label: guardLabel(guardCfg, v.state, v.kept), used: v.state.count, max: guardCfg.maxPerSession, cooldownSec: Math.round(guardCfg.cooldownMs / 1000), repeat: guardCfg.repeat, sound: guardCfg.sound, transport: await transportText($), policy: guardCfg.enabled ? policyLines(guardCfg, v.kept, await guardSeen($, v.kept)) : [] } })(),
   }
 }
 
@@ -2745,9 +2746,10 @@ let guardCfg: GuardConfig = guardConfigOf({})
 let guarding = false
 
 /**
- * The one timer persistent alerts own. It exists only while some alerted condition could still be repeated, and is
- * cancelled when none can (acknowledged, silenced, resolved, spent), on session end, and by the host on a reload:
- * `session.start` arms it again from the kept records, so a reload neither doubles it nor restarts a count.
+ * The one timer the alerts own. It exists only while some alerted condition could still be repeated, or an alert quiet
+ * hours held back is still owed, and is cancelled when neither is so (acknowledged, silenced, resolved, spent, told),
+ * on session end, and by the host on a reload: `session.start` arms it again from the kept records, so a reload
+ * neither doubles it nor restarts a count. Each look reads the clock afresh; nothing is scheduled for a moment ahead.
  */
 let reminderTimer: Timer | null = null
 /** Set at session end: a late call after it must not bring the timer back. */
@@ -2759,21 +2761,21 @@ const stopReminders = () => {
 }
 const armReminders = async ($: EngineInterface): Promise<void> => {
   try {
-    const view = guardCfg.repeat && !isSessionOver ? await guardView($) : null
-    if (view === null || !hasReminderLeft(guardCfg, view.state, view.kept)) { stopReminders(); return }
+    const view = guardCfg.enabled && !isSessionOver ? await guardView($) : null
+    if (view === null || !hasWorkLeft(guardCfg, view.state, view.kept)) { stopReminders(); return }
     if (reminderTimer !== null) return
     reminderTimer = $.clock.every(REMINDER_POLL_MS, () => quiet(() => raiseAlerts($, false)))
   } catch { stopReminders() }
 }
 
 /** Asks the host to notify. What comes back is what was attempted and written, never what was seen. */
-const notifyOwner = async ($: EngineInterface, text: string): Promise<Pick<AlertRecord, 'outcome' | 'channel' | 'why'>> => {
+const notifyOwner = async ($: EngineInterface, text: string): Promise<{ outcome: 'sent' | 'failed' | 'refused'; channel: string | null; why?: TransportTest['why'] }> => {
   let outcome: 'sent' | 'failed' | 'refused' = 'failed'
   let channel: string | null = null
-  let why: AlertRecord['why']
+  let why: TransportTest['why']
   try {
     const r = await $.ui.notify(text, { title: 'Cobalt Guard' })
-    if (r.isSent) { outcome = 'sent'; channel = r.channel } else { outcome = r.reason === 'refused' ? 'refused' : 'failed'; why = r.reason as AlertRecord['why'] }
+    if (r.isSent) { outcome = 'sent'; channel = r.channel } else { outcome = r.reason === 'refused' ? 'refused' : 'failed'; why = r.reason as TransportTest['why'] }
   } catch { outcome = 'failed'; why = 'error' }
 
   return { outcome, channel, ...(why === undefined ? {} : { why }) }
@@ -2785,7 +2787,8 @@ const notifyOwner = async ($: EngineInterface, text: string): Promise<Pick<Alert
  * delays the tool call or the stop an alert was raised from; the record is marked once a player has exited 0.
  */
 const cueOwner = ($: EngineInterface, key: string, at: number): void => {
-  if (!guardCfg.sound) return
+  // in the quiet window the extra cue is never played; an alert the operator kept is its notification alone
+  if (!guardCfg.sound || isQuiet(guardCfg.quiet, at)) return
   void (async () => {
     const played = await sound($, 'checkpoint')
     if (played === null) return
@@ -2795,50 +2798,117 @@ const cueOwner = ($: EngineInterface, key: string, at: number): void => {
   })().catch(() => undefined)
 }
 
+/** The facts the alert policy reads off a task. `withRelease` false leaves the release history unread (no NO-GO is then reported). */
+const alertFacts = async ($: EngineInterface, task: Task, atStop: boolean, withRelease = true): Promise<Facts> => {
+  const history = withRelease ? await releaseHistorySoft($) : []
+  const latest = [...history].sort((a, b) => b.at - a.at)[0]
+  const review = task.review
+
+  return {
+    taskUid: uidOf(task),
+    securityFailed: task.gates.SECURITY.state === 'fail',
+    // only a check that really ran and kept failing is "retries exhausted"; a missing, changed or unstartable script is a blocked run
+    stopBlocker: exhaustedBlocker(task.stopHold?.reason ?? null),
+    blocker: task.stopHold?.reason ?? task.blocker,
+    releaseNoGo: review !== undefined && review.grounds.includes('release') && !(review.cleared ?? []).some(c => c.ground === 'release') && latest?.outcome === 'no-go',
+    reviewOpen: review !== undefined && review.state !== 'adjudicated',
+    atStop,
+  }
+}
+
+/** Every alert condition that holds now, for the HUD and the status: read-only, and empty when it cannot be read. */
+const openAlerts = async ($: EngineInterface, kept: readonly AlertRecord[]): Promise<Open[]> => {
+  try {
+    const task = await read($, taskAtom)
+    if (task === null || kept.length === 0) return []
+
+    // the release history is read only when a NO-GO was raised: without a record it could not be listed anyway
+    return dueOf(await alertFacts($, task, true, kept.some(a => a.kind === 'release-no-go')))
+  } catch { return [] }
+}
+
 /** Raises whatever alert is due. Never throws, never loops, and never touches a gate, a review or an approval. */
 const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> => {
   if (!guardCfg.enabled || guarding) return
   guarding = true
   try {
     const task = await read($, taskAtom)
-    if (task === null && !guardCfg.repeat) return
-    const history = task === null ? [] : await releaseHistorySoft($)
-    const latest = [...history].sort((a, b) => b.at - a.at)[0]
-    const review = task?.review
-    const facts = task === null ? null : {
-      taskUid: uidOf(task),
-      securityFailed: task.gates.SECURITY.state === 'fail',
-      // only a check that really ran and kept failing is "retries exhausted"; a missing, changed or unstartable script is a blocked run
-      stopBlocker: exhaustedBlocker(task.stopHold?.reason ?? null),
-      blocker: task.stopHold?.reason ?? task.blocker,
-      releaseNoGo: review !== undefined && review.grounds.includes('release') && !(review.cleared ?? []).some(c => c.ground === 'release') && latest?.outcome === 'no-go',
-      reviewOpen: review !== undefined && review.state !== 'adjudicated',
-      atStop,
-    }
+    if (task === null && !guardCfg.repeat && !((await read($, ledgerAtom)).alerts ?? []).some(a => a.outcome === 'deferred')) return
+    const facts = task === null ? null : await alertFacts($, task, atStop)
     // every condition that holds now, the ones only told at a stop included: what a reminder or a resolution is judged against
     const open = facts === null ? [] : dueOf({ ...facts, atStop: true })
-    if (guardCfg.repeat) {
-      // a condition that was told and no longer holds (fixed, or its task is gone) is recorded resolved once; it is not announced
+    {
+      // a condition that was told (persistent alerts) or held back by quiet hours, and no longer holds (fixed, or its task is gone), is recorded resolved once; it is not announced
       const now = await $.clock.now()
-      const closed = closedOf((await read($, ledgerAtom)).alerts ?? [], open.map(o => o.key))
+      const before = (await read($, ledgerAtom)).alerts ?? []
+      const keys = open.map(o => o.key)
+      const closed = [...(guardCfg.repeat ? closedOf(before, keys) : []), ...lapsedOf(before, keys)]
       if (closed.length > 0) {
         await update($, ledgerAtom, old => ({ ...old, alerts: closed.reduce((all, a) => boundedAlerts(all, { key: a.key, kind: a.kind, taskId: a.taskId, at: now, outcome: 'resolved', attempts: 0, channel: null }), old.alerts ?? []) }))
         await hush(() => persist($))
       }
     }
     if (task === null || facts === null) return
-    for (const one of dueOf(facts)) {
+    // what is told on this pass: what is due now, and what quiet hours held back and is still open (a stop-only condition included)
+    const owed = deferredOf((await read($, ledgerAtom)).alerts ?? []).map(d => d.key)
+    const dueNow = dueOf(facts).map(d => d.key)
+    const due = open.filter(o => dueNow.includes(o.key) || owed.includes(o.key))
+    /** A due alert that is not sent leaves one record saying why, so it is never lost silently; the same reason is not written twice running. */
+    const note = async (one: Open, outcome: 'throttled' | 'silenced' | 'deferred', why: AlertRecord['why'], now: number): Promise<void> => {
+      const last = [...(await read($, ledgerAtom)).alerts ?? []].reverse().find(a => a.key === one.key)
+      if (last?.outcome === outcome && last.why === why) return
+      // an acknowledgment typed while this pass was deciding covers the record it is about to write, as it covers a notice
+      const acked = isAckedAt(await read($, guardAtom), now)
+      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome, attempts: 0, channel: null, ...(why === undefined ? {} : { why }), ...(acked ? { acked: true as const } : {}) }) }))
+      await hush(() => persist($))
+    }
+    // after quiet hours, several held-back conditions are one notification, not one each
+    const batch: Open[] = []
+    {
       const now = await $.clock.now()
       const state = await read($, guardAtom)
       const kept = (await read($, ledgerAtom)).alerts ?? []
+      const late = due.filter(o => {
+        if (!owed.includes(o.key) || holdOf(guardCfg, o.kind, now) !== null) return false
+        const d = decideAlert(guardCfg, state, kept, o.key, now)
+
+        return d.send || d.why === 'throttled' || d.why === 'budget'
+      })
+      if (late.length >= 2) {
+        batch.push(...late)
+        const first = decideAlert(guardCfg, state, kept, (late[0] as Open).key, now)
+        if (!first.send) for (const one of late) await note(one, 'throttled', first.why === 'throttled' ? 'cooldown' : 'budget', now)
+        else {
+          const attempts = new Map(late.map(o => [o.key, episodeOf(kept, o.key).filter(a => a.outcome === 'failed' || a.outcome === 'refused').length + 1]))
+          await update($, guardAtom, old => ({ ...old, pending: true }))
+          const told = await notifyOwner($, digestOf(late.map(o => o.kind), task.id))
+          await update($, guardAtom, old => ({ ...old, pending: false, sentAt: now, count: old.count + 1 }))
+          const acked = isAckedAt(await read($, guardAtom), now)
+          await update($, ledgerAtom, old => ({ ...old, alerts: late.reduce((all, one) => boundedAlerts(all, { key: one.key, kind: one.kind, taskId: task.id, at: now, attempts: attempts.get(one.key) ?? 1, ...told, ...(acked ? { acked: true as const } : {}) }), old.alerts ?? []) }))
+          await hush(() => persist($))
+          cueOwner($, (late[0] as Open).key, now)
+        }
+      }
+    }
+    for (const one of due) {
+      if (batch.includes(one)) continue
+      const now = await $.clock.now()
+      const state = await read($, guardAtom)
+      const kept = (await read($, ledgerAtom)).alerts ?? []
+      // held back, then acknowledged before anything was sent: the person knows, and it is not announced afterwards
+      if (isSettledQuietly(kept, one.key)) continue
       const decision = decideAlert(guardCfg, state, kept, one.key, now)
+      if (!decision.send && decision.why !== 'throttled' && decision.why !== 'budget') {
+        // a silence mutes the notification, not the condition: one that was never told is recorded so it stays on the HUD
+        if (decision.why === 'silenced' && !episodeOf(kept, one.key).some(a => a.outcome === 'sent')) await note(one, 'silenced', undefined, now)
+        continue
+      }
+      // its kind is turned off, or quiet hours hold it: nothing is written to the terminal and no cue is played
+      const hold = holdOf(guardCfg, one.kind, now)
+      if (hold !== null) { await note(one, hold === 'quiet' ? 'deferred' : 'silenced', hold, now); continue }
       if (!decision.send) {
         // an alert that is due but held back is recorded once, with the reason, so a final blocked-run alert is never lost silently
-        const last = [...kept].reverse().find(a => a.key === one.key)
-        if ((decision.why === 'throttled' || decision.why === 'budget') && !(last?.outcome === 'throttled' && last.why === (decision.why === 'throttled' ? 'cooldown' : 'budget'))) {
-          await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome: 'throttled', attempts: 0, channel: null, why: decision.why === 'throttled' ? 'cooldown' : 'budget' }) }))
-          await hush(() => persist($))
-        }
+        await note(one, 'throttled', decision.why === 'throttled' ? 'cooldown' : 'budget', now)
         continue
       }
       await update($, guardAtom, old => ({ ...old, pending: true }))
@@ -2857,6 +2927,8 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
         const state = await read($, guardAtom)
         // this pass settles each notice before the next, so a mark seen here was left by a module that is gone: it costs one look, the `finally` clears it
         if (state.pending) continue
+        // in the quiet window a reminder waits like any alert of its class; none is queued, so one comes due afterwards, not one per interval missed
+        if (holdOf(guardCfg, one.kind, now) !== null) continue
         const again = remind(guardCfg, state, (await read($, ledgerAtom)).alerts ?? [], one.key, now)
         if (!again.send) continue
         await update($, guardAtom, old => ({ ...old, pending: true }))
@@ -2886,6 +2958,27 @@ const transportScope = async ($: EngineInterface) => ({
   link: linkOf(await $.env.get('SSH_CONNECTION').catch(() => undefined), await $.env.get('SSH_TTY').catch(() => undefined)),
   now: await $.clock.now(),
 })
+/**
+ * What the alert status needs beyond the records: the moment, what holds now, the connection, and the channel the host
+ * last reported writing to in this session (an alert's or a test's), which is all that is known about how it sounds.
+ */
+const guardSeen = async ($: EngineInterface, kept: readonly AlertRecord[]): Promise<GuardView> => {
+  const scope = await transportScope($).catch(() => ({ session: '', link: 'local' as const, now: 0 }))
+  const tests = await read($, transportAtom).then(t => myTests(validTransport(t), scope.session)).catch(() => [])
+  const last = [...kept.filter(a => a.outcome === 'sent' && a.channel !== null).map(a => ({ at: a.at, channel: a.channel })), ...tests.filter(a => a.outcome === 'sent' && a.channel !== null).map(a => ({ at: a.at, channel: a.channel }))].sort((a, b) => a.at - b.at).at(-1)
+
+  return { now: scope.now, open: await openAlerts($, kept), channel: last?.channel ?? null, isSsh: scope.link === 'ssh' }
+}
+/** The HUD's one alert row: open conditions, and a transport nobody confirmed. Null when there is nothing to pin or it cannot be read. */
+const guardPin = async ($: EngineInterface, view: { state: typeof EMPTY_GUARD; kept: AlertRecord[] }, width: number): Promise<PinLine | null> => {
+  try {
+    if (!guardCfg.enabled) return null
+    const scope = await transportScope($)
+    const unconfirmed = transportStatus(validTransport(await read($, transportAtom)), scope.session, scope.link, scope.now) !== 'USER CONFIRMED'
+
+    return pinLine(pinsOf(view.kept, await openAlerts($, view.kept)), unconfirmed, guardLabel(guardCfg, view.state, view.kept), width)
+  } catch { return null }
+}
 const transportText = async ($: EngineInterface): Promise<string[]> => {
   try {
     const scope = await transportScope($)
@@ -2980,7 +3073,7 @@ const rawSha = async ($: EngineInterface, path: string): Promise<string | null> 
 }
 
 /** The Stop guard's and the alerts' own settings: they decide whether a task may finish, so only the person changes them. */
-const GUARD_FIELDS = /^(?:stopGuard|verifyScript|verifyScriptSha256|verifyTimeoutSec|stopMaxContinuations|stopVolatile|stopWatch|guardAlerts|guardCooldownSec|guardMaxAlerts|guardRepeat|guardRepeatSec|guardMaxReminders|guardSound)$/
+const GUARD_FIELDS = /^(?:stopGuard|verifyScript|verifyScriptSha256|verifyTimeoutSec|stopMaxContinuations|stopVolatile|stopWatch|guardAlerts|guardCooldownSec|guardMaxAlerts|guardRepeat|guardRepeatSec|guardMaxReminders|guardSound|guardNotifyKinds|guardQuietHours|guardQuietTimezone|guardQuietOrdinary|guardQuietCritical)$/
 const isGuardRow = (e: { key: string }): boolean => {
   const at = e.key.indexOf('.')
 
@@ -4237,7 +4330,7 @@ export const register: Register = (on, options) => {
         if (arg !== '') await armReminders($)
         const view = await guardView($)
 
-        return { text: `${guardText(guardCfg, view.state, view.kept)}\n${(await transportText($)).join('\n')}${arg === 'ack' || arg === 'silence' || arg === 'unsilence' ? '\nThe verification verdict was not changed.' : ''}` }
+        return { text: `${guardText(guardCfg, view.state, view.kept, guardCfg.enabled ? await guardSeen($, view.kept) : undefined)}\n${(await transportText($)).join('\n')}${arg === 'ack' || arg === 'silence' || arg === 'unsilence' ? '\nThe verification verdict was not changed.' : ''}` }
       }
       case 'doctor':
         return { text: doctorText(await doctorFacts($)) }
@@ -4422,7 +4515,13 @@ export const register: Register = (on, options) => {
     const resumed = await resumeLine($)
     const modelWarning = runLedger.warnings.at(-1) ?? null
     const guardNow = await guardView($)
-    const guardLine = guardCfg.enabled ? `GUARD: ${guardLabel(guardCfg, guardNow.state, guardNow.kept)}` : null
+    // The alert row: pinned while a raised condition is open and unacknowledged, or the transport is unconfirmed; the
+    // plain state otherwise. One row either way, never animated, and apart from the verification and progress rows.
+    const pinned = await guardPin($, guardNow, layout.columns)
+    const guardText1 = guardCfg.enabled ? pinned?.text ?? `GUARD: ${guardLabel(guardCfg, guardNow.state, guardNow.kept)}` : null
+    const guardLine = guardText1 === null ? null : pinned === null || pinned.level === 'INFO'
+      ? <Text key="guard" dimColor wrap="truncate-end">{guardText1}</Text>
+      : <Text key="guard" color={pinned.level === 'CRITICAL' ? COLORS.bad : COLORS.warn} bold={pinned.level !== 'NORMAL'} wrap="truncate-end">{guardText1}</Text>
     const startupRows: Row[] = startup.active && layout.columns >= 44 ? [[{ text: startup.line, color: COLORS.steel, isBold: true }]] : []
     let rail: RenderElement
     if (e.surface === 'terminal' && Raster) {
@@ -4480,7 +4579,7 @@ export const register: Register = (on, options) => {
             </Text>
           ))}
           {flowEl}
-          {guardLine ? <Text dimColor wrap="truncate-end">{guardLine}</Text> : null}
+          {guardLine}
         </Box>
       )
     }
@@ -4503,7 +4602,7 @@ export const register: Register = (on, options) => {
         </Box>
         {secondary && e.props.maxRows > 1 ? <Text dimColor wrap="truncate-end">{secondary}</Text> : null}
         {flowEl}
-        {guardLine ? <Text dimColor wrap="truncate-end">{guardLine}</Text> : null}
+        {guardLine}
         {startupRows.map((row, at) => (
           <Text key={`startup-${at}`} wrap="truncate-end">
             {row.map((segment, n) => (

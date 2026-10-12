@@ -1,6 +1,6 @@
 # Privacy
 
-This policy describes what Cobalt Cockpit v0.5.5 observes, what it keeps, where it keeps it, how long it stays, how to remove it, and what can reach a model. It is written from the plugin's source. Where the plugin gives no guarantee, this page says so rather than implying one. Last updated 2026-10-12.
+This policy describes what Cobalt Cockpit v0.5.6 observes, what it keeps, where it keeps it, how long it stays, how to remove it, and what can reach a model. It is written from the plugin's source. Where the plugin gives no guarantee, this page says so rather than implying one. Last updated 2026-10-12.
 
 [SECURITY.md](SECURITY.md) covers the guards, process access and vulnerability reporting. This page covers data.
 
@@ -147,6 +147,8 @@ It never stores a prompt, code, diff, file path, command, session id, agent name
 With `guardAlerts` on (off by default) Cockpit asks Claude Code to raise a terminal notification whose text is one fixed sentence and a task number. It contains no prompt, path or code. Alert outcomes (kind, task number, time, sent/failed, channel name) are kept in the Run Ledger. SENT means the host reported that it wrote the notification to the channel it names (for example `terminal_bell`); Cockpit cannot tell whether you saw it. Nothing leaves your machine; the terminal decides what to show.
 
 With `guardRepeat` also on (off by default) the same kind of notification is repeated for a condition that is still open, as one fixed sentence, the task number and the reminder's ordinal and cap. With `guardSound` on (off by default) the bundled checkpoint cue is played through the same local players as the other cues, the terminal bell last. No new data is collected for either: the record adds only the reminder's ordinal, `resolved`, and `sound` or `bell` when a player exited 0.
+
+**Priorities, notified kinds and quiet hours (v0.5.6).** No new data is collected. The alert record gains one outcome, `deferred`, and two reasons, `quiet` and `kind-off`, for an alert that was held back instead of sent. Quiet hours read the clock and the time zone name you set (or the machine's own zone name); the zone name is shown in `/cockpit guard` and is not stored with any record. The HUD's alert row is drawn from the same records and is not kept. After quiet hours, several held-back conditions are told in one notification made of a count, one fixed sentence and a task number.
 
 **Notification tests (v0.5.5).** `/cockpit guard test`, typed by you, raises one notification that says it is a test and carries a random four-character code. Cockpit keeps, in session state only (not in the Run Ledger and not on disk of its own): the code, the time, the session id, whether this process was started in an SSH session (`SSH_CONNECTION` or `SSH_TTY` set or not; the values are never kept), what the host reported (sent, the channel name, or why not), whether a sound or bell player exited 0, and, after `/cockpit guard seen`, the time and whether you typed the code. At most eight tests are held. A confirmation is your statement that you saw or heard the test; Cockpit does not treat it as proof and never records a notification as delivered.
 

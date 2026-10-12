@@ -1,4 +1,4 @@
-# Cobalt Cockpit v0.5.5 — Elastic Swarm + Adaptive Intelligence
+# Cobalt Cockpit v0.5.6 — Elastic Swarm + Adaptive Intelligence
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
@@ -240,6 +240,39 @@ With `guardAlerts` and `guardRepeat` both on, an alert whose condition is still 
 - **One timer.** A single 30-second host timer (`$.clock.every`) exists only while something can still be repeated. It is cancelled on acknowledgment, silence, resolution, exhaustion and session end, and re-armed from the kept records after a reload, so counts carry on instead of starting over. No background process is started.
 - **No verdict changes.** An alert, a reminder, an acknowledgment or a silence never changes a gate, a hold, a review, a release approval or the task's percentage.
 - **What is claimed.** `sent` means the host reported writing the notification to the channel it names; `sound attempted` or `bell attempted` means a local player exited 0. Neither means you saw or heard it. Desktop popups are whatever your terminal does with the host's notification (the host's channels are kitty, iTerm2 and Ghostty; another terminal gets nothing under the host's automatic setting, or the bell if Claude Code's `preferredNotifChannel` is `terminal_bell`). Cockpit starts no desktop notifier of its own, and on a remote machine whether the notification reaches your local desktop depends on your terminal and connection and is not verified by Cockpit.
+
+### Alert priorities, quiet hours and the pinned alert row (v0.5.6)
+
+With no new option set, alerts are sent exactly as in v0.5.5. Two things differ by default while alerts are on: the HUD's `GUARD` row now adds `transport not confirmed` until you confirm a test in the session and becomes a pin while a raised condition is open, and a condition raised while the session is silenced is recorded so it stays visible.
+
+**Priorities.** Each alert kind has one fixed level. It orders the HUD row and decides what quiet hours treat as critical; it does not reorder sending.
+
+| Level | Kinds |
+| --- | --- |
+| `CRITICAL` | `security-failure` |
+| `HIGH` | `release-no-go`, `verification-exhausted`, `review-hold` |
+| `NORMAL` | `run-blocked` |
+
+**Notified kinds.** `guardNotifyKinds` is a comma-separated list of the kinds to notify (empty or `all`: every kind; `none`: only the critical one). `security-failure` cannot be turned off. A kind you leave out is not dropped: it is recorded, pinned on the HUD and listed by `/cockpit guard` as `NOT NOTIFIED, kind off`. A list that is not understood notifies every kind and says so.
+
+**Quiet hours.** `guardQuietHours` is a daily window such as `22:00-07:00` (24-hour, may cross midnight; empty is off). `guardQuietTimezone` names the zone it is read in (an IANA name such as `Europe/Berlin`); left empty it is the zone of the machine Claude Code runs on, which `/cockpit guard` shows together with the time there, and warns about over SSH. The window follows that zone's wall clock, so a night with a daylight-saving change is an hour shorter or longer.
+
+- `guardQuietOrdinary` (`defer` by default) and `guardQuietCritical` (`notify` by default) say what each class does in the window.
+- **Deferred** means nothing is written to your terminal: no notification and no sound. This matters because on a bell channel (`terminal_bell`, which is what a terminal such as WezTerm or Konsole gets) the notification *is* the bell, whether or not `guardSound` is on. Cockpit therefore does not "send quietly"; it does not send.
+- A deferred alert is recorded as `deferred`, stays pinned on the HUD for the whole window, and is told once after the window ends if it is still open and you have not acknowledged it. Several deferred conditions are told as one notification, not one each. A reminder that came due in the window is one reminder afterwards, not one per interval missed. All of it stays inside the cooldown and the session budget.
+- An alert you kept (`notify`) is sent as usual and is reported for what it is: `AUDIBLE` on a bell channel, and "whether that makes a sound is decided by your terminal and desktop" on the others. Cockpit cannot make the host deliver a notification silently and does not claim to. The separate `guardSound` cue is not played in the window.
+- A window, a zone or a mode that is not understood turns quiet hours off (`NOT IN FORCE`, with the reason): a setting that was not understood is never the reason an alert went unsent.
+- The same 30-second host timer as persistent alerts looks at the clock afresh each time; nothing is scheduled for a moment ahead, so a clock change is simply read again. No daemon, process or network call is added.
+
+**The pinned alert row.** With alerts on, the HUD's one `GUARD` row becomes a pin while a raised condition is still open and not acknowledged:
+
+```
+GUARD ▲ CRITICAL security check failed · task 3 · notification SENT, not acknowledged · +1 more
+```
+
+It names the gravest condition, the task, what became of its notification (`SENT`, `NOT SENT`, `DEFERRED`, `HELD BACK`, `NOT NOTIFIED`) and how many more are open. It also says `transport not confirmed` while alerts are armed and nobody confirmed a test in this session. It never says a notification was seen. The pin clears when the condition resolves or you run `/cockpit guard ack`; with nothing open and a confirmed transport the row is the plain `GUARD: ARMED` it always was, and with alerts off there is no row. It is one row, shortens to fit the width, is never animated, and is separate from the progress and verification rows.
+
+**Status.** `/cockpit guard` and `/cockpit doctor` show the priorities, which kinds are notified, the quiet-hours window with the zone, the time there and whether it is active, every active condition with its notification state and whether it is acknowledged, how many deferred alerts are owed, and the transport state. The five new settings, like the other alert settings, can be changed only by you in the config menu.
 
 ### Verified notification transport (v0.5.5)
 
