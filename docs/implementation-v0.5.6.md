@@ -55,7 +55,14 @@ The HUD already had one `GUARD` row while alerts are on. It is now a pin while a
 - The text is the widest of seven forms that fits the band; the narrowest are `▲ CRITICAL +2`, `▲ CRITICAL` and `▲`. It is static, so reduced motion changes nothing. CRITICAL is the failure colour, HIGH and NORMAL the warning colour; with nothing to pin the row is the dim `GUARD: ARMED` of v0.5.5, and with alerts off there is no row.
 - It says what the host reported (`SENT`, `NOT SENT`, `DEFERRED`, `HELD BACK`, `NOT NOTIFIED`). No form contains "seen", "heard" or "delivered".
 
-A new condition raised while the session is silenced is now recorded (`silenced`) so that it can be pinned; it is still not notified. This is the one addition to what v0.5.5 writes when no new option is set.
+A new condition raised while the session is silenced is now recorded (`silenced`) so that it can be pinned; it is still not notified. This is the one addition to what v0.5.5 writes when no new option is set. The row itself is the one visible default change: with alerts on it adds `transport not confirmed` until a test is confirmed in the session, and becomes a pin while a raised condition is open.
+
+## Known limits
+
+- **A recurrence with persistent alerts off.** v0.5.5 records `resolved` only with `guardRepeat` on, so without it a condition that clears and holds again in the same task is one occurrence: it is not notified a second time (unchanged), and the pin then reads `notification SENT, not acknowledged` about the earlier notification. With `guardRepeat` on the recurrence is a new occurrence and is told again.
+- **A misspelled kind.** In `guardNotifyKinds` an unknown name is ignored, so `run-blocked,reveiw-hold` notifies `run-blocked` only. `/cockpit guard` and `/cockpit doctor` warn and list exactly what is and is not notified; check that line after changing the setting. A list with no known name at all notifies every kind.
+- **Silence acknowledges.** `/cockpit guard silence` acknowledges everything recorded so far, deferred alerts included, so those are not announced after `unsilence`. Only a condition first raised during the silence stays pinned.
+- **A deferral that can no longer be told** (three failed sends, the budget spent, its kind turned off, or the session silenced) is no longer counted as owed and does not keep the timer alive; it stays pinned with its real state.
 
 ## Safety properties, and where they are tested
 
@@ -67,7 +74,7 @@ A new condition raised while the session is silenced is now recorded (`silenced`
 
 ## Tests
 
-`tests/alerts-quiet.test.ts` (71 tests; `tests/guard-settings.test.ts` gains 10 for the new settings): window parsing and membership across midnight; configuration and every unreadable form; zones, a half-hour offset, spring forward, fall back, an unreadable or jumping clock; levels and ordering; notified kinds; deferral bookkeeping; the digest text; the pin's lifecycle, statuses, width fitting from 0 to 170 columns and wording; the status lines; and, through the host: deferral with no notification and no cue, the end of the window on the timer alone, the critical default, a deferred critical alert staying visible, no flood, reminders across a long window, acknowledgment and resolution before the end, task reset and replacement, session end, silence, budget, unreadable settings, another zone, the bell-only channel, kinds, the HUD row with alerts off / unconfirmed / confirmed / pinned / acknowledged / resolved / failed / narrow / reduced motion, doctor, reload inside and after the window, a stored deferral of a task that is gone, and malformed stored records.
+`tests/alerts-quiet.test.ts` (74 tests; `tests/guard-settings.test.ts` gains 10 for the new settings): window parsing and membership across midnight; configuration and every unreadable form; zones, a half-hour offset, spring forward, fall back, an unreadable or jumping clock; levels and ordering; notified kinds; deferral bookkeeping; the digest text; the pin's lifecycle, statuses, width fitting from 0 to 170 columns and wording; the status lines; and, through the host: deferral with no notification and no cue, the end of the window on the timer alone, the critical default, a deferred critical alert staying visible, no flood, reminders across a long window, acknowledgment and resolution before the end, task reset and replacement, session end, silence, budget, unreadable settings, another zone, the bell-only channel, kinds, the HUD row with alerts off / unconfirmed / confirmed / pinned / acknowledged / resolved / failed / narrow / reduced motion, doctor, reload inside and after the window, a stored deferral of a task that is gone, and malformed stored records.
 
 These are synthetic. None of them shows that a person saw, heard or was spared anything.
 

@@ -2857,7 +2857,9 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
     const note = async (one: Open, outcome: 'throttled' | 'silenced' | 'deferred', why: AlertRecord['why'], now: number): Promise<void> => {
       const last = [...(await read($, ledgerAtom)).alerts ?? []].reverse().find(a => a.key === one.key)
       if (last?.outcome === outcome && last.why === why) return
-      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome, attempts: 0, channel: null, ...(why === undefined ? {} : { why }) }) }))
+      // an acknowledgment typed while this pass was deciding covers the record it is about to write, as it covers a notice
+      const acked = isAckedAt(await read($, guardAtom), now)
+      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, outcome, attempts: 0, channel: null, ...(why === undefined ? {} : { why }), ...(acked ? { acked: true as const } : {}) }) }))
       await hush(() => persist($))
     }
     // after quiet hours, several held-back conditions are one notification, not one each

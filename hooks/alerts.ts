@@ -199,15 +199,17 @@ const wasDeferred = (run: readonly AlertRecord[]): boolean => run.some(a => a.ou
 const wasSent = (run: readonly AlertRecord[]): boolean => run.some(a => a.outcome === 'sent')
 
 /**
- * The conditions quiet hours held back that are still owed a notification: nothing was written for them yet and the
- * person has not acknowledged them meanwhile. Oldest first, each with the record of its deferral.
+ * The conditions quiet hours held back that are still owed a notification: nothing was written for them yet, the
+ * person has not acknowledged them meanwhile, and one can still come (the retries are not spent, and the condition was
+ * not since silenced or its kind turned off). Oldest first, each with the record of its deferral.
  */
 export const deferredOf = (kept: readonly AlertRecord[]): AlertRecord[] => {
   const out: AlertRecord[] = []
   for (const key of keysOf(kept)) {
     const run = episodeOf(kept, key)
     const first = run.find(a => a.outcome === 'deferred')
-    if (first !== undefined && !wasSent(run) && run.at(-1)?.acked !== true) out.push(first)
+    const failed = run.filter(a => a.outcome === 'failed' || a.outcome === 'refused').length
+    if (first !== undefined && !wasSent(run) && run.at(-1)?.acked !== true && run.at(-1)?.outcome !== 'silenced' && failed < RETRY_CAP) out.push(first)
   }
 
   return out

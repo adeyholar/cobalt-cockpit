@@ -2,7 +2,7 @@
 
 ## Unreleased (0.5.6) — Alert priorities, quiet hours and the pinned alert row
 
-Alerts that are less intrusive and harder to miss. Nothing changes unless a new option is set. Details and the acceptance procedure: [docs/implementation-v0.5.6.md](docs/implementation-v0.5.6.md).
+Alerts that are less intrusive and harder to miss. What is sent, and when, does not change unless a new option is set; with alerts on, the HUD's `GUARD` row does change by default (see below). Details and the acceptance procedure: [docs/implementation-v0.5.6.md](docs/implementation-v0.5.6.md).
 
 - Fixed priority levels: `security-failure` CRITICAL; `release-no-go`, `verification-exhausted`, `review-hold` HIGH; `run-blocked` NORMAL. They order the HUD row and define what quiet hours treat as critical. The order alerts are sent in is unchanged.
 - `guardNotifyKinds`: which kinds are notified. The critical kind cannot be turned off; a kind left out is recorded and stays visible.

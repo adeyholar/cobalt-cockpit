@@ -211,6 +211,18 @@ describe('deferred alerts in the records', () => {
     expect(deferredOf([deferred(k), rec(k, { at: 2000, outcome: 'failed', channel: null, why: 'error' })]).map(a => a.key)).toEqual([k])
     expect(deferredOf([deferred(k), rec(k, { at: 2000, outcome: 'throttled', attempts: 0, channel: null, why: 'cooldown' })]).map(a => a.key)).toEqual([k])
   })
+  test('a deferral that can no longer be told is not owed, so it neither keeps the timer nor is promised', () => {
+    const fail = (n: number) => rec(k, { at: 2000 + n, outcome: 'failed', channel: null, why: 'error' })
+    expect(deferredOf([deferred(k), fail(1), fail(2)]).map(a => a.key)).toEqual([k])
+    expect(deferredOf([deferred(k), fail(1), fail(2), fail(3)])).toEqual([])
+    expect(hasWorkLeft(cfg, EMPTY_GUARD, [deferred(k), fail(1), fail(2), fail(3)])).toBe(false)
+    // its kind was turned off, or the session silenced, after it was deferred
+    const off = [deferred(k), rec(k, { at: 2000, outcome: 'silenced', attempts: 0, channel: null, why: 'kind-off' })]
+    expect(deferredOf(off)).toEqual([])
+    expect(hasWorkLeft(cfg, EMPTY_GUARD, off)).toBe(false)
+    expect(deferredOf([deferred(k), rec(k, { at: 2000, outcome: 'silenced', attempts: 0, channel: null })])).toEqual([])
+    expect(policyLines(cfg, off, { now: at('2026-01-15T12:00:00Z'), open: [{ kind: 'run-blocked', key: k }], channel: null, isSsh: false }).join('\n')).not.toContain('owed a notification')
+  })
   test('acknowledged while deferred is settled: the person knows, and a later occurrence is new', () => {
     expect(isSettledQuietly([deferred(k, { acked: true })], k)).toBe(true)
     expect(isSettledQuietly([deferred(k)], k)).toBe(false)
@@ -470,6 +482,26 @@ describe('in a run: quiet hours', () => {
     expect(w.notified).toEqual([])
     expect(outcomes(held)).toEqual(['run-blocked:deferred'])
     expect(task(held).blocker).toBe('needs the owner')
+  })
+  test('an acknowledgment that lands while a pass is deciding covers the deferral it writes', quietly(), async ($, on) => {
+    const w = world(on); const held = hostState(on, { 'guard-state': { ...EMPTY_GUARD, ackAt: 1_000_000 + HOUR } })
+    await start($); await planAndComplete($, 1); await block($)
+    expect((ledger(held).alerts ?? []).map(a => [a.outcome, a.acked])).toEqual([['deferred', true]])
+    await w.clock.advance(12 * HOUR)
+    expect(w.notified).toEqual([])
+  })
+  test('a deferral whose kind is turned off afterwards is not sent and not promised', quietly({ guardQuietHours: '22:00-00:10', guardNotifyKinds: 'none' }), async ($, on) => {
+    const t = settle(applyAction(settle(applyAction(newTask(1, 'goal', 100, null), { action: 'plan', milestones: FIVE.slice(0, 3) } as never, 101, null).task).task, { action: 'block', milestone: 'm1', note: 'needs the owner' } as never, 102, null).task).task
+    const w = world(on, {}, { 'ledger:s1': { ...emptyLedger('s1'), alerts: [deferred(`${t.id}@${t.startedAt}:run-blocked:task`, { at: 1 })] } })
+    on('session.id', () => ({ value: 's1' }))
+    const held = hostState(on, { task: t })
+    await start($)
+    await w.clock.advance(HOUR)
+    expect(w.notified).toEqual([])
+    expect(outcomes(held)).toEqual(['run-blocked:deferred', 'run-blocked:silenced'])
+    const status = await say($, 'guard')
+    expect(status).toContain('NOT NOTIFIED, kind off')
+    expect(status).not.toContain('owed a notification')
   })
   test('resolved before the window ends: recorded resolved, never announced, and the pin is gone', quietly(), async ($, on) => {
     const w = world(on); const held = hostState(on, {})

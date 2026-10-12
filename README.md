@@ -243,7 +243,7 @@ With `guardAlerts` and `guardRepeat` both on, an alert whose condition is still 
 
 ### Alert priorities, quiet hours and the pinned alert row (v0.5.6)
 
-All of this is off or unchanged by default: with no new option set, alerts are sent exactly as in v0.5.5.
+With no new option set, alerts are sent exactly as in v0.5.5. Two things differ by default while alerts are on: the HUD's `GUARD` row now adds `transport not confirmed` until you confirm a test in the session and becomes a pin while a raised condition is open, and a condition raised while the session is silenced is recorded so it stays visible.
 
 **Priorities.** Each alert kind has one fixed level. It orders the HUD row and decides what quiet hours treat as critical; it does not reorder sending.
 
