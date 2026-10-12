@@ -116,6 +116,15 @@ describe('the history merge: stale snapshots, interleaved sessions, conflicting 
     const out = mergeHistory(stale, newer, ids)
     expect(ackedOf(out)).toEqual([...ids].sort())
   })
+  test('a stored occurrence of a condition this session also holds records of is not added: two runs of one key would become one and lose an id', () => {
+    const k = 'u1:run-blocked:task'
+    const stale = written(rec(k, { at: 1000 }))
+    const own = written(rec(k, { at: 1000 }), rec(k, { outcome: 'resolved', attempts: 0, channel: null, at: 2000 }), rec(k, { at: 3000 }))
+    const out = mergeHistory(own.slice(1), stale)
+    expect(idsOf(out)).toEqual(idsOf(own.slice(1)))
+    const idsNow = new Set([idsOf(own)[1]!])
+    expect(ackedOf(mergeHistory(own.slice(1), stale, idsNow))).toEqual([...idsNow])
+  })
   test('an acknowledgment marked in either copy survives the merge (history written before v0.5.8 carried them there)', () => {
     const stale = mk(2, 0)
     const newer = applyAcks(mk(2, 10), new Set([idsOf(mk(2, 10))[0]!]))
@@ -224,7 +233,7 @@ describe('the digest', () => {
     expect(digestToast(occurrencesOf(applyAcks(kept, new Set(idsOf(kept))), []))).toBeNull()
   })
   test('the one-line form for the start of a session', () => {
-    expect(digestToast(occurrencesOf(acked, open))).toBe('Cobalt alerts: 4 unacknowledged recorded (1 CRITICAL, 1 HIGH, 2 NORMAL; 2 open now) · /cockpit alerts digest')
+    expect(digestToast(occurrencesOf(acked, open))).toBe('Cobalt alerts: 4 unacknowledged recorded (1 CRITICAL, 1 HIGH, 2 NORMAL) · /cockpit alerts digest')
   })
   test('a long history is bounded: the summary is the same few lines however many records there were', () => {
     let many: AlertRecord[] = []
@@ -421,7 +430,7 @@ describe('in a run: the return digest at the start of a session', () => {
     const { seed, t } = await seedHistory()
     const w = world(on, {}, seed); hostState(on, { task: t }); session(on, 's2')
     await start($); await start($); await start($)
-    expect(w.toasts.filter(x => x.startsWith('Cobalt alerts'))).toEqual(['Cobalt alerts: 2 unacknowledged recorded (1 CRITICAL, 1 NORMAL; 1 open now) · /cockpit alerts digest'])
+    expect(w.toasts.filter(x => x.startsWith('Cobalt alerts'))).toEqual(['Cobalt alerts: 2 unacknowledged recorded (1 CRITICAL, 1 NORMAL) · /cockpit alerts digest'])
     expect(w.notified).toEqual([])
     expect(w.outbound).toEqual([])
     expect(w.runs.filter(r => !['git', 'realpath', 'readlink', 'stat', 'find', 'tail', 'mkdir', 'chmod', 'rm'].includes(r[0] as string))).toEqual([])
@@ -430,17 +439,29 @@ describe('in a run: the return digest at the start of a session', () => {
     const { seed, t, records } = await seedHistory()
     const project = await projectHash('/work/example')
     const acks = Object.fromEntries(idsOf(records).map(id => [ackKeyOf(project, id), { v: 1 }]))
-    const w = world(on, {}, { ...seed, ...acks, 'alert-digest': { v: 1, shown: ['s1'] } }); hostState(on, { task: t }); session(on, 's2')
+    const w = world(on, {}, { ...seed, ...acks, 'alert-digest': { v: 1, shown: [{ id: 's1', at: 1 }] } }); hostState(on, { task: t }); session(on, 's2')
     await start($)
     expect(w.toasts.filter(x => x.startsWith('Cobalt alerts'))).toEqual([])
     // marked, so a later reload with new alerts does not announce them as the session's start
-    expect(w.storeWrites.filter(s => s.key === 'alert-digest').at(-1)!.value).toEqual({ v: 1, shown: ['s1', 's2'] })
+    expect(w.storeWrites.filter(s => s.key === 'alert-digest').at(-1)!.value).toMatchObject({ v: 1, shown: [{ id: 's1', at: 1 }, { id: 's2' }] })
+  })
+  test('a marker in the future (a clock stepped back) counts as recent: nothing is shown again', ON(), async ($, on) => {
+    const { seed, t } = await seedHistory()
+    const w = world(on, {}, { ...seed, 'alert-digest': { v: 1, shown: [{ id: 's2', at: 9_000_000_000 }] } }); hostState(on, { task: t }); session(on, 's2')
+    await start($)
+    expect(w.toasts.filter(x => x.startsWith('Cobalt alerts'))).toEqual([])
   })
   test('a session already summarised is not summarised again', ON(), async ($, on) => {
     const { seed, t } = await seedHistory()
-    const w = world(on, {}, { ...seed, 'alert-digest': { v: 1, shown: ['s2'] } }); hostState(on, { task: t }); session(on, 's2')
+    const w = world(on, {}, { ...seed, 'alert-digest': { v: 1, shown: [{ id: 's2', at: 1_000_000 }] } }); hostState(on, { task: t }); session(on, 's2')
     await start($)
     expect(w.toasts.filter(x => x.startsWith('Cobalt alerts'))).toEqual([])
+  })
+  test('a resumed session, back after more than half an hour, is summarised again', ON(), async ($, on) => {
+    const { seed, t } = await seedHistory()
+    const w = world(on, {}, { ...seed, 'alert-digest': { v: 1, shown: [{ id: 's2', at: -3_600_000 }] } }); hostState(on, { task: t }); session(on, 's2')
+    await start($)
+    expect(w.toasts.filter(x => x.startsWith('Cobalt alerts'))).toHaveLength(1)
   })
   test('another project\'s history is not summarised, and a damaged marker is ignored', ON(), async ($, on) => {
     const { seed } = await seedHistory('/work/elsewhere')

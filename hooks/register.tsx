@@ -2571,10 +2571,11 @@ export const ledgerRequest = async ($: EngineInterface, e: { turnId: string; ind
   await persist($)
 }
 /**
- * What the host's store guarantees, read from its implementation in Claude Code 2.1.296 and not documented by it: every
- * `$.store.set` and `$.store.delete` takes a lock file beside the store, reads the whole store inside the lock, changes that
- * one key and writes; so one set is atomic across sessions and processes, and a set of one key never changes another. There is
- * no compare-and-set and no transaction: a `get` followed by a `set` is two steps, and another session's set may come between
+ * What the host's store does, read from its implementation in Claude Code 2.1.296 and not documented by it: every
+ * `$.store.set` and `$.store.delete` takes a lock file beside the store (retried a few times, so a contended set can be
+ * rejected), reads the whole store inside the lock, changes that one key and writes; so one session's set is serialised
+ * against another's while the lock holds, and a set of one key never changes another. Stale-lock takeover and the atomicity
+ * of the file write itself were not examined. There is no compare-and-set and no transaction: a `get` followed by a `set` is two steps, and another session's set may come between
  * them. Nothing here claims more than that.
  *
  * So the alerts are kept in two kinds of key (v0.5.8):
@@ -2611,7 +2612,15 @@ const recordAcks = async ($: EngineInterface, project: string, ids: readonly str
   return ok
 }
 /** Marks the Ledger's records of every occurrence acknowledged in the store, in this session or another. Writes nothing to the store. */
-const syncAcks = async ($: EngineInterface, rearm = true): Promise<void> => {
+let syncedAt = -Infinity
+const SYNC_MIN_MS = 5000
+const syncAcks = async ($: EngineInterface, rearm = true, throttled = false): Promise<void> => {
+  // an alert pass runs on every tool result: the store's key list is read at most every few seconds there; a command or a start always reads it
+  if (throttled) {
+    const now = await $.clock.now()
+    if (now >= syncedAt && now - syncedAt < SYNC_MIN_MS) return
+    syncedAt = now
+  }
   const held = await read($, ledgerAtom)
   const alerts = held.alerts ?? []
   if (held.alertsProject === undefined || alerts.every(a => a.acked === true || a.outcome === 'resolved')) return
@@ -2925,7 +2934,7 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
   guarding = true
   try {
     // an occurrence acknowledged in another session is acknowledged here before anything is decided about it
-    await hush(() => syncAcks($, false))
+    await hush(() => syncAcks($, false, true))
     const task = await read($, taskAtom)
     if (task === null) {
       // no task: only a condition still to be closed (told, or held back by quiet hours) calls for a look
@@ -3049,16 +3058,24 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
 /** The key of the occurrence with this id: what a single acknowledgment is noted against while a pass may be writing. */
 const episodesKey = (kept: readonly AlertRecord[], id: string): string | null => episodesOf(kept).find(e => e.id === id)?.key ?? null
 const DIGEST_KEY = 'alert-digest'
-/** The session start's one line, when `guardDigest` is on: shown in the terminal's own toast (never a desktop notification), computed from the records, once per session id. */
+const DIGEST_RELOAD_MS = 30 * 60_000
+/**
+ * The session start's one line, when `guardDigest` is on: shown in the terminal's own toast (never a desktop notification),
+ * computed from the records. A hot reload fires the session start again within seconds, a resume comes back much later with
+ * the same session id: the marker holds the session id and the moment, and the line is not shown again for the same session
+ * within half an hour. A moment in the future (a clock stepped back) counts as recent. The marker is a read and a write of
+ * one key, so two sessions starting at once can drop each other's entry; that can only show the line once more.
+ */
 const showDigest = async ($: EngineInterface): Promise<void> => {
   if (!guardCfg.digest) return
   const id = (await read($, ledgerAtom)).sessionId
   if (id === UNKNOWN) return
   const held = (await $.store.get(DIGEST_KEY).catch(() => undefined)) as { v?: unknown; shown?: unknown } | undefined
-  const shown = held?.v === 1 && Array.isArray(held.shown) ? held.shown.filter((x): x is string => typeof x === 'string').slice(-15) : []
-  if (shown.includes(id)) return
+  const shown = held?.v === 1 && Array.isArray(held.shown) ? held.shown.filter((x): x is { id: string; at: number } => x !== null && typeof x === 'object' && typeof (x as { id?: unknown }).id === 'string' && typeof (x as { at?: unknown }).at === 'number').slice(-15) : []
+  const now = await $.clock.now()
+  if (shown.some(x => x.id === id && !(now - x.at >= DIGEST_RELOAD_MS))) return
   // marked before it is shown: a reload that comes straight after does not show it twice
-  await $.store.set(DIGEST_KEY, { v: 1, shown: [...shown, id] })
+  await $.store.set(DIGEST_KEY, { v: 1, shown: [...shown.filter(x => x.id !== id), { id, at: now }] })
   await hush(() => syncAcks($, false))
   const kept = (await read($, ledgerAtom)).alerts ?? []
   const line = digestToast(occurrencesOf(kept, await openAlerts($, kept)))
@@ -4441,8 +4458,9 @@ export const register: Register = (on, options) => {
         if (arg === 'ack' || arg === 'silence') {
           // the count first, then the records: a notice appended between the two is covered by one or the other
           await update($, guardAtom, old => ({ ...withAck(old, null), ...(arg === 'silence' ? { all: true } : {}) }))
-          const pending = pendingIdsOf((await read($, ledgerAtom)).alerts ?? [])
-          await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
+          // the occurrences acknowledged are those the update itself marks, so a record appended meanwhile is not left without its key
+          let pending: string[] = []
+          await update($, ledgerAtom, old => { pending = pendingIdsOf(old.alerts ?? []); return { ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) } })
           // each occurrence acknowledged here is a key of its own as well, so another session reads it
           const project = (await read($, ledgerAtom)).alertsProject
           if (project !== undefined && pending.length > 0) await hush(() => recordAcks($, project, pending))

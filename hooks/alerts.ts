@@ -493,7 +493,10 @@ export const applyAcks = (kept: readonly AlertRecord[], ids: ReadonlySet<string>
  */
 export const mergeHistory = (own: readonly AlertRecord[], stored: readonly AlertRecord[], acked: ReadonlySet<string> = new Set()): AlertRecord[] => {
   const mine = new Set(episodesOf(own).map(e => e.id))
-  const foreign = episodesOf(stored).filter(e => !mine.has(e.id)).flatMap(e => e.records)
+  const ownKeys = new Set(own.map(a => a.key))
+  // an occurrence of a condition this session also holds records of is not added from the stored copy: grouped with the session's
+  // own, the two would become one run and the later occurrence would lose its id
+  const foreign = episodesOf(stored).filter(e => !mine.has(e.id) && !ownKeys.has(e.key)).flatMap(e => e.records)
   const all = new Set([...acked, ...markedIdsOf(own), ...markedIdsOf(stored)])
 
   return applyAcks([...foreign, ...own], all).slice(-ALERT_CAP)
@@ -545,7 +548,7 @@ export const digestToast = (occ: readonly Occurrence[]): string | null => {
   if (d.unacked === 0) return null
   const lv = (['CRITICAL', 'HIGH', 'NORMAL'] as const).filter(l => d.levels[l] > 0).map(l => `${d.levels[l]} ${l}`).join(', ')
 
-  return `Cobalt alerts: ${d.unacked} unacknowledged recorded (${lv}; ${d.open} open now) · /cockpit alerts digest`
+  return `Cobalt alerts: ${d.unacked} unacknowledged recorded (${lv}) · /cockpit alerts digest`
 }
 
 const stamp = (at: number): string => {
