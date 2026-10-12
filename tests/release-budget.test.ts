@@ -189,6 +189,17 @@ describe('a release review through the host', () => {
     expect(task(held).review).toMatchObject({ grounds: ['release'], consult: null, state: 'required' })
     expect(task(held).percent).toBeLessThan(100)
   })
+  test('v0.5.3: a file hidden with assume-unchanged or skip-worktree makes the candidate unknown, an ordinary index does not', LED, async ($, on) => {
+    const w = world(on); const held = hostState(on, {}); await releaseTask($)
+    for (const flagged of ['h src/a.ts\0', 'S src/a.ts\0', 's src/a.ts\0', 'H src/ok.ts\0h src/hidden.ts\0']) {
+      w.indexFlags = flagged
+      expect(String((await call($, releasePacket)).result)).toContain('CANDIDATE UNKNOWN')
+    }
+    expect(ledger(held).consults ?? []).toHaveLength(0)
+    expect(w.spawns).toHaveLength(0)
+    w.indexFlags = 'H src/a.ts\0H src/b.ts\0'
+    expect(String((await call($, releasePacket)).result)).toContain('OPUS ADMITTED')
+  })
   test('a restart (a new world on the same store) still sees the review of that commit', LED, async ($, on) => {
     world(on, {}, { 'release-reviews': [{ candidate: A, id: 'opus-1-aaaaaa', at: 1, returned: true }] }); hostState(on, {}); await releaseTask($)
     expect(String((await call($, releasePacket)).result)).toContain('DUPLICATE')

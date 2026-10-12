@@ -264,6 +264,11 @@ const candidateOf = async ($: EngineInterface): Promise<Candidate> => {
     const status = await run(['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'])
     if (status.exitCode !== 0 || status.isStdoutTruncated) return { sha: null, why: 'unknown' }
     if (status.stdout.trim() !== '') return { sha: null, why: 'dirty' }
+    // `status` does not see a path the index is told to ignore: assume-unchanged (a lowercase tag) or skip-worktree (S or s). A flagged
+    // path can hide a change, so the tree is not shown clean; an unreadable listing is no answer either.
+    const flags = await run(['ls-files', '-v', '-z'])
+    if (flags.exitCode !== 0 || flags.isStdoutTruncated) return { sha: null, why: 'unknown' }
+    if (flags.stdout.split('\0').some(entry => /^[a-zSs] /.test(entry))) return { sha: null, why: 'unknown' }
     const sha = head.stdout.trim()
 
     return isCandidate(sha) ? { sha } : { sha: null, why: 'unknown' }
