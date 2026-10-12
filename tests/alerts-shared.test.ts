@@ -445,6 +445,15 @@ describe('in a run: the return digest at the start of a session', () => {
     // marked, so a later reload with new alerts does not announce them as the session's start
     expect(w.storeWrites.filter(s => s.key === 'alert-digest').at(-1)!.value).toMatchObject({ v: 1, shown: [{ id: 's1', at: 1 }, { id: 's2' }] })
   })
+  test('a reload long into the session does not show it again, whatever the marker says', ON(), async ($, on) => {
+    const { seed, t } = await seedHistory()
+    const w = world(on, {}, { ...seed, 'alert-digest': { v: 1, shown: [{ id: 's2', at: -3_600_000 }] } }); hostState(on, { task: t }); session(on, 's2')
+    await start($)
+    expect(w.toasts.filter(x => x.startsWith('Cobalt alerts'))).toHaveLength(1)
+    await w.clock.advance(2 * HOUR)
+    await start($)
+    expect(w.toasts.filter(x => x.startsWith('Cobalt alerts'))).toHaveLength(1)
+  })
   test('a marker in the future (a clock stepped back) counts as recent: nothing is shown again', ON(), async ($, on) => {
     const { seed, t } = await seedHistory()
     const w = world(on, {}, { ...seed, 'alert-digest': { v: 1, shown: [{ id: 's2', at: 9_000_000_000 }] } }); hostState(on, { task: t }); session(on, 's2')

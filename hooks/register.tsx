@@ -3061,9 +3061,9 @@ const DIGEST_KEY = 'alert-digest'
 const DIGEST_RELOAD_MS = 30 * 60_000
 /**
  * The session start's one line, when `guardDigest` is on: shown in the terminal's own toast (never a desktop notification),
- * computed from the records. A hot reload fires the session start again within seconds, a resume comes back much later with
- * the same session id: the marker holds the session id and the moment, and the line is not shown again for the same session
- * within half an hour. A moment in the future (a clock stepped back) counts as recent. The marker is a read and a write of
+ * computed from the records. A hot reload fires the session start again and finds the host-held Ledger already this session's:
+ * it shows nothing. A resume comes back with the same session id and an empty Ledger: the marker holds the session id and the
+ * moment, and the line is not shown again for the same session within half an hour (two starts of one process in a row). A moment in the future (a clock stepped back) counts as recent. The marker is a read and a write of
  * one key, so two sessions starting at once can drop each other's entry; that can only show the line once more.
  */
 const showDigest = async ($: EngineInterface): Promise<void> => {
@@ -3573,9 +3573,15 @@ export const register: Register = (on, options) => {
         startTicker($)
       }
     })
+    // a hot reload finds the host-held Ledger already belonging to this session; a resume or a new process finds it empty
+    let isReload = false
+    try {
+      const id = (await $.session.id().catch(() => '')) || UNKNOWN
+      isReload = id !== UNKNOWN && (await read($, ledgerAtom)).sessionId === id
+    } catch { /* unreadable: treated as not a reload, and the marker decides */ }
     await ledgerStart($)
     // opt-in (guardDigest): one line about unacknowledged recorded alerts, once for this session, never again on a reload
-    await quiet(() => showDigest($))
+    if (!isReload) await quiet(() => showDigest($))
     await changeSwarm($, held => configureSwarm(held, { total: config.maxSubagents, sonnet: config.maxSonnet, haiku: config.maxHaiku, opus: isSonnetLed() ? (SONNET_LED_SWARM.opus as number) : 0 }))
     void refreshGit($)
     void refreshMeter($)
