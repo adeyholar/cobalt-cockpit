@@ -3,7 +3,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { hostState, start, world } from './world'
 
-const FIELDS = ['stopGuard', 'verifyScript', 'verifyScriptSha256', 'verifyTimeoutSec', 'stopMaxContinuations', 'stopVolatile', 'stopWatch', 'guardAlerts', 'guardCooldownSec', 'guardMaxAlerts', 'guardRepeat', 'guardRepeatSec', 'guardMaxReminders', 'guardSound', 'guardNotifyKinds', 'guardQuietHours', 'guardQuietTimezone', 'guardQuietOrdinary', 'guardQuietCritical']
+const FIELDS = ['stopGuard', 'verifyScript', 'verifyScriptSha256', 'verifyTimeoutSec', 'stopMaxContinuations', 'stopVolatile', 'stopWatch', 'guardAlerts', 'guardCooldownSec', 'guardMaxAlerts', 'guardRepeat', 'guardRepeatSec', 'guardMaxReminders', 'guardSound', 'guardNotifyKinds', 'guardQuietHours', 'guardQuietTimezone', 'guardQuietOrdinary', 'guardQuietCritical', 'guardDigest']
 const set = ($: any, key: string, origin: unknown) => $.config.set({ key, value: 'OBSERVE', origin, provider: { plugin: 'cobalt-cockpit', tier: 'user' } } as never)
 
 describe('L1: guard settings are changed only from the config menu', () => {
