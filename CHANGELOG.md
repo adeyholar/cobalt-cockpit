@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased (0.5.5) — Verified notification transport
+## Unreleased (0.5.6) — Alert priorities, quiet hours and the pinned alert row
+
+Alerts that are less intrusive and harder to miss. Nothing changes unless a new option is set. Details and the acceptance procedure: [docs/implementation-v0.5.6.md](docs/implementation-v0.5.6.md).
+
+- Fixed priority levels: `security-failure` CRITICAL; `release-no-go`, `verification-exhausted`, `review-hold` HIGH; `run-blocked` NORMAL. They order the HUD row and define what quiet hours treat as critical. The order alerts are sent in is unchanged.
+- `guardNotifyKinds`: which kinds are notified. The critical kind cannot be turned off; a kind left out is recorded and stays visible.
+- Quiet hours (`guardQuietHours`, `guardQuietTimezone`, `guardQuietOrdinary`, `guardQuietCritical`), off by default: a daily wall-clock window in a named zone, midnight-crossing and daylight-saving aware. A deferred alert sends no notification and plays no sound, because on a bell channel the notification is the sound; it is recorded `deferred`, stays on the HUD, and is told once afterwards (several as one notification). Settings that are not understood turn quiet hours off, with the reason shown.
+- An alert kept during the window is reported as audible on a bell channel and as unknown elsewhere, never as silent.
+- The HUD's `GUARD` row pins open, unacknowledged conditions with their level and notification state, and an unconfirmed transport while armed. It clears on resolution or acknowledgment and never states that a notification was seen.
+- A new condition raised while the session is silenced is now recorded (`silenced`) so it stays visible; it is still not notified.
+- `/cockpit guard` and `/cockpit doctor` show priorities, notified kinds, the quiet window with the time in its zone, active conditions and deferred alerts.
+- The new settings are person-only, like the other alert settings. No new process, timer, network call or credential: the existing 30-second host timer also looks for the end of the window.
+
+## 0.5.5 — Verified notification transport
 
 Diagnostics and a person's confirmation for whether Cobalt Guard's notifications reach the current terminal. Details and the operator checklist: [docs/implementation-v0.5.5.md](docs/implementation-v0.5.5.md).
 

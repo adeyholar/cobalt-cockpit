@@ -26,7 +26,8 @@ export type TransportTest = {
   link: Link
   outcome: 'sent' | 'failed' | 'refused'
   channel: string | null
-  why?: Why
+  /** Why the host did not send it. An alert's own reasons for being held back (quiet hours, a kind turned off) never apply to a test. */
+  why?: Exclude<Why, 'quiet' | 'kind-off'>
   sound: SoundState
   seenAt?: number
   /** Whether the person typed the code the notification showed, or confirmed without one. */
