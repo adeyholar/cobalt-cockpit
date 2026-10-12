@@ -79,7 +79,7 @@ const findKey = (n: unknown, key: string): Exclude<N, string | number | null | u
 const emit = (frame: Record<string, unknown>): void => { console.log('@@FRAME@@' + JSON.stringify(frame)) }
 const textRows = (text: string): Row[] => text.split('\n').map(line => [{ text: line, color: null, bg: null, dim: false, bold: false }])
 
-test('SYNTHETIC DEMO capture', { options: { orchestration: true, maxSubagents: 8, maxSonnetAgents: 4, maxHaikuAgents: 4, guardAlerts: true } }, async ($: Engine, on) => {
+test('SYNTHETIC DEMO capture', { options: { orchestration: true, guardAlerts: true } }, async ($: Engine, on) => {
   const w = world(on)
   const held = hostState(on, {})
   await start($)
@@ -260,6 +260,7 @@ test('SYNTHETIC DEMO capture', { options: { orchestration: true, maxSubagents: 8
   await $.turn.complete({ turnId: 'main-1', reason: 'answer', answer: 'Done.', durationMs: 20, isAborted: false } as never)
   await advance(1000)
   await huds(7, false)
+  await slash('s7-ready', 7, 'cockpit', 'ready', 'command')
   await slash('s7-status', 7, 'cockpit', 'status', 'command')
   for (const l of log) console.log('@@LOG@@' + l)
   console.log('@@OUTBOUND@@' + JSON.stringify(w.outbound))

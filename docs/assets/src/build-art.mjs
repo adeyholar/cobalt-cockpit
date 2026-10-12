@@ -15,8 +15,9 @@
 //   - The flow row, the gate names and every label are words the HUD prints.
 //
 // Text is set in the viewer's monospace font with a pinned textLength, so a different font changes the
-// letterforms and never the layout; every glyph outside ASCII is drawn as a shape. The title is drawn, not typeset.
-// Motion is additive: the picture is complete without it, and prefers-reduced-motion switches it off.
+// letterforms and never the layout; marks, checks and diamonds are drawn as shapes. The title is drawn, not typeset.
+// Motion is additive: the picture is complete without it, and prefers-reduced-motion switches it off. The middle
+// dot is the one typed character outside ASCII.
 
 import { execFile } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -51,9 +52,10 @@ const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&
 const mono = (x, y, s, size, fill, o = {}) => {
   const step = size * 0.6 + (o.track ?? 0)
   const width = s.length * step - (o.track ?? 0)
+  // the width is known, so right-aligned text is placed by its start: no text-anchor beside textLength
   const attrs = [
-    `x="${n(x)}"`, `y="${n(y)}"`, `font-size="${size}"`, `fill="${fill}"`, `textLength="${n(width)}"`,
-    o.weight ? `font-weight="${o.weight}"` : '', o.anchor ? `text-anchor="${o.anchor}"` : '', o.opacity ? `opacity="${o.opacity}"` : '', o.cls ? `class="${o.cls}"` : '',
+    `x="${n(o.anchor === 'end' ? x - width : x)}"`, `y="${n(y)}"`, `font-size="${size}"`, `fill="${fill}"`, `textLength="${n(width)}"`,
+    o.weight ? `font-weight="${o.weight}"` : '', o.opacity ? `opacity="${o.opacity}"` : '', o.cls ? `class="${o.cls}"` : '',
   ].filter(Boolean).join(' ')
   return [`<text ${attrs}>${esc(s)}</text>`, width, step]
 }
@@ -161,8 +163,6 @@ const hero = (t, animated) => {
   left += `<g opacity="${t === THEMES.dark ? 0.3 : 0.16}" filter="url(#soft)">${titleGroup(cobalt, y1, t.cobalt)}</g>`
   left += titleGroup(cobalt, y1, 'url(#cobaltInk)')
   left += titleGroup(cockpit, y2, t.ink)
-  // the tear: a displaced band of the title, the mascot's own glitch, at rest unless motion is on
-  left += `<g clip-path="url(#tear)" class="tear">${titleGroup(cobalt, y1, t.sonnet, ' transform-origin="0 0"')}</g>`
   left += mono(TX, subY, sub, subSize, t.silver, { track: subTrack, weight: 600 })[0]
   tag.forEach((s, i) => {
     left += text(TX, tagY + i * 25, '>', tagSize, t.cobaltHi, { weight: 700 })
@@ -187,8 +187,8 @@ const hero = (t, animated) => {
     out += `<path d="M${x} 300V286H${x + 22}" fill="none" stroke="${color}" stroke-width="1.6"/>`
     out += line(x + 16, 311, [[label, color, 700], [` / ${role}`, t.steel]], 12.5)[0]
     out += nodes
-    out += text(x + 254, 349, cap, 10.5, t.steel, { anchor: 'end', track: 0.5 })
-    out += text(x + 16, 380, words, 10.5, t.steel, { track: 0.5 })
+    out += text(x + 254, 349, cap, 11.5, t.silver, { anchor: 'end', track: 0.3 })
+    out += text(x + 16, 381, words, 11.5, t.steel, { track: 0.3 })
     return out
   }
   const bracket = (cx, cy, r, color) => `<path d="M${cx - r} ${cy - r + 5}V${cy - r}H${cx - r + 5}M${cx + r - 5} ${cy - r}H${cx + r}V${cy - r + 5}M${cx + r} ${cy + r - 5}V${cy + r}H${cx + r - 5}M${cx - r + 5} ${cy + r}H${cx - r}V${cy + r - 5}" fill="none" stroke="${color}" stroke-width="1" opacity=".55"/>`
@@ -221,17 +221,17 @@ const hero = (t, animated) => {
   // escalation: Haiku to Sonnet to Opus
   right += `<path d="M918 344H886M640 286V${CY}H${CX - R - 8}" fill="none" stroke="${t.opus}" stroke-width="1.2" stroke-dasharray="2 5" opacity=".8"/>`
   right += `<path d="M882 344l7 -4v8zM${CX - R - 3} ${CY}l-7 -4v8z" fill="${t.opus}" opacity=".8"/>`
-  right += text(652, 182, 'ESCALATION', 10, t.opus, { track: 1 })
+  right += text(652, 181, 'ESCALATION', 11, t.opus, { track: 1 })
   // the commander
   right += `<path class="breathe" d="M${hex(CX, CY, R + 9)}Z" fill="${t.opus}" opacity="${t.glow}"/>`
   right += `<path d="M${hex(CX, CY, R)}Z" fill="${t.well}" stroke="${t.opus}" stroke-width="2"/>`
   right += `<path d="M${CX} ${CY - 11}L${CX + 11} ${CY}L${CX} ${CY + 11}L${CX - 11} ${CY}Z" fill="${t.opus}"/>`
   right += line(CX + 46, 186, [['OPUS 5.5', t.opus, 700], [' / COMMANDER', t.steel]], 14)[0]
-  right += text(CX + 46, 206, 'PLAN · DELEGATE · INTEGRATE · VERIFY', 10.5, t.steel, { track: 0.3 })
+  right += text(CX + 46, 207, 'PLAN · DELEGATE · INTEGRATE · VERIFY', 11.5, t.steel)
   right += pool(610, 'SONNET 5.5', 'ENGINEER', 'ENGINEER · DEBUG · REVIEW', t.sonnet, 'AUTO / UP TO 8', sonnetNodes)
   right += pool(918, 'HAIKU 5.5', 'SCOUT', 'SCOUT · INVENTORY · CLASSIFY', t.haiku, 'AUTO / UP TO 16', haikuNodes)
-  right += text(X0 + 20, 422, 'OWNERSHIP · WAVES · BACKPRESSURE', 10.5, t.steel, { track: 1.1 })
-  right += text(X1 - 20, 422, 'EVIDENCE BEFORE DONE', 10.5, t.steel, { anchor: 'end', track: 1.1 })
+  right += text(X0 + 20, 422, 'OWNERSHIP · WAVES · BACKPRESSURE', 11.5, t.steel, { track: 0.9 })
+  right += text(X1 - 20, 422, 'EVIDENCE BEFORE DONE', 11.5, t.steel, { anchor: 'end', track: 0.9 })
 
   // ---- the flow row: the Neural Flow as the HUD prints it, drawn rather than typed
   const FY = 488
@@ -242,7 +242,7 @@ const hero = (t, animated) => {
   const fixed = NODES.reduce((sum, [name]) => sum + G + 8 + name.length * fStep - 0.8, 0)
   const FX0 = 138, FX1 = 1224
   const edge = (FX1 - FX0 - fixed) / 5
-  let flow = text(TX, FY + 4.5, 'FLOW', 11, t.steel, { track: 1.6 })
+  let flow = text(TX, FY + 4.5, 'FLOW', 11.5, t.steel, { track: 1.6 })
   let fx = FX0
   NODES.forEach(([name, state], i) => {
     const color = state === 'ok' ? t.ok : state === 'active' ? t.opus : t.steel
@@ -253,7 +253,7 @@ const hero = (t, animated) => {
     flow += text(fx + G + 8, FY + 4.7, name, fSize, color, { track: 0.8, weight: state === 'pending' ? 400 : 600 })
     fx += G + 8 + name.length * fStep - 0.8
     if (i < NODES.length - 1) {
-      const a = fx + 14, b = fx + edge - 14
+      const a = fx + 14, b = fx + edge - 20
       const next = NODES[i + 1][1]
       if (next === 'pending') flow += `<path d="M${n(a)} ${FY + 3}H${n(b)}" stroke="${t.steel}" stroke-width="2" stroke-dasharray="2 6" stroke-linecap="round" opacity=".7"/>`
       else {
@@ -274,7 +274,7 @@ const hero = (t, animated) => {
   const gSize = 12.5
   const gStep = gSize * 0.6 + 0.6
   const GATES = [['CODE', 'pass'], ['TEST', 'pass'], ['TYPE', 'pass'], ['BUILD', 'pending'], ['SECURITY', 'unset'], ['GIT', 'unset']]
-  let gates = text(TX, GY, 'GATES', 11, t.steel, { track: 1.6 })
+  let gates = text(TX, GY, 'GATES', 11.5, t.steel, { track: 1.6 })
   let gx = FX0
   for (const [name, state] of GATES) {
     gates += text(gx, GY, name, gSize, state === 'unset' ? t.steel : t.silver, { track: 0.6, weight: 600 })
@@ -299,7 +299,8 @@ const hero = (t, animated) => {
   const frame = `<path d="M38 20H1242L1260 38V562L1242 580H38L20 562V38Z" fill="none" stroke="${t.edge}" stroke-width="1.2"/>` +
     `<path d="M20 74V38L38 20H74M1206 20H1242L1260 38V74M1260 526V562L1242 580H1206M74 580H38L20 562V526" fill="none" stroke="${t.cobalt}" stroke-width="2"/>` +
     Array.from({ length: 25 }, (_, i) => `<path d="M${496 + i * 12} 580v${i % 6 === 0 ? -8 : -4}" stroke="${t.edge}" stroke-width="1"/>`).join('') +
-    `<path d="M56 458.5H1224" stroke="${t.rule}" stroke-width="1"/>`
+    `<path d="M56 458.5H1224" stroke="${t.rule}" stroke-width="1"/>` +
+    text(1224, 566, 'ILLUSTRATION', 10.5, t.steel, { anchor: 'end', track: 2 })
 
   const style = `
 text{font-family:${FONT};font-kerning:none}
@@ -310,7 +311,6 @@ ${animated ? `
 @keyframes glowbreathe{0%,100%{opacity:${t.glow}}50%{opacity:${n(t.glow * 2.4)}}}
 @keyframes travel{0%{transform:translateX(var(--span))}100%{transform:translateX(0)}}
 @keyframes evidence{0%{stroke-dashoffset:0;opacity:0}8%{opacity:1}92%{opacity:1}100%{stroke-dashoffset:-270;opacity:0}}
-@keyframes tear{0%,91%,100%{transform:translateX(0);opacity:0}92%{transform:translateX(7px);opacity:.85}95%{transform:translateX(-4px);opacity:.6}98%{transform:translateX(3px);opacity:.8}}
 .scan{animation:sweep 9s linear infinite}
 .cur{animation:blink 1.15s steps(1) infinite}
 .breathe{animation:breathe 2.6s ease-in-out infinite}
@@ -318,9 +318,8 @@ path.breathe{animation:glowbreathe 3.4s ease-in-out infinite}
 .mark{animation:travel 2.4s linear infinite}
 .pulse{stroke-dasharray:22 270;animation:evidence 3.6s linear infinite}
 .p2{animation-delay:1.8s}
-.tear{animation:tear 8s steps(1) infinite}
-@media (prefers-reduced-motion:reduce){.scan,.cur,.breathe,.mark,.pulse,.tear{animation:none!important}}` : ''}
-.scan,.pulse,.tear{opacity:0}`
+@media (prefers-reduced-motion:reduce){.scan,.cur,.breathe,.mark,.pulse{animation:none!important}}` : ''}
+.scan,.pulse{opacity:0}`
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-labelledby="t d">
 <title id="t">Cobalt Cockpit: Mission Control for Claude Code</title>
@@ -330,7 +329,6 @@ path.breathe{animation:glowbreathe 3.4s ease-in-out infinite}
 <clipPath id="visor"><path d="${MASK}"/></clipPath>
 <clipPath id="page"><path d="M38 20H1242L1260 38V562L1242 580H38L20 562V38Z"/></clipPath>
 <clipPath id="scope"><path d="M${X0} ${Y0}H${X1 - 16}L${X1} ${Y0 + 16}V${Y1}H${X0 + 16}L${X0} ${Y1 - 16}Z"/></clipPath>
-<clipPath id="tear"><rect x="${TX - 20}" y="${n(y1 + 2.1 * U)}" width="${n(titleW + 40)}" height="${n(0.9 * U)}"/></clipPath>
 <pattern id="lines" width="4" height="4" patternUnits="userSpaceOnUse"><path d="M0 .5H4" stroke="${t.ink}" stroke-width="1" opacity=".035"/></pattern>
 <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="${t.grid}" stroke-width="1"/></pattern>
 <linearGradient id="cobaltInk" gradientUnits="userSpaceOnUse" x1="0" y1="${-SW}" x2="0" y2="${6 + SW}"><stop offset="0" stop-color="${t.cobaltHi}"/><stop offset="1" stop-color="${t.cobalt}"/></linearGradient>

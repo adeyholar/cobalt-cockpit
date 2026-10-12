@@ -4,11 +4,12 @@
 //   node docs/assets/src/build-demo.mjs <run.log | frames.json> [--sha <commit>] [--scale 1.25] [--keep <dir>]
 //
 // The input is the log of the capture run (demo-capture.ts, see ../README.md), or a frame file written by an
-// earlier build. Every captured row is what
-// the plugin drew or printed in the offline test host for a synthetic scenario. This script adds presentation
-// only: the window, the captions, the typed command line and the timing. It never edits a captured string. A
-// tool reply too long for the log is cut at a whole line and marked [...] in the caption colour, which the
-// plugin never prints.
+// earlier build. Every captured row is what the plugin drew or printed in the offline test host for a synthetic
+// scenario. This script adds presentation only: the window, the captions, the typed command line, the order and
+// the timing. It changes no captured character. Two things it does to fit the screen, both marked: a tool reply
+// is reflowed to the grid and, where it is longer than its space in the log, cut and marked [...] in the caption
+// colour, which the plugin never prints; a pane is shown from its first row down to the height of the window,
+// and its label says so. HUD rows and command output are drawn exactly as captured.
 //
 // Writes, next to this folder: demo/cockpit-demo.gif, demo/cockpit-demo-poster.png and demo/frames.json (the
 // captured frames the animation and the README use, nothing else).
@@ -147,7 +148,7 @@ const toolRows = (id, max = 3) => {
 const SCENES = [
   { title: 'STANDBY', text: 'The HUD band sits above the prompt. No task yet.',
     out: null, hud: ['s1-hud-100'], hold: 1500, contents: true },
-  { title: 'PLAN', text: 'A prompt becomes acceptance criteria, five milestones and six verification gates.',
+  { title: 'PLAN', text: 'Scripted progress calls: Cockpit records acceptance criteria, five milestones and six gates.',
     typed: 'DEMO: add per-client rate limiting to the API gateway',
     out: { label: 'TOOL REPLIES', tools: ['t01', 't02'] }, hud: ['s2-hud-100'], hold: 2800 },
   { title: 'SWARM', text: 'One Haiku scout, two Sonnet engineers with separate write scopes. The reviewer has to wait.',
@@ -159,20 +160,20 @@ const SCENES = [
     typed: '/cockpit agents REV-1', out: { label: 'COMMAND OUTPUT', command: 's3-agents-rev1' }, hud: ['s3-tick-7'], hold: 3800 },
   { title: 'REPORTED IS NOT VERIFIED', text: 'Agents reported. Only the result the commander checked counts as verified.',
     typed: '/cockpit agents', out: { label: 'COMMAND OUTPUT', command: 's4-agents' }, hud: ['s4-hud-100'], hold: 3200 },
-  { title: 'A TEST FAILS', text: 'The TEST gate is read from the exit status of the command, not from a claim.',
+  { title: 'A TEST FAILS', text: 'A scripted failing command. Cockpit reads the TEST gate from its exit status, not a claim.',
     out: { label: 'TOOL REPLIES', tools: ['t20', 't21'] }, hud: ['s5-hud-100'], hold: 2600 },
   { title: 'VERIFICATION READINESS', text: 'What stands between the task and DONE. It explains; it approves nothing.',
     typed: '/cockpit ready', out: { label: 'COMMAND OUTPUT', command: 's5-ready' }, hud: ['s5-hud-100'], hold: 3600 },
-  { title: 'BLOCKED', text: 'The run needs a person. Cobalt Guard notifies the owner and pins the alert on the HUD.',
+  { title: 'BLOCKED', text: 'The run needs a person. Cobalt Guard asks the host to notify and pins the alert on the HUD.',
     out: { label: 'TOOL REPLIES', tools: ['t22', 't23'] }, hud: ['s55-hud-100'], hold: 3200 },
   { title: 'GATES AND GOAL CHECK', text: 'Commands pass, results are verified, each criterion has evidence.',
     out: { label: 'TOOL REPLIES', tools: ['t38', 't39', 't40'] }, hud: ['s6-hud-100'], hold: 2800 },
   { title: 'PERMITS DONE', text: 'DONE only when every milestone is complete and every required gate holds.',
-    typed: '/cockpit ready', out: { label: 'COMMAND OUTPUT', command: 's6-ready' }, hud: ['s7-hud-100'], hold: 3400 },
+    typed: '/cockpit ready', out: { label: 'COMMAND OUTPUT', command: 's7-ready' }, hud: ['s7-hud-100'], hold: 3400 },
   { title: 'MISSION CONTROL', text: 'The dossier of the task: progress, milestones and the evidence behind each gate.',
-    typed: '/cockpit', out: { label: 'PANE', pane: 's6-pane-100' }, hud: null, hold: 3600 },
+    typed: '/cockpit', out: { label: 'PANE, FIRST 27 ROWS', pane: 's6-pane-100' }, hud: null, hold: 3600 },
   { title: 'RUN LEDGER', text: 'What was observed, kept locally. What the host did not report stays unknown.',
-    typed: '/ledger', out: { label: 'PANE', pane: 's6-ledger' }, hud: null, hold: 3000 },
+    typed: '/ledger', out: { label: 'PANE, FIRST 27 ROWS', pane: 's6-ledger' }, hud: null, hold: 3000 },
 ]
 
 const outputRows = out => {
@@ -190,7 +191,7 @@ for (const s of SCENES) {
   if (s.out?.pane) usedIds.add(s.out.pane)
 }
 // Frames the README quotes as text, kept in the published frame file beside the ones the animation draws.
-for (const id of ['s3-hud-100', 's3-agents-eng1', 's3-flow', 's6-flow', 's6-agents']) usedIds.add(id)
+for (const id of ['s3-hud-100', 's3-agents-eng1', 's3-flow', 's6-flow', 's6-agents', 's5-ready', 's6-ready']) usedIds.add(id)
 
 /** One whole screen as SVG. `typed` is what the prompt line shows; `cursor` draws the block after it. */
 const screen = ({ index, scene, hudId, typed = '', showOut = true }) => {
@@ -217,6 +218,21 @@ const screen = ({ index, scene, hudId, typed = '', showOut = true }) => {
   }
   if (out.length > 0) body += rule(outTop, scene.out.label)
   out.forEach((row, i) => { body += gridRow(row, outTop + i * LH) })
+  // what was printed before stays above, dimmed, as scrollback does in a terminal; whatever no longer fits is gone
+  if (hud.length > 0 && out.length > 0) {
+    let bottom = outTop - LH
+    let older = ''
+    for (let k = index - 1; k >= 0 && bottom > BODY_Y; k--) {
+      const prev = SCENES[k].out
+      if (!prev || prev.pane) continue
+      const rows = outputRows(prev)
+      const top = bottom - rows.length * LH
+      rows.forEach((row, i) => { if (top + i * LH >= BODY_Y) older += gridRow(row, top + i * LH) })
+      if (top - LH >= BODY_Y - 6) older += rule(top, prev.label)
+      bottom = top - LH
+    }
+    body += `<g opacity=".34">${older}</g>`
+  }
   if (hud.length > 0) {
     body += rule(hudTop, 'HUD BAND')
     hud.forEach((row, i) => { body += gridRow(row, hudTop + i * LH) })
@@ -296,7 +312,7 @@ const list = shots.map(shot => `file '${join(work, `${unique.get(shot.svg)}.png`
 writeFileSync(join(work, 'list.txt'), list)
 const gif = join(OUT, 'cockpit-demo.gif')
 await run('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', join(work, 'list.txt'),
-  '-filter_complex', '[0:v]split[a][b];[a]palettegen=max_colors=160:stats_mode=full[p];[b][p]paletteuse=dither=none:diff_mode=rectangle',
+  '-filter_complex', '[0:v]split[a][b];[a]palettegen=max_colors=200:stats_mode=full[p];[b][p]paletteuse=dither=none:diff_mode=rectangle',
   '-fps_mode', 'vfr', '-loop', '0', gif], { timeout: 300_000 })
 
 const poster = join(OUT, 'cockpit-demo-poster.png')
