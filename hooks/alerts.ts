@@ -25,6 +25,10 @@
 // Priorities, kinds and quiet hours (v0.5.6) decide only whether and when a condition is told, never whether it holds.
 // Each kind has one fixed level. A kind the operator turned off, and an alert quiet hours hold back, is recorded and
 // stays on the HUD: nothing that is still open is dropped without a trace. The order alerts are told in is unchanged.
+//
+// The alert inbox (v0.5.7) reads the same kept records as occurrences: each record carries the id of its occurrence, one
+// occurrence can be acknowledged on its own, and the HUD counts what was recorded and never acknowledged. It is a view of
+// the records, not a second store, and it reports what was recorded, never that anyone saw it.
 
 import { isHeld, isQuiet, machineZone, quietConfigOf, quietLines } from './quiet'
 import type { QuietConfig } from './quiet'
@@ -90,12 +94,20 @@ export const guardConfigOf = (options: Readonly<Record<string, unknown>>, zone: 
 })
 
 /** One alert as the Run Ledger keeps it: closed vocabulary and numbers only. */
-export type AlertRecord = { key: string; kind: AlertKind; taskId: number; at: number; outcome: AlertOutcome; attempts: number; channel: string | null; why?: Why; acked?: true; /** Which reminder of its condition this is; absent on the first alert. */ nth?: number; /** The audible cue a player exited 0 for: ATTEMPTED, never heard. */ cue?: Cue }
+export type AlertRecord = { key: string; kind: AlertKind; taskId: number; at: number; outcome: AlertOutcome; attempts: number; channel: string | null; why?: Why; acked?: true; /** Which reminder of its condition this is; absent on the first alert. */ nth?: number; /** The audible cue a player exited 0 for: ATTEMPTED, never heard. */ cue?: Cue; /** v0.5.7: which occurrence of its condition this record belongs to (8 hex, from the key and the first moment; no content). Absent on older records, where it is derived the same way. */ id?: string }
 export type Cue = 'sound' | 'bell'
 export type Why = 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error' | 'cooldown' | 'budget' | 'quiet' | 'kind-off'
 export const RETRY_CAP = 3
 
-export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean; /** When the person last acknowledged: a notice still being written at that moment is acknowledged too. */ ackAt?: number }
+export type GuardState = {
+  sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean
+  /** v0.5.7: counts the person's acknowledgments. A pass notes it when it begins deciding; a notice written after one is born acknowledged. A count, not a time, so a clock stepped back changes nothing. */
+  seq?: number
+  /** The count at the last acknowledgment of everything. */
+  ackSeq?: number
+  /** The latest few single acknowledgments: the condition's key and the count it was made at. */
+  ackedKeys?: { key: string; seq: number }[]
+}
 export const EMPTY_GUARD: GuardState = { sentAt: null, count: 0, silenced: [], all: false, pending: false }
 
 /** The facts the policy reads, all of them already observed elsewhere. */
@@ -215,11 +227,11 @@ export const deferredOf = (kept: readonly AlertRecord[]): AlertRecord[] => {
   return out
 }
 
-/** A deferred condition the person acknowledged before anything was sent: they know, so it is not announced afterwards. */
+/** A condition the person acknowledged before any notification of it was written (held back by quiet hours, the cooldown or the budget): they know, so it is not announced afterwards. */
 export const isSettledQuietly = (kept: readonly AlertRecord[], key: string): boolean => {
   const run = episodeOf(kept, key)
 
-  return wasDeferred(run) && !wasSent(run) && run.at(-1)?.acked === true
+  return run.length > 0 && !wasSent(run) && run.at(-1)?.acked === true && (wasDeferred(run) || run.some(a => a.outcome === 'throttled'))
 }
 
 /** The deferred conditions that no longer hold, acknowledged or not: each is recorded resolved once and never announced. */
@@ -287,16 +299,25 @@ export const labelOf = (cfg: GuardConfig, state: GuardState, kept: readonly Aler
   return last.outcome === 'sent' ? 'SENT' : 'FAILED'
 }
 
-/** Whether a notice was decided no later than the person's last acknowledgment, so it is born acknowledged. */
-export const isAckedAt = (state: GuardState, at: number): boolean => typeof state.ackAt === 'number' && at <= state.ackAt
+/** Whether the person acknowledged this condition (or everything) after `since`, the count a pass noted when it began deciding: a notice still being written is then acknowledged too. */
+export const isAckedSince = (state: GuardState, key: string, since: number): boolean =>
+  (typeof state.ackSeq === 'number' && state.ackSeq > since) || (Array.isArray(state.ackedKeys) && state.ackedKeys.some(k => k !== null && typeof k === 'object' && k.key === key && typeof k.seq === 'number' && k.seq > since))
+export const ACKED_KEYS = 8
+/** The state after the person acknowledged everything (`key` null) or one condition. */
+export const withAck = (state: GuardState, key: string | null): GuardState => {
+  const seq = (state.seq ?? 0) + 1
+
+  return key === null ? { ...state, seq, ackSeq: seq } : { ...state, seq, ackedKeys: [...(state.ackedKeys ?? []), { key, seq }].slice(-ACKED_KEYS) }
+}
 
 /**
  * Bounded, and when full it gives up the oldest held-back or silenced record first, so a written one is not pushed out by them.
  * Next go the records of an occurrence already resolved, oldest first and the `resolved` mark after what it closes, so an
- * open condition's alert, its reminder count and its acknowledgment are the last things forgotten.
+ * open condition's alert, its reminder count and its acknowledgment are the last things forgotten. Every record is stamped
+ * with the id of its occurrence as it is added.
  */
 export const bounded = (kept: readonly AlertRecord[], add: AlertRecord): AlertRecord[] => {
-  const all = [...kept, add]
+  const all = [...kept, add.id === undefined || !ID_RE.test(add.id) ? { ...add, id: nextIdOf(kept, add) } : add]
   while (all.length > ALERT_CAP) {
     let drop = all.findIndex(a => a.outcome === 'throttled' || a.outcome === 'silenced')
     if (drop < 0 || drop >= all.length - 1) drop = all.findIndex((a, i) => a.outcome !== 'resolved' && all.some((b, j) => j > i && b.key === a.key && b.outcome === 'resolved'))
@@ -305,6 +326,146 @@ export const bounded = (kept: readonly AlertRecord[], add: AlertRecord): AlertRe
   }
 
   return all
+}
+
+// --- The alert inbox (v0.5.7): the kept records read as occurrences. Nothing here is a second store. ---
+
+export const ID_RE = /^[0-9a-f]{8}$/
+/** A 32-bit FNV-1a over the key and the moment, as 8 hex digits: an identifier, not a secret, and it carries nothing of its input. */
+const hashOf = (text: string): string => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193) >>> 0
+
+  return h.toString(16).padStart(8, '0')
+}
+const freshId = (key: string, at: number, taken: ReadonlySet<string>): string => {
+  for (let salt = 0; ; salt++) {
+    const id = hashOf(`${key}\0${at}\0${salt}`)
+    if (!taken.has(id)) return id
+  }
+}
+
+/** One occurrence of a condition: its records from the first one kept to the `resolved` mark that closed it, or to the latest. */
+export type Episode = { id: string; key: string; records: AlertRecord[]; closed: boolean }
+
+/**
+ * The occurrences in the kept records, oldest first. A record stamped with an id keeps it whatever is evicted around it;
+ * one without (written before v0.5.7) gets the id it would have been stamped with, and an id two occurrences claim
+ * belongs to the older one. A run of nothing but `resolved` marks (what was resolved has been evicted) is not an occurrence.
+ */
+export const episodesOf = (kept: readonly AlertRecord[]): Episode[] => {
+  const live = new Map<string, Episode>()
+  const out: Episode[] = []
+  for (const a of kept) {
+    let e = live.get(a.key)
+    if (e === undefined) { e = { id: '', key: a.key, records: [], closed: false }; live.set(a.key, e); out.push(e) }
+    e.records.push(a)
+    if (a.outcome === 'resolved') { e.closed = true; live.delete(a.key) }
+  }
+  const real = out.filter(e => e.records.some(a => a.outcome !== 'resolved'))
+  const taken = new Set<string>()
+  for (const e of real) {
+    const stamped = e.records.find(a => a.id !== undefined && ID_RE.test(a.id))?.id
+    if (stamped !== undefined && !taken.has(stamped)) { e.id = stamped; taken.add(stamped) }
+  }
+  for (const e of real) if (e.id === '') { e.id = freshId(e.key, (e.records[0] as AlertRecord).at, taken); taken.add(e.id) }
+
+  return real
+}
+
+/** The id a record about to be added carries: that of its condition's open occurrence, or a new one. */
+const nextIdOf = (kept: readonly AlertRecord[], add: AlertRecord): string => {
+  const eps = episodesOf(kept)
+  const open = eps.filter(e => e.key === add.key && !e.closed).at(-1)
+
+  return open !== undefined ? open.id : freshId(add.key, add.at, new Set(eps.map(e => e.id)))
+}
+
+export type Occurrence = {
+  id: string; key: string; kind: AlertKind; level: Level; taskId: number
+  /** When its first record was written, and its latest. Clock readings of this machine, as recorded. */
+  at: number; lastAt: number
+  status: PinStatus; channel: string | null; reminders: number; acked: boolean
+  /** open: the condition holds now; resolved: it was recorded resolved; ended: no longer holding, with no resolution recorded yet (a task replaced or gone). */
+  state: 'open' | 'resolved' | 'ended'
+  /** Where its latest record sits among the kept ones: the order they were written in, whatever their clock readings. */
+  seq: number
+}
+
+/** Every occurrence in the kept records, with what holds now (`open`). Not ordered; see `inboxOrder`. */
+export const occurrencesOf = (kept: readonly AlertRecord[], open: readonly Open[]): Occurrence[] =>
+  episodesOf(kept).flatMap(e => {
+    const run = e.records.filter(a => a.outcome !== 'resolved')
+    const last = run.at(-1) as AlertRecord
+    const sent = run.filter(a => a.outcome === 'sent' && a.channel !== null).at(-1)
+
+    return [{
+      id: e.id, key: e.key, kind: last.kind, level: LEVEL[last.kind], taskId: last.taskId,
+      at: (run[0] as AlertRecord).at, lastAt: last.at,
+      status: statusOfRun(run), channel: sent?.channel ?? null, reminders: run.filter(a => a.nth !== undefined).length, acked: last.acked === true,
+      state: e.closed ? 'resolved' as const : open.some(o => o.key === e.key) ? 'open' as const : 'ended' as const,
+      seq: kept.lastIndexOf(last),
+    }]
+  })
+
+/** Open and not acknowledged first (gravest, then newest), then open and acknowledged, then what no longer holds (newest first). */
+export const inboxOrder = (occ: readonly Occurrence[]): Occurrence[] => {
+  const rank = (o: Occurrence): number => (o.state === 'open' ? (o.acked ? 1 : 0) : 2)
+
+  return [...occ].sort((a, b) => rank(a) - rank(b) || (rank(a) === 2 ? 0 : byPriority(a.kind, b.kind)) || b.seq - a.seq)
+}
+/** What the HUD counts beyond its pins: recorded occurrences that no longer hold and were never acknowledged. */
+export const unreadOf = (occ: readonly Occurrence[]): number => occ.filter(o => o.state !== 'open' && !o.acked).length
+
+export type AckResult = { alerts: AlertRecord[]; result: 'acked' | 'already' | 'unknown' | 'malformed'; occurrence?: Occurrence }
+/**
+ * Acknowledges exactly one occurrence: every record of it, and no other. Pure. An id that is not 8 lowercase hex digits is
+ * `malformed`; one that no kept occurrence has (never existed, or evicted) is `unknown`. A resolved or ended occurrence can
+ * be acknowledged too, and that changes nothing but its record.
+ */
+export const ackOccurrence = (kept: readonly AlertRecord[], open: readonly Open[], id: string): AckResult => {
+  if (!ID_RE.test(id)) return { alerts: [...kept], result: 'malformed' }
+  const mine = episodesOf(kept).filter(e => e.id === id)[0]
+  if (mine === undefined) return { alerts: [...kept], result: 'unknown' }
+  const occurrence = occurrencesOf(kept, open).find(o => o.id === id)
+  const pending = mine.records.filter(a => a.acked !== true && a.outcome !== 'resolved')
+  if (pending.length === 0) return { alerts: [...kept], result: 'already', ...(occurrence === undefined ? {} : { occurrence }) }
+
+  return { alerts: kept.map(a => (pending.includes(a) ? { ...a, acked: true as const } : a)), result: 'acked', ...(occurrence === undefined ? {} : { occurrence: { ...occurrence, acked: true } }) }
+}
+
+const stamp = (at: number): string => {
+  try { return `${new Date(at).toISOString().slice(0, 16).replace('T', ' ')}Z` } catch { return 'time unknown' }
+}
+const ageOf = (ms: number): string => (ms < 0 ? '' : ms < 60_000 ? ' (just now)' : ms < 3_600_000 ? ` (${Math.floor(ms / 60_000)}m ago)` : ms < 172_800_000 ? ` (${Math.floor(ms / 3_600_000)}h ago)` : ` (${Math.floor(ms / 86_400_000)}d ago)`)
+const OUTCOME: Record<PinStatus, string> = { sent: 'notification SENT', 'not-sent': 'notification NOT SENT', deferred: 'DEFERRED, quiet hours', held: 'HELD BACK, cooldown or budget', 'kind-off': 'NOT NOTIFIED, kind off', silenced: 'NOT NOTIFIED, silenced' }
+const STATE: Record<Occurrence['state'], string> = { open: 'condition OPEN now', resolved: 'condition no longer open (recorded resolved)', ended: 'condition no longer open (task replaced or gone)' }
+export const INBOX_PAGE = 8
+
+export const inboxPages = (n: number): number => Math.max(1, Math.ceil(n / INBOX_PAGE))
+/**
+ * The inbox, one page of it. Each line is one occurrence: its id, level, kind, task, the moment it was recorded, what became
+ * of its notification, whether it was acknowledged, and whether the condition holds now. "Recorded" is when Cockpit wrote the
+ * record; "open now" is read off the task as it is now; SENT is the host saying it wrote the notification. None of it says
+ * a person saw anything, and no connection is claimed to have dropped or returned.
+ */
+export const inboxText = (occ: readonly Occurrence[], page: number, now: number, enabled: boolean): string => {
+  const ordered = inboxOrder(occ)
+  const pages = inboxPages(ordered.length)
+  const at = Math.min(Math.max(1, page), pages)
+  const lines = [`ALERT INBOX · ${ordered.length} recorded · ${ordered.filter(o => o.state === 'open').length} open now · ${ordered.filter(o => !o.acked).length} unacknowledged · page ${at} of ${pages}`]
+  if (!enabled) lines.push('Alerts are off (guardAlerts): what was recorded earlier is shown; nothing new is recorded or sent.')
+  if (ordered.length === 0) lines.push('Nothing recorded. An alert is recorded when a run needs a person: a failed security check, a NO-GO, exhausted verification, an open review or a blocked run.')
+  let group = ''
+  for (const o of ordered.slice((at - 1) * INBOX_PAGE, at * INBOX_PAGE)) {
+    const g = o.state === 'open' ? 'OPEN NOW (read from the current task)' : 'HISTORY (recorded earlier; the condition no longer holds)'
+    if (g !== group) { lines.push(g); group = g }
+    lines.push(`  ${o.id} ${o.level} ${o.kind} · task ${o.taskId} · recorded ${stamp(o.at)}${ageOf(now - o.at)} · ${OUTCOME[o.status]}${o.status === 'sent' && o.channel !== null ? ` via ${o.channel}` : ''}${o.reminders > 0 ? ` · ${o.reminders} reminder${o.reminders === 1 ? '' : 's'}` : ''} · ${o.acked ? 'acknowledged' : 'not acknowledged'} · ${STATE[o.state]}`)
+  }
+  if (pages > 1) lines.push(`More: /cockpit alerts ${at < pages ? at + 1 : 1}`)
+  lines.push('/cockpit alerts ack <id> acknowledges that one occurrence and stops its reminders; /cockpit guard ack acknowledges all. Neither changes a gate, a review, an approval or a verdict.')
+
+  return lines.join('\n')
 }
 
 /** What the HUD pins and the status lists: a condition that holds now, was raised, and what became of its notification. */
@@ -345,13 +506,17 @@ export type PinLine = { text: string; level: Level | 'INFO' }
  * (or alerts off). It is the widest of its forms that fits `width`, so a narrow band keeps the level and the count.
  * `unconfirmed`: alerts are armed and nobody confirmed a notification in this session. Static: it never animates.
  */
-export const pinLine = (pins: readonly Pin[], unconfirmed: boolean, label: string, width: number): PinLine | null => {
+export const pinLine = (pins: readonly Pin[], unconfirmed: boolean, label: string, width: number, unread = 0): PinLine | null => {
   const first = pins[0]
   const fit = (forms: readonly string[]): string => forms.find(f => f.length <= width) ?? (forms.at(-1) ?? '').slice(0, Math.max(0, width))
   if (first === undefined) {
-    if (!unconfirmed) return null
+    if (!unconfirmed && unread === 0) return null
+    if (unread === 0) return { text: fit([`GUARD: ${label} · transport not confirmed · /cockpit guard test`, `GUARD: ${label} · transport not confirmed`, `GUARD: ${label} · unconfirmed`, `GUARD: ${label}`]), level: 'INFO' }
+    // recorded alerts nobody acknowledged and that no longer hold: a count and where to read them, never an inference about a person
+    const seen = ` · ${unread} unacknowledged in history`
+    const link = unconfirmed ? ' · transport not confirmed' : ''
 
-    return { text: fit([`GUARD: ${label} · transport not confirmed · /cockpit guard test`, `GUARD: ${label} · transport not confirmed`, `GUARD: ${label} · unconfirmed`, `GUARD: ${label}`]), level: 'INFO' }
+    return { text: fit([`GUARD: ${label}${seen}${link} · /cockpit alerts`, `GUARD: ${label}${seen}${link}`, `GUARD: ${label}${seen}`, `GUARD: ${label} · ${unread} unacknowledged`, `GUARD: ${label} · ${unread} unack`, `GUARD: ${label}`]), level: 'INFO' }
   }
   const more = pins.length > 1 ? ` · +${pins.length - 1} more` : ''
   const link = unconfirmed ? ' · transport not confirmed' : ''
@@ -359,7 +524,7 @@ export const pinLine = (pins: readonly Pin[], unconfirmed: boolean, label: strin
 
   return {
     text: fit([
-      `${head} · task ${first.taskId} · ${PIN_STATUS[first.status]}${more}${link} · /cockpit guard`,
+      `${head} · task ${first.taskId} · ${PIN_STATUS[first.status]}${more}${link} · /cockpit alerts`,
       `${head} · task ${first.taskId} · ${PIN_STATUS[first.status]}${more}${link}`,
       `${head} · ${PIN_SHORT[first.status]}${more}${link}`,
       `${head} · ${PIN_SHORT[first.status]}${more}`,
@@ -398,7 +563,7 @@ export const guardText = (cfg: GuardConfig, state: GuardState, kept: readonly Al
   const lines = [`GUARD: ${labelOf(cfg, state, kept)}`]
   if (!cfg.enabled) lines.push('Off. Set guardAlerts to true to be told when a run needs you. No alert is sent while off.')
   else {
-    lines.push(`Armed · ${state.count} of ${cfg.maxPerSession} alerts used this session · at most one every ${Math.round(cfg.cooldownMs / 1000)}s · same condition never twice.`)
+    lines.push(`Armed · ${state.count} of ${cfg.maxPerSession} alerts used this session · at most one every ${Math.round(cfg.cooldownMs / 1000)}s · the same occurrence never twice.`)
     lines.push('Delivery: your terminal notification channel, through the host. SENT means the host wrote it to your terminal; it cannot confirm that you saw it. No webhook, email or push exists in this version.')
   }
   if (cfg.enabled && state.all) lines.push('Silenced for this session: nothing is sent or repeated. /cockpit guard unsilence resumes.')
@@ -435,5 +600,6 @@ export const isAlertRecord = (x: unknown): x is AlertRecord => {
     && (r['why'] === undefined || WHY_SET.includes(r['why'] as string)) && (r['acked'] === undefined || r['acked'] === true)
     && (r['nth'] === undefined || (Number.isSafeInteger(r['nth']) && (r['nth'] as number) >= 1 && (r['nth'] as number) <= REMINDERS_CEILING))
     && (r['cue'] === undefined || r['cue'] === 'sound' || r['cue'] === 'bell')
+    && (r['id'] === undefined || (typeof r['id'] === 'string' && ID_RE.test(r['id'])))
 }
 export const validAlerts = (x: unknown): AlertRecord[] => (Array.isArray(x) ? x.filter(isAlertRecord).slice(-ALERT_CAP) : [])

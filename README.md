@@ -1,4 +1,4 @@
-# Cobalt Cockpit v0.5.6 — Elastic Swarm + Adaptive Intelligence
+# Cobalt Cockpit v0.5.7 — Elastic Swarm + Adaptive Intelligence
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
@@ -117,6 +117,7 @@ A `--plugin-dir` copy stops loading when you omit the flag next session.
 | `/cockpit stats` / `/cockpit stats 7d\|30d\|all [--json\|--csv]` | Print the local model telemetry for a window; reads the telemetry files and nothing else |
 | `/cockpit doctor` | Read-only installation, host, Auto-mode, telemetry-storage and prompt-cache diagnostics |
 | `/cockpit guard` / `/cockpit guard ack\|silence\|unsilence\|trust [hash]\|untrust\|release` | Owner-alert status (open conditions, reminders used, persistence and sound, notification transport), acknowledgment and silence, and the Stop guard's script enrollment and release (typed by a person only) |
+| `/cockpit alerts [page]` / `/cockpit alerts ack <id>` | The alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; acknowledge exactly one occurrence. Person-only to acknowledge; changes no gate, hold, review, approval or verdict |
 | `/cockpit guard test [sound]` / `/cockpit guard seen [code]` | Send one labelled TEST notification (and optionally the alert sound), then record that you saw it. Typed by a person only; changes no alert, budget, gate or approval |
 | `/cockpit flow` | Print the Neural Flow row in words |
 | `/ledger` | Open local Run Ledger |
@@ -240,6 +241,27 @@ With `guardAlerts` and `guardRepeat` both on, an alert whose condition is still 
 - **One timer.** A single 30-second host timer (`$.clock.every`) exists only while something can still be repeated. It is cancelled on acknowledgment, silence, resolution, exhaustion and session end, and re-armed from the kept records after a reload, so counts carry on instead of starting over. No background process is started.
 - **No verdict changes.** An alert, a reminder, an acknowledgment or a silence never changes a gate, a hold, a review, a release approval or the task's percentage.
 - **What is claimed.** `sent` means the host reported writing the notification to the channel it names; `sound attempted` or `bell attempted` means a local player exited 0. Neither means you saw or heard it. Desktop popups are whatever your terminal does with the host's notification (the host's channels are kitty, iTerm2 and Ghostty; another terminal gets nothing under the host's automatic setting, or the bell if Claude Code's `preferredNotifChannel` is `terminal_bell`). Cockpit starts no desktop notifier of its own, and on a remote machine whether the notification reaches your local desktop depends on your terminal and connection and is not verified by Cockpit.
+
+### The alert inbox (v0.5.7)
+
+`/cockpit alerts` lists what Cobalt Guard recorded, so you can recover it after stepping away. It reads the same alert records the engine already keeps; it is not a second store.
+
+```
+ALERT INBOX · 3 recorded · 2 open now · 2 unacknowledged · page 1 of 1
+OPEN NOW (read from the current task)
+  3f9a02bc CRITICAL security-failure · task 3 · recorded 2026-10-12 14:03Z (12m ago) · notification SENT via terminal_bell · not acknowledged · condition OPEN now
+  71c0de45 NORMAL run-blocked · task 3 · recorded 2026-10-12 13:40Z (35m ago) · DEFERRED, quiet hours · acknowledged · condition OPEN now
+HISTORY (recorded earlier; the condition no longer holds)
+  a1b2c3d4 HIGH review-hold · task 2 · recorded 2026-10-11 22:10Z (16h ago) · notification SENT via terminal_bell · not acknowledged · condition no longer open (recorded resolved)
+```
+
+- **Order.** Open and unacknowledged first, the gravest first; then open and acknowledged; then history, newest first. Eight to a page: `/cockpit alerts 2`.
+- **Recorded and current are told apart.** "Recorded" is what Cockpit wrote when it raised the alert, with the clock of this machine. "Condition OPEN now" is read off the task as it is now. History is not re-checked.
+- **What a status means.** `SENT` is the host saying it wrote the notification to the channel named, never that you saw it. `NOT SENT`, `DEFERRED, quiet hours`, `HELD BACK, cooldown or budget` and `NOT NOTIFIED` say why nothing was written. An alert nobody acknowledged is "not acknowledged", not "missed". Cockpit does not detect SSH disconnects or reconnects and does not say it did.
+- **Acknowledge one.** `/cockpit alerts ack <id>` (the 8-character id in the first column) acknowledges that occurrence only, ends its reminders and, if it was held back and never told, keeps it from being announced later. Other alerts, `/cockpit guard ack` (still everything at once), gates, reviews, approvals and the verdict are untouched. Typed by you only. An id that is malformed, unknown or has expired from the bounded history changes nothing. Acknowledging a condition that has cleared only marks its record.
+- **Occurrences.** A condition that clears and holds again is a new occurrence with its own id, told again inside the cooldown, the session budget and the retry cap (v0.5.6 did this only with `guardRepeat` on). A new task with the same number is a different occurrence: ids come from the task's identity, not its number.
+- **Recovery.** The records are in the Run Ledger and, per project (a hash of the directory), in a bounded plugin-store key, so a new session in the same project lists them. Nothing is announced again because a session restarted: what was told stays told, and only what was owed (held back by quiet hours) is still owed. The newest 32 records of up to four projects are kept; older ones expire.
+- **HUD.** Open conditions are pinned as before. When recorded alerts no longer hold and were never acknowledged, the row says `GUARD: ARMED · 2 unacknowledged in history · /cockpit alerts` until you acknowledge them. It shortens to fit and never animates.
 
 ### Alert priorities, quiet hours and the pinned alert row (v0.5.6)
 

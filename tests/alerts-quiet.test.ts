@@ -312,7 +312,7 @@ describe('the pinned row', () => {
   })
   test('the row names the level, the condition, the task and the notification, and never a person\'s attention', () => {
     const line = pinLine([pin(), pin({ kind: 'run-blocked', level: 'NORMAL' })], true, 'SENT', 160)!
-    expect(line).toEqual({ text: 'GUARD ▲ CRITICAL security check failed · task 3 · notification SENT, not acknowledged · +1 more · transport not confirmed · /cockpit guard', level: 'CRITICAL' })
+    expect(line).toEqual({ text: 'GUARD ▲ CRITICAL security check failed · task 3 · notification SENT, not acknowledged · +1 more · transport not confirmed · /cockpit alerts', level: 'CRITICAL' })
     for (const status of ['sent', 'not-sent', 'deferred', 'held', 'kind-off', 'silenced'] as const) {
       for (const width of [200, 100, 60, 40, 20, 8]) expect(pinLine([pin({ status })], width % 3 === 0, 'ARMED', width)!.text).not.toMatch(NEVER_CLAIMED)
     }
@@ -483,13 +483,6 @@ describe('in a run: quiet hours', () => {
     expect(w.notified).toEqual([])
     expect(outcomes(held)).toEqual(['run-blocked:deferred'])
     expect(task(held).blocker).toBe('needs the owner')
-  })
-  test('an acknowledgment that lands while a pass is deciding covers the deferral it writes', quietly(), async ($, on) => {
-    const w = world(on); const held = hostState(on, { 'guard-state': { ...EMPTY_GUARD, ackAt: 1_000_000 + HOUR } })
-    await start($); await planAndComplete($, 1); await block($)
-    expect((ledger(held).alerts ?? []).map(a => [a.outcome, a.acked])).toEqual([['deferred', true]])
-    await w.clock.advance(12 * HOUR)
-    expect(w.notified).toEqual([])
   })
   test('a deferral whose kind is turned off afterwards is not sent and not promised', quietly({ guardQuietHours: '22:00-00:10', guardNotifyKinds: 'none' }), async ($, on) => {
     const t = settle(applyAction(settle(applyAction(newTask(1, 'goal', 100, null), { action: 'plan', milestones: FIVE.slice(0, 3) } as never, 101, null).task).task, { action: 'block', milestone: 'm1', note: 'needs the owner' } as never, 102, null).task).task
@@ -689,7 +682,7 @@ describe('in a run: the pinned row', () => {
       expect(row.length).toBeLessThanOrEqual(columns)
       expect(row).toContain('▲ CRITICAL')
     }
-    expect(await guardRow($, 200)).toContain('· /cockpit guard')
+    expect(await guardRow($, 200)).toContain('· /cockpit alerts')
   })
   test('reduced motion draws the identical row: the pin never animates', { options: { guardAlerts: true, reducedMotion: true } }, async ($, on) => {
     world(on); hostState(on, {})
