@@ -28,6 +28,8 @@ export type World = {
   cwd: string
   /** What the host's notification channel does with one. */
   notifyMode: 'sent' | 'throws' | 'disabled'
+  /** Runs while a notification is being written, before the host answers: what a person does in that moment. */
+  duringNotify?: () => Promise<unknown>
   /** The environment each process was started with over the host's own, in the order of `runs`; undefined when none was given. */
   runEnvs: (Readonly<Record<string, string>> | undefined)[]
   /** The tool calls that reached the engine, in order: what actually ran. */
@@ -511,6 +513,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   on('classic.Stop', () => ({}))
   on('ui.notify', ($, e) => {
     w.notified.push({ text: e.text, title: e.title })
+    if (w.duringNotify !== undefined) { const act = w.duringNotify; delete w.duringNotify; return act().then(() => (w.notifyMode === 'disabled' ? { value: { isSent: false as const, reason: 'disabled' as const } } : { value: { isSent: true as const, channel: 'kitty' as const } })) }
     if (w.notifyMode === 'throws') throw new Error('notification write failed')
 
     return { value: w.notifyMode === 'disabled' ? { isSent: false as const, reason: 'disabled' as const } : { isSent: true as const, channel: 'kitty' as const } }

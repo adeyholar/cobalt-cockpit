@@ -54,7 +54,7 @@ export type Cue = 'sound' | 'bell'
 export type Why = 'disabled' | 'no-channel' | 'no-surface' | 'refused' | 'error' | 'cooldown' | 'budget'
 export const RETRY_CAP = 3
 
-export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean }
+export type GuardState = { sentAt: number | null; count: number; silenced: string[]; all: boolean; pending: boolean; /** When the person last acknowledged: a notice still being written at that moment is acknowledged too. */ ackAt?: number }
 export const EMPTY_GUARD: GuardState = { sentAt: null, count: 0, silenced: [], all: false, pending: false }
 
 /** The facts the policy reads, all of them already observed elsewhere. */
@@ -190,11 +190,20 @@ export const labelOf = (cfg: GuardConfig, state: GuardState, kept: readonly Aler
   return last.outcome === 'sent' ? 'SENT' : 'FAILED'
 }
 
-/** Bounded, and when full it gives up the oldest held-back or silenced record first, so a written one is not pushed out by them. */
+/** Whether a notice was decided no later than the person's last acknowledgment, so it is born acknowledged. */
+export const isAckedAt = (state: GuardState, at: number): boolean => typeof state.ackAt === 'number' && at <= state.ackAt
+
+/**
+ * Bounded, and when full it gives up the oldest held-back or silenced record first, so a written one is not pushed out by them.
+ * Next go the records of an occurrence already resolved, oldest first and the `resolved` mark after what it closes, so an
+ * open condition's alert, its reminder count and its acknowledgment are the last things forgotten.
+ */
 export const bounded = (kept: readonly AlertRecord[], add: AlertRecord): AlertRecord[] => {
   const all = [...kept, add]
   while (all.length > ALERT_CAP) {
-    const drop = all.findIndex(a => a.outcome === 'throttled' || a.outcome === 'silenced')
+    let drop = all.findIndex(a => a.outcome === 'throttled' || a.outcome === 'silenced')
+    if (drop < 0 || drop >= all.length - 1) drop = all.findIndex((a, i) => a.outcome !== 'resolved' && all.some((b, j) => j > i && b.key === a.key && b.outcome === 'resolved'))
+    if (drop < 0) drop = all.findIndex((a, i) => i < all.length - 1 && a.outcome === 'resolved')
     all.splice(drop >= 0 && drop < all.length - 1 ? drop : 0, 1)
   }
 

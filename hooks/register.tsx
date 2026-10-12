@@ -59,7 +59,7 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { EMPTY_GUARD, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, hasReminderLeft, labelOf as guardLabel, messageOf as alertMessage, remind, reminderOf } from './alerts'
+import { EMPTY_GUARD, isAckedAt, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, hasReminderLeft, labelOf as guardLabel, messageOf as alertMessage, remind, reminderOf } from './alerts'
 import type { GuardConfig } from './alerts'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
 import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
@@ -2748,6 +2748,8 @@ let guarding = false
  * `session.start` arms it again from the kept records, so a reload neither doubles it nor restarts a count.
  */
 let reminderTimer: Timer | null = null
+/** Set at session end: a late call after it must not bring the timer back. */
+let isSessionOver = false
 const REMINDER_POLL_MS = 30_000
 const stopReminders = () => {
   reminderTimer?.cancel()
@@ -2755,15 +2757,15 @@ const stopReminders = () => {
 }
 const armReminders = async ($: EngineInterface): Promise<void> => {
   try {
-    const view = guardCfg.repeat ? await guardView($) : null
+    const view = guardCfg.repeat && !isSessionOver ? await guardView($) : null
     if (view === null || !hasReminderLeft(guardCfg, view.state, view.kept)) { stopReminders(); return }
     if (reminderTimer !== null) return
-    reminderTimer = $.clock.every(Math.min(guardCfg.repeatMs, REMINDER_POLL_MS), () => quiet(() => raiseAlerts($, false)))
+    reminderTimer = $.clock.every(REMINDER_POLL_MS, () => quiet(() => raiseAlerts($, false)))
   } catch { stopReminders() }
 }
 
-/** Asks the host to notify, and tries the alert cue when `guardSound` is on. What comes back is what was attempted and written, never what was seen or heard. */
-const notifyOwner = async ($: EngineInterface, text: string): Promise<Pick<AlertRecord, 'outcome' | 'channel' | 'why' | 'cue'>> => {
+/** Asks the host to notify. What comes back is what was attempted and written, never what was seen. */
+const notifyOwner = async ($: EngineInterface, text: string): Promise<Pick<AlertRecord, 'outcome' | 'channel' | 'why'>> => {
   let outcome: 'sent' | 'failed' | 'refused' = 'failed'
   let channel: string | null = null
   let why: AlertRecord['why']
@@ -2771,10 +2773,24 @@ const notifyOwner = async ($: EngineInterface, text: string): Promise<Pick<Alert
     const r = await $.ui.notify(text, { title: 'Cobalt Guard' })
     if (r.isSent) { outcome = 'sent'; channel = r.channel } else { outcome = r.reason === 'refused' ? 'refused' : 'failed'; why = r.reason as AlertRecord['why'] }
   } catch { outcome = 'failed'; why = 'error' }
-  // the existing cue player (its last resort is the terminal bell); it honours the sounds option and /cockpit mute and never throws
-  const played = guardCfg.sound ? await sound($, 'checkpoint') : null
 
-  return { outcome, channel, ...(why === undefined ? {} : { why }), ...(played === null ? {} : { cue: played === 'bell' ? 'bell' as const : 'sound' as const }) }
+  return { outcome, channel, ...(why === undefined ? {} : { why }) }
+}
+
+/**
+ * The alert cue, when `guardSound` is on: the existing cue player, whose last resort is the terminal bell; it honours the
+ * sounds option and /cockpit mute and never throws. It is started and not waited for, so a slow or missing player never
+ * delays the tool call or the stop an alert was raised from; the record is marked once a player has exited 0.
+ */
+const cueOwner = ($: EngineInterface, key: string, at: number): void => {
+  if (!guardCfg.sound) return
+  void (async () => {
+    const played = await sound($, 'checkpoint')
+    if (played === null) return
+    const cue = played === 'bell' ? 'bell' as const : 'sound' as const
+    await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.key === key && a.at === at && a.outcome !== 'resolved' && a.outcome !== 'throttled' && a.cue === undefined ? { ...a, cue } : a)) }))
+    await persist($)
+  })().catch(() => undefined)
 }
 
 /** Raises whatever alert is due. Never throws, never loops, and never touches a gate, a review or an approval. */
@@ -2826,21 +2842,29 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
       await update($, guardAtom, old => ({ ...old, pending: true }))
       const told = await notifyOwner($, alertMessage(one.kind, task.id))
       await update($, guardAtom, old => ({ ...old, pending: false, sentAt: now, count: old.count + 1 }))
-      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, attempts: decision.attempts, ...told }) }))
+      // an acknowledgment typed while the notification was being written covers it
+      const acked = isAckedAt(await read($, guardAtom), now)
+      await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, attempts: decision.attempts, ...told, ...(acked ? { acked: true as const } : {}) }) }))
       await hush(() => persist($))
+      cueOwner($, one.key, now)
     }
     // persistent alerts: a condition already told, still open and not acknowledged, is told again inside the same bounds
     if (guardCfg.repeat) {
       for (const one of open) {
         const now = await $.clock.now()
-        const again = remind(guardCfg, await read($, guardAtom), (await read($, ledgerAtom)).alerts ?? [], one.key, now)
+        const state = await read($, guardAtom)
+        // a notice marked in flight is not this pass's own (each is settled before the next): whoever holds it finishes first
+        if (state.pending) continue
+        const again = remind(guardCfg, state, (await read($, ledgerAtom)).alerts ?? [], one.key, now)
         if (!again.send) continue
         await update($, guardAtom, old => ({ ...old, pending: true }))
         const told = await notifyOwner($, reminderOf(one.kind, task.id, again.nth, guardCfg.maxReminders))
         // a reminder is spent whether or not the host wrote it: a channel that keeps failing is not retried without end
         await update($, guardAtom, old => ({ ...old, pending: false, sentAt: now, count: old.count + 1 }))
-        await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, attempts: 1, nth: again.nth, ...told }) }))
+        const acked = isAckedAt(await read($, guardAtom), now)
+        await update($, ledgerAtom, old => ({ ...old, alerts: boundedAlerts(old.alerts ?? [], { key: one.key, kind: one.kind, taskId: task.id, at: now, attempts: 1, nth: again.nth, ...told, ...(acked ? { acked: true as const } : {}) }) }))
         await hush(() => persist($))
+        cueOwner($, one.key, now)
       }
     }
   } catch { /* an alert that cannot be raised never fails the work */ } finally {
@@ -3257,6 +3281,7 @@ export const register: Register = (on, options) => {
     // so nothing historical ever reaches the HUD.
     await quiet(() => startLedgerWatch($))
     // persistent alerts: a reload or a restart finds what is still open in the kept records and resumes, it does not start over
+    isSessionOver = false
     await armReminders($)
     // How the session is authenticated, read once here and again after a
     // sign-in changes it. The reading is announced the first time and whenever
@@ -3280,6 +3305,7 @@ export const register: Register = (on, options) => {
     fieldWalker = RESTING
     // The ledger watcher is cancelled here, so no timer outlives the session.
     stopLedgerWatch()
+    isSessionOver = true
     stopReminders()
     band = null
     foldTimer?.cancel()
@@ -4118,7 +4144,8 @@ export const register: Register = (on, options) => {
         if ((arg === 'ack' || arg === 'silence' || arg === 'unsilence') && !isHumanAuthority(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
         if (arg === 'ack' || arg === 'silence') {
           await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
-          if (arg === 'silence') await update($, guardAtom, old => ({ ...old, all: true }))
+          const at = await $.clock.now()
+          await update($, guardAtom, old => ({ ...old, ackAt: at, ...(arg === 'silence' ? { all: true } : {}) }))
           await hush(() => persist($))
         } else if (arg === 'unsilence') await update($, guardAtom, old => (old.all ? { ...old, all: false } : old))
         else if (arg !== '') return { text: 'Usage: /cockpit guard | ack | silence | unsilence | trust [hash] | untrust | release' }

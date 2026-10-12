@@ -2,7 +2,7 @@
 // or a resolution ends it; one timer owns it; and none of it changes a verdict or carries anything but a closed sentence.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { EMPTY_GUARD, closedOf, decide, episodeOf, guardConfigOf, guardText, hasReminderLeft, labelOf, noticedOf, remind, reminderOf } from '../hooks/alerts'
+import { ALERT_CAP, EMPTY_GUARD, bounded, closedOf, decide, isAckedAt, episodeOf, guardConfigOf, guardText, hasReminderLeft, labelOf, noticedOf, remind, reminderOf } from '../hooks/alerts'
 import type { AlertRecord } from '../hooks/alerts'
 import { emptyLedger, migrateLedger } from '../hooks/ledger'
 import { applyAction, newTask, setGate, settle } from '../hooks/model'
@@ -100,6 +100,27 @@ describe('reminder policy', () => {
     expect(guardText(guardConfigOf({ guardAlerts: true }), EMPTY_GUARD, [])).toContain('Persistent: off')
     expect(guardText(guardConfigOf({}), EMPTY_GUARD, [])).not.toContain('Persistent')
   })
+  test('when the record cap is reached, an open condition\'s alert, count and acknowledgment outlive resolved occurrences', () => {
+    const open = [rec(k, { acked: true }), rec(k, { at: 70_000, nth: 1, acked: true })]
+    let kept: AlertRecord[] = [...open]
+    for (let n = 0; n < 40; n++) {
+      const flap = `1@0:run-blocked:${n}`
+      kept = bounded(kept, rec(flap, { kind: 'run-blocked', at: 100_000 + n }))
+      kept = bounded(kept, rec(flap, { kind: 'run-blocked', at: 100_001 + n, outcome: 'resolved', attempts: 0, channel: null }))
+    }
+    expect(kept.length).toBe(ALERT_CAP)
+    expect(episodeOf(kept, k)).toEqual(open)
+    expect(decide(cfg, EMPTY_GUARD, kept, k, 9e9)).toMatchObject({ why: 'duplicate' })
+    expect(remind(cfg, EMPTY_GUARD, kept, k, 9e9)).toEqual({ send: false, why: 'acknowledged' })
+    // a resolved mark never outlives what it closed in a way that reopens it: no flapped condition reads as open
+    expect(noticedOf(kept).map(a => a.key)).toEqual([k])
+  })
+  test('a notice decided before the last acknowledgment is born acknowledged', () => {
+    expect(isAckedAt(EMPTY_GUARD, 5)).toBe(false)
+    expect(isAckedAt({ ...EMPTY_GUARD, ackAt: 10 }, 10)).toBe(true)
+    expect(isAckedAt({ ...EMPTY_GUARD, ackAt: 10 }, 11)).toBe(false)
+    expect(isAckedAt({ ...EMPTY_GUARD, ackAt: 'x' as never }, 1)).toBe(false)
+  })
   test('malformed persisted reminder fields are dropped, well-formed ones are kept', () => {
     const good = [rec(k, { nth: 1, cue: 'sound' }), rec(k, { outcome: 'resolved', attempts: 0, channel: null }), rec(k, { nth: 10, cue: 'bell' })]
     const bad = [{ ...rec(k), nth: 0 }, { ...rec(k), nth: 11 }, { ...rec(k), nth: '1' }, { ...rec(k), nth: 1.5 }, { ...rec(k), cue: 'siren' }, { ...rec(k), cue: '/usr/bin/x' }, { ...rec(k), outcome: 'delivered' }]
@@ -153,7 +174,7 @@ describe('in a run', () => {
     await progress($, { action: 'status' })
     expect(w.notified.length).toBe(2)
   })
-  test('a silence stops everything; unsilence resumes what is still open', armed(), async ($, on) => {
+  test('a silence stops everything and acknowledges what is open; unsilence lets a new condition be told', armed(), async ($, on) => {
     const w = world(on)
     await start($); await planAndComplete($, 1); await failSecurity($)
     expect(String((await command($, 'guard silence')).text)).toContain('Silenced for this session')
@@ -167,6 +188,23 @@ describe('in a run', () => {
     expect(w.notified.length).toBe(2)
     await w.clock.advance(MIN + 30_000)
     expect(w.notified.length).toBe(3)
+  })
+  test('an acknowledgment typed while the first notification is still being written covers it', armed(), async ($, on) => {
+    const w = world(on); const held = hostState(on, {})
+    w.duringNotify = () => command($, 'guard ack')
+    await start($); await planAndComplete($, 1); await failSecurity($)
+    expect(w.duringNotify).toBeUndefined()
+    expect((ledger(held).alerts ?? []).map(a => a.acked)).toEqual([true])
+    await w.clock.advance(60 * MIN)
+    expect(w.notified.length).toBe(1)
+  })
+  test('a late call after the session ended does not bring the timer back', armed(), async ($, on) => {
+    const w = world(on)
+    await start($); await planAndComplete($, 1); await failSecurity($)
+    await $.session.end({ reason: 'exit', sessionId: 's1' } as never)
+    await progress($, { action: 'status' })
+    await w.clock.advance(60 * MIN)
+    expect(w.notified.length).toBe(1)
   })
   test('unsilence is the person\'s alone', armed(), async ($, on) => {
     const w = world(on); const held = hostState(on, {})
@@ -273,8 +311,10 @@ describe('sound', () => {
   test('guardSound tries the existing cue with the alert and each reminder, and records it as attempted', armed({ guardSound: true }), async ($, on) => {
     const w = world(on); const held = hostState(on, {})
     await start($); await planAndComplete($, 1); await failSecurity($)
+    await w.clock.settle()
     expect(plays(w, 'checkpoint').length).toBe(1)
     await w.clock.advance(MIN + 30_000)
+    await w.clock.settle()
     expect(plays(w, 'checkpoint').length).toBe(2)
     expect((ledger(held).alerts ?? []).map(a => a.cue)).toEqual(['sound', 'sound'])
     expect(String((await command($, 'guard')).text)).toContain('sound attempted')
@@ -282,8 +322,19 @@ describe('sound', () => {
   test('with no audio player the terminal bell is the fallback, also when the notification itself failed', armed({ guardSound: true }), async ($, on) => {
     const w = world(on, { players: { sh: 'ok' } }); w.notifyMode = 'disabled'; const held = hostState(on, {})
     await start($); await planAndComplete($, 1); await failSecurity($)
+    // the cue is not waited for by the call that raised the alert
+    await w.clock.settle()
     expect(w.runs.some(r => r[0] === 'sh' && r.join(' ').includes('/dev/tty'))).toBe(true)
     expect((ledger(held).alerts ?? [])[0]).toMatchObject({ outcome: 'failed', why: 'disabled', cue: 'bell' })
+  })
+  test('a player that hangs never delays the call the alert was raised from', armed({ guardSound: true }), async ($, on) => {
+    const w = world(on, { players: { 'pw-play': 'hangs' } }); const held = hostState(on, {})
+    await start($); await planAndComplete($, 1)
+    // no clock movement: were the player waited for, this call could not return
+    await failSecurity($)
+    expect(w.notified.length).toBe(1)
+    expect((ledger(held).alerts ?? [])[0]).toMatchObject({ outcome: 'sent' })
+    expect((ledger(held).alerts ?? [])[0]!.cue).toBeUndefined()
   })
   test('/cockpit mute and a machine with no player stay silent, and the alert is still recorded', armed({ guardSound: true }), async ($, on) => {
     const w = world(on, { players: {} }); const held = hostState(on, {})
@@ -336,6 +387,17 @@ describe('reload and restart', () => {
     await w.clock.advance(60 * MIN)
     expect(w.notified).toEqual([])
     expect(outcomes(held)).toEqual(['security-failure:sent', 'security-failure:resolved'])
+  })
+  test('a stale in-flight mark left by a module that is gone costs one look, not the reminder', armed(), async ($, on) => {
+    const t = heldTask()
+    const w = world(on, {}, { 'ledger:s1': { ...emptyLedger('s1'), alerts: [rec(keyOfTask(t), { at: 1 })] } })
+    on('session.id', () => ({ value: 's1' }))
+    hostState(on, { task: t, 'guard-state': { ...EMPTY_GUARD, pending: true } })
+    await start($)
+    await w.clock.advance(31_000)
+    expect(w.notified.length).toBe(0)
+    await w.clock.advance(30_000)
+    expect(w.notified.length).toBe(1)
   })
   test('malformed stored guard state and alerts neither throw nor send', armed(), async ($, on) => {
     const w = world(on, {}, { 'ledger:s1': { ...emptyLedger('s1'), alerts: [{ key: 7 }, null, 'x', { ...rec('k'), nth: -1 }] } })

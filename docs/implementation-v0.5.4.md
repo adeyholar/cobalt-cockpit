@@ -13,7 +13,9 @@ An opt-in extension of Cobalt Guard's owner alerts. The policy stays in `hooks/a
 | resolved | the condition no longer holds, or its task is gone | recorded once, no notification; a return is a new occurrence |
 | spent | `guardMaxReminders` reached, or the session budget | nothing more for that occurrence |
 
-Everything is derived from the alert records in the Run Ledger (`episodeOf`, `remind`, `closedOf`, `hasReminderLeft`), so a reload or restart resumes a count. `GuardState` gained no field.
+Everything is derived from the alert records in the Run Ledger (`episodeOf`, `remind`, `closedOf`, `hasReminderLeft`), so a reload or restart resumes a count. `GuardState` gained one optional field, `ackAt` (when the person last acknowledged): a notice that was still being written at that moment is recorded acknowledged, so an acknowledgment cannot be lost to timing.
+
+The 32-record cap gives up held-back records first, then the records of occurrences already resolved; an open condition's alert, reminder count and acknowledgment are the last to go.
 
 ## Bounds
 
@@ -21,12 +23,12 @@ A reminder is sent only when all hold: persistence on; not silenced; the occurre
 
 ## Timer
 
-One `$.clock.every` timer (30 s, or the interval if shorter) exists only while `hasReminderLeft` is true. `armReminders` is the single place that creates or cancels it: after every `raiseAlerts`, after `ack`/`silence`/`unsilence`, at `session.start` (which is how a reload resumes) and `session.end`. A tick calls the same `raiseAlerts` as every other caller, behind the same re-entry guard, so a tick during a raise does nothing.
+One `$.clock.every` timer (30 s) exists only while `hasReminderLeft` is true. `armReminders` is the single place that creates or cancels it: after every `raiseAlerts`, after `ack`/`silence`/`unsilence`, at `session.start` (which is how a reload resumes) and `session.end`. A tick calls the same `raiseAlerts` as every other caller, behind the same re-entry guard, so a tick during a raise does nothing. A reminder is also skipped while the shared state marks a notice in flight, and nothing re-arms the timer after `session.end`.
 
 ## Delivery and what is claimed
 
 - Notification: the host's `$.ui.notify`. `sent` means the host reported the channel it wrote to. ATTEMPTED and SENT are recorded; DELIVERED or seen is never claimed.
-- Sound (`guardSound`): the existing `sound()` cue player and its player chain, whose last entry is the terminal bell; it honours `sounds` and `/cockpit mute`. `cue: sound|bell` records that a player exited 0.
+- Sound (`guardSound`): the existing `sound()` cue player and its player chain, whose last entry is the terminal bell; it honours `sounds` and `/cockpit mute`. `cue: sound|bell` records that a player exited 0. The player is started and not waited for, so a slow or missing player never delays the tool call or stop the alert came from; the record is marked afterwards.
 - Desktop: no desktop notifier is started. Terminals that implement the host's notification channel show their own popup. From a remote machine, whether that reaches the operator's desktop depends on the terminal and connection. This is unverified and is listed as interactive acceptance.
 
 ## Rejected alternatives
@@ -37,7 +39,11 @@ One `$.clock.every` timer (30 s, or the interval if shorter) exists only while `
 
 ## Tests
 
-`tests/alerts-persistent.test.ts`: configuration clamps and opt-in; the reminder rule (interval, cap, failed reminders, acknowledgment, silence, cooldown, reserved budget, backwards clock, new occurrence after resolution); timer-only repetition; no verdict change; acknowledgment; silence and unsilence; person-only `unsilence`; resolution and return; reset and new task; session end; failing notifications; budget and cooldown spacing; closed message text; sound, bell fallback and mute; reload resuming with one timer; acknowledged reload; stale stored record; malformed stored state.
+`tests/alerts-persistent.test.ts`: configuration clamps and opt-in; the reminder rule (interval, cap, failed reminders, acknowledgment, silence, cooldown, reserved budget, backwards clock, new occurrence after resolution); timer-only repetition; no verdict change; acknowledgment; silence and unsilence; person-only `unsilence`; resolution and return; reset and new task; session end; failing notifications; budget and cooldown spacing; closed message text; sound, bell fallback and mute; reload resuming with one timer; acknowledged reload; stale stored record; stale in-flight mark; malformed stored state; an acknowledgment during a notification in flight; a hanging player; a late call after session end; record-cap eviction.
+
+## Independent review
+
+A separate reviewer approved the change with four non-blocking findings, all corrected before merge: the cue was awaited on the tool-call path; the record cap could evict an open condition's alert or acknowledgment behind resolved records; an acknowledgment typed while the first notification was in flight was lost; and a reminder did not check the shared in-flight mark.
 
 ## Remaining human acceptance
 
