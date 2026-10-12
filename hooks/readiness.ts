@@ -107,17 +107,17 @@ export const readyText = (task: Task | null, swarm: Swarm | null, columns: numbe
   const lines = [clip(`READY · ${r.standing} · ${task!.percent}% · status ${task!.status.toUpperCase()}`, columns)]
   if (r.open.length > 0) {
     lines.push('STANDING IN THE WAY')
-    for (const l of r.open) lines.push(clip(`  ✗ ${l}`, Math.max(columns, 60)))
+    for (const l of r.open) lines.push(clip(`  ✗ ${l}`, Math.max(columns, 20)))
   }
   if (r.satisfied.length > 0) {
     lines.push('HOLDS')
-    for (const l of r.satisfied) lines.push(clip(`  ✓ ${l}`, Math.max(columns, 60)))
+    for (const l of r.satisfied) lines.push(clip(`  ✓ ${l}`, Math.max(columns, 20)))
   }
   if (r.notes.length > 0) {
     lines.push('ALSO')
-    for (const l of r.notes) lines.push(clip(`  · ${l}`, Math.max(columns, 60)))
+    for (const l of r.notes) lines.push(clip(`  · ${l}`, Math.max(columns, 20)))
   }
-  lines.push(clip('Read-only: approves nothing, clears nothing; a reported result is not a verified one.', Math.max(columns, 60)))
+  lines.push(clip('Read-only: approves nothing, clears nothing; a reported result is not a verified one.', Math.max(columns, 20)))
 
   return lines.join('\n')
 }

@@ -60,6 +60,11 @@ describe('the export', () => {
     expect(out.truncated).toBe(true)
     expect(out.occurrences[0].task).toBe(80 - EXPORT_MAX)
   })
+  test('a channel name that is not one of the host\'s is reported as other, never echoed', () => {
+    const odd = written(rec('u9:run-blocked:task', { channel: 'evil text here' }))
+    const out = JSON.parse(exportOf(occurrencesOf(odd, []), P1, 0))
+    expect(out.occurrences[0].channel).toBe('other')
+  })
   test('a project name that is not a hash is not printed', () => {
     expect(JSON.parse(exportOf([], '/home/user/x', 0)).project).toBeNull()
   })
@@ -68,41 +73,60 @@ describe('the export', () => {
 describe('the cleanup plan for the earlier formats', () => {
   const legacy = written(rec('t1:run-blocked:task'), rec('t2:run-blocked:task', { at: 2000 }))
   const [i1, i2] = idsOf(legacy)
+  /** The keys and their values as a session that migrated these occurrences writes them. */
+  const held = (project: string, ...ids: string[]): Map<string, unknown> => new Map(episodesOf(legacy).filter(e => ids.includes(e.id)).map(e => [occKeyOf(project, e.id), { v: 1, records: e.records }]))
   test('nothing in the store, nothing to do', () => {
     expect(legacyPlanText(legacyPlanOf([], []))).toContain('none in the store')
   })
   test('a key is deletable only when every occurrence it holds has a key of its own; otherwise it is kept', () => {
     const values = [{ key: 'alert-history', value: { v: 1, projects: { [P1]: legacy } } }]
-    const partly = legacyPlanOf(values, [occKeyOf(P1, i1!)])
+    const partly = legacyPlanOf(values, [occKeyOf(P1, i1!)], held(P1, i1!))
     expect(partly.deletable).toEqual([])
     expect(partly.kept).toEqual(['alert-history'])
-    expect(legacyPlanText(partly)).toContain('1 NOT migrated: KEPT')
-    const whole = legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)])
+    expect(legacyPlanText(partly)).toContain('1 held in full by keys of their own · 1 NOT (or not in full): KEPT')
+    const whole = legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)], held(P1, i1!, i2!))
     expect(whole.deletable).toEqual(['alert-history'])
     expect(legacyPlanText(whole)).toContain(`/cockpit alerts legacy delete ${whole.token}`)
   })
   test('a project in the single key that was never migrated keeps the whole key', () => {
     const values = [{ key: 'alert-history', value: { v: 1, projects: { [P1]: legacy, [P2]: written(rec('t9:run-blocked:task')) } } }]
-    expect(legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)]).deletable).toEqual([])
+    expect(legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)], held(P1, i1!, i2!)).deletable).toEqual([])
   })
   test('another project\'s occurrence key does not count as a migration of this one', () => {
     const values = [{ key: `alert-history:${P1}`, value: { v: 1, alerts: legacy } }]
-    expect(legacyPlanOf(values, [occKeyOf(P2, i1!), occKeyOf(P2, i2!)]).deletable).toEqual([])
-    expect(legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)]).deletable).toEqual([`alert-history:${P1}`])
+    expect(legacyPlanOf(values, [occKeyOf(P2, i1!), occKeyOf(P2, i2!)], held(P2, i1!, i2!)).deletable).toEqual([])
+    expect(legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)], held(P1, i1!, i2!)).deletable).toEqual([`alert-history:${P1}`])
+  })
+  test('a key that merely exists, is damaged, is another occurrence\'s, or holds less, is not a migration', () => {
+    const values = [{ key: `alert-history:${P1}`, value: { v: 1, alerts: legacy } }]
+    const keys = [occKeyOf(P1, i1!), occKeyOf(P1, i2!)]
+    const full = held(P1, i1!, i2!)
+    const k1 = occKeyOf(P1, i1!)
+    for (const broken of [undefined, null, 'x', { v: 2, records: [] }, { v: 1, records: 'x' }, { v: 1, records: [] }, { v: 1, records: [{ key: 7 }] }, { v: 1, records: (full.get(occKeyOf(P1, i2!)) as { records: AlertRecord[] }).records }]) {
+      const occ = new Map(full)
+      occ.set(k1, broken)
+      expect(legacyPlanOf(values, keys, occ).deletable).toEqual([])
+    }
+    // an acknowledged earlier record whose own key lost the acknowledgment is not held in full
+    const ackedLegacy = [{ key: `alert-history:${P1}`, value: { v: 1, alerts: legacy.map((r, n) => (n === 0 ? { ...r, acked: true as const } : r)) } }]
+    expect(legacyPlanOf(ackedLegacy, keys, full).deletable).toEqual([])
   })
   test('a value not understood in full is never deletable', () => {
     for (const value of ['x', 7, null, { v: 2 }, { v: 1, projects: 'x' }, { v: 1, projects: { [P1]: [...legacy, { key: 7 }] } }, { v: 1, projects: { '../etc': [] } }]) {
-      const plan = legacyPlanOf([{ key: 'alert-history', value }], [occKeyOf(P1, i1!), occKeyOf(P1, i2!)])
+      const plan = legacyPlanOf([{ key: 'alert-history', value }], [occKeyOf(P1, i1!), occKeyOf(P1, i2!)], held(P1, i1!, i2!))
       expect(plan.deletable).toEqual([])
     }
   })
   test('the code names this plan: a change in the store changes it', () => {
     const values = [{ key: 'alert-history', value: { v: 1, projects: { [P1]: legacy } } }]
-    const a = legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)])
-    const b = legacyPlanOf(values, [occKeyOf(P1, i1!)])
+    const a = legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)], held(P1, i1!, i2!))
+    const b = legacyPlanOf(values, [occKeyOf(P1, i1!)], held(P1, i1!))
     expect(a.token).toMatch(/^[0-9a-f]{8}$/)
     expect(a.token).not.toBe(b.token)
-    expect(legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)]).token).toBe(a.token)
+    expect(legacyPlanOf(values, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)], held(P1, i1!, i2!)).token).toBe(a.token)
+    // a changed record, with the same counts, changes the code
+    const changed = [{ key: 'alert-history', value: { v: 1, projects: { [P1]: [{ ...legacy[0]!, acked: true }, legacy[1]!] } } }]
+    expect(legacyPlanOf(changed, [occKeyOf(P1, i1!), occKeyOf(P1, i2!)], held(P1, i1!, i2!)).token).not.toBe(a.token)
   })
 })
 
@@ -130,7 +154,7 @@ describe('in a run', () => {
     await start($)
     const dry = await say($, 'alerts legacy')
     expect(dry).toContain('DRY RUN · nothing was changed')
-    expect(dry).toContain(`project ${P2} · 1 occurrence · 0 with keys of their own · 1 NOT migrated: KEPT`)
+    expect(dry).toContain(`project ${P2} · 1 occurrence · 0 held in full by keys of their own · 1 NOT (or not in full): KEPT`)
     expect(dry).toContain('Nothing can be deleted safely')
     expect(await say($, 'alerts legacy delete 00000000')).toContain('does not match')
     expect(w.store.has('alert-history')).toBe(true)

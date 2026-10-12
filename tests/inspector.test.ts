@@ -57,8 +57,18 @@ describe('the blocker follows the swarm\'s own admission rule', () => {
     s = admitTask(add(s, input('B')), 'B', 3000).swarm
     const b = blockerOf(s, task(s, 'B'), NOW)!
     expect(b.kind).toBe('capacity')
-    expect(b.why).toBe('Agent capacity exhausted: 1 of 1 slots in use (SONNET 1 of 1).')
+    expect(b.why).toBe('Agent capacity exhausted: all 1 slots in use (SONNET 1 of 1).')
     expect(b.suggestion).toContain('only the person changes them')
+  })
+  test('capacity names the bound admission applied: commander work in the main loop is not a slot', () => {
+    let s = configureSwarm(emptySwarm(), { total: 4, sonnet: 2, haiku: 2, opus: 0 })
+    s = admitTask(add(s, input('O', { tier: 'OPUS' })), 'O', 1500).swarm
+    s = run(add(s, input('A')), 'A', 'agent-a')
+    s = run(add(s, input('B')), 'B', 'agent-b')
+    s = admitTask(add(s, input('C')), 'C', 3000).swarm
+    expect(admissionReason(s, 'C')).toBe('resource budget')
+    expect(blockerOf(s, task(s, 'C'), NOW)!.why).toBe('Agent capacity exhausted: the SONNET pool is full (SONNET 2 of 2; 2 of 4 slots in use).')
+    expect(agentsText(view(s))).toContain('CAPACITY · 2 of 4 slots')
   })
   test('the commander and an architect being occupied are told apart', () => {
     let s = add(emptySwarm(), input('A', { tier: 'OPUS' }))
@@ -172,7 +182,9 @@ describe('the agents view shows what was observed and says what was not', () => 
     const bound = { ...s, tasks: s.tasks.map(t => (t.id === 'A' ? { ...t, launchEffort: 'high', appliedEffort: 'medium' } : t)) }
     const text = taskText(view(bound, [agent(a.agentId!, { model: 'claude-sonnet-5-5', requestedModel: 'sonnet', effort: 'high', effortSource: 'engine', effectiveEffort: 'high' })]), 'A')
     expect(text).toContain('model: claude-sonnet-5-5 (asked for sonnet) · tier SONNET')
-    expect(text).toContain('effort: requested high · launch high · applied medium · engine reported high')
+    expect(text).toContain('effort: requested high · launch high · applied medium (the launch level) · engine reported high')
+    const rewritten = { ...s, tasks: s.tasks.map(t => (t.id === 'A' ? { ...t, launchEffort: null, appliedEffort: 'high' } : t)) }
+    expect(taskText(view(rewritten, [], 200), 'A')).toContain('set on requests by Cockpit high (not reported back by the engine)')
     const none = taskText(view(bound, [agent(a.agentId!)]), 'A')
     expect(none).toContain('model: not observed · tier SONNET')
     expect(none).toContain('engine: no report')
@@ -205,6 +217,12 @@ describe('the agents view shows what was observed and says what was not', () => 
     expect(text).not.toContain('secret-client')
     expect(text).not.toContain('/home/user')
     expect(taskText(view(swarm), 'A')).toContain('owns: write …/hooks/alerts.ts')
+  })
+  test('paths in free text (objective, question, conclusion) are cut to their last two segments', () => {
+    const s = add(emptySwarm(), input('P', { objective: 'fix /home/user/Projects/secret-client/hooks/alerts.ts and ~/work/x/y/z.ts now' }))
+    const text = taskText(view(s), 'P')
+    expect(text).toContain('fix …/hooks/alerts.ts and …/y/z.ts now')
+    expect(text).not.toContain('secret-client')
   })
   test('an unknown task says so and lists what is known; a task is found whatever the case', () => {
     expect(taskText(view(swarm), 'zzz')).toBe('No task "zzz" in this session. Known: A, B, C.')

@@ -63,7 +63,7 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { exportOf, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import { exportOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
@@ -2735,10 +2735,15 @@ const seedAlerts = async ($: EngineInterface): Promise<void> => {
     await hush(async () => {
       const old = (await $.store.get(historyKeyOf(project)).catch(() => undefined)) as { v?: unknown; alerts?: unknown } | undefined
       if (old?.v !== 1) return
-      const have = new Set(occIdsOf(await $.store.keys(), project))
-      // only a key every record of which this build understands, and every occurrence of which has a key of its own, is given up
+      // only a key every record of which this build understands, and every occurrence of which its own key holds in full (read back,
+      // not merely named), is given up
       const understood = Array.isArray(old.alerts) && validAlerts(old.alerts).length === old.alerts.length
-      if (understood && episodesOf(validAlerts(old.alerts)).every(e => have.has(e.id))) await $.store.delete(historyKeyOf(project))
+      let held = understood
+      for (const e of understood ? episodesOf(validAlerts(old.alerts)) : []) {
+        const value = await $.store.get(occKeyOf(project, e.id)).catch(() => undefined)
+        if (!isMigratedEpisode(e.records, e.id, value)) { held = false; break }
+      }
+      if (held) await $.store.delete(historyKeyOf(project))
     })
   }
   await syncAcks($, false)
@@ -4675,7 +4680,13 @@ export const register: Register = (on, options) => {
             const value = await $.store.get(key).catch(() => undefined)
             values.push({ key, value })
           }
-          const plan = legacyPlanOf(values, keys)
+          // an occurrence counts as migrated only when its own key holds it in full: the values are read, not only the names
+          const occ = new Map<string, unknown>()
+          for (const key of keys.filter(k => k.startsWith('alert-occ:'))) {
+            const value = await $.store.get(key).catch(() => undefined)
+            occ.set(key, value)
+          }
+          const plan = legacyPlanOf(values, keys, occ)
           if (words[2] === undefined) return { text: legacyPlanText(plan) }
           if (words[2] !== 'delete' || words.length !== 4) return { text: 'Usage: /cockpit alerts legacy (a dry run) | /cockpit alerts legacy delete <code from the dry run>' }
           // deleting is the person's alone, and only what the plan the person read calls safe
@@ -4684,6 +4695,10 @@ export const register: Register = (on, options) => {
           if (plan.deletable.length === 0) return { text: 'Cockpit: nothing can be deleted safely. Nothing was changed.' }
           const removed: string[] = []
           for (const key of plan.deletable) {
+            // read again just before the delete: a key that changed since the plan was computed is left alone
+            const now = await $.store.get(key).catch(() => undefined)
+            const was = values.find(v => v.key === key)?.value
+            if (JSON.stringify(now) !== JSON.stringify(was)) continue
             try {
               await $.store.delete(key)
               removed.push(key)
@@ -4691,7 +4706,7 @@ export const register: Register = (on, options) => {
           }
           const left = plan.deletable.filter(k => !removed.includes(k))
 
-          return { text: `Cockpit: deleted ${removed.length === 0 ? 'nothing' : removed.join(', ')}; every occurrence they held already had a key of its own.${left.length > 0 ? ` Could not delete: ${left.join(', ')}.` : ''}${plan.kept.length > 0 ? ` Kept: ${plan.kept.join(', ')}.` : ''} No alert record, acknowledgment, gate or verdict was changed.` }
+          return { text: `Cockpit: deleted ${removed.length === 0 ? 'nothing' : removed.join(', ')}; every occurrence they held was already held in full by a key of its own.${left.length > 0 ? ` Could not delete: ${left.join(', ')}.` : ''}${plan.kept.length > 0 ? ` Kept: ${plan.kept.join(', ')}.` : ''} No alert record, acknowledgment, gate or verdict was changed.` }
         }
         await hush(() => syncAcks($))
         if (arg === 'digest') {

@@ -17,6 +17,8 @@ const UNKNOWN = 'unknown'
 const known = (v: unknown): v is string => typeof v === 'string' && v !== UNKNOWN && v !== ''
 const clip = (text: string, n: number): string => (text.length <= n ? text : `${text.slice(0, Math.max(0, n - 1))}…`)
 const one = (text: string): string => text.replace(/\s+/g, ' ').trim()
+/** Free text written by the commander or an agent, with any path in it cut to its last two segments, as claims are. */
+export const shortenPaths = (text: string): string => text.replace(/(?:~|\.{1,2})?\/(?:[^\s/'"`]+\/)+[^\s/'"`]*/g, m => { const parts = m.split('/').filter(p => p !== '' && p !== '~' && p !== '.' && p !== '..'); return parts.length <= 2 ? m : `…/${parts.slice(-2).join('/')}` })
 
 /** How long ago, in the coarsest honest unit; null when the clock is behind the moment. */
 export const ageOf = (ms: number): string | null => (ms < 0 ? null : ms < 60_000 ? 'just now' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)}m ago` : ms < 172_800_000 ? `${Math.floor(ms / 3_600_000)}h ago` : `${Math.floor(ms / 86_400_000)}d ago`)
@@ -75,8 +77,11 @@ export const blockerOf = (s: Swarm, t: SwarmTask, now: number): Blocker | null =
       const lim = limitsOf(s)
       const used = occupancyOf(s)
       const pool = t.tier === 'SONNET' ? `SONNET ${used.sonnet} of ${lim.sonnet}` : t.tier === 'HAIKU' ? `HAIKU ${used.haiku} of ${lim.haiku}` : `OPUS ${used.opus} of ${lim.opus}`
+      // name the bound that holds it, counted as admission counts it
+      const slots = t.tier === 'OPUS' ? used.total : used.counted
+      const why = slots >= lim.total ? `Agent capacity exhausted: all ${lim.total} slots in use (${pool}).` : `Agent capacity exhausted: the ${t.tier} pool is full (${pool}; ${slots} of ${lim.total} slots in use).`
 
-      return { kind: 'capacity', why: `Agent capacity exhausted: ${used.total} of ${lim.total} slots in use (${pool}).`, suggestion: 'Wait for a running task to finish. The limits come from the Cockpit settings (maxSubagents, maxSonnet, maxHaiku); only the person changes them.' }
+      return { kind: 'capacity', why, suggestion: 'Wait for a running task to finish. The limits come from the Cockpit settings (maxSubagents, maxSonnet, maxHaiku); only the person changes them.' }
     }
     if (reason === 'commander occupied') return { kind: 'commander', why: 'The commander is occupied: OPUS work runs in the main loop, which another task holds.', suggestion: 'It starts when the commander finishes the task it holds.' }
     if (reason === 'architect occupied') return { kind: 'architect', why: 'An architect consultation is already running; only the configured number run at once.', suggestion: 'Wait for the running consultation to return.' }
@@ -91,7 +96,7 @@ export const blockerOf = (s: Swarm, t: SwarmTask, now: number): Blocker | null =
     const to = t.escalation?.to ?? 'the commander'
     return { kind: 'escalation', why: `Escalated to ${to}: the agent stopped and its question is unresolved.`, suggestion: 'The commander resolves it with a conclusion and evidence (resolveEscalation); nothing here resolves it. Until then the task is not completed.' }
   }
-  if (t.state === 'failed') return { kind: 'failed', why: `The task failed${t.result?.conclusion ? `: ${clip(one(t.result.conclusion), 100)}` : ' (no reason was reported)'}.` }
+  if (t.state === 'failed') return { kind: 'failed', why: `The task failed${t.result?.conclusion ? `: ${clip(shortenPaths(one(t.result.conclusion)), 100)}` : ' (no reason was reported)'}.` }
   if (t.state === 'cancelled') return { kind: 'cancelled', why: 'The task was cancelled.' }
   if (t.state === 'completed' && t.verification !== 'pass') {
     const word = t.verification === 'fail' ? 'verification FAILED' : t.verification === 'unknown' ? 'verification is UNKNOWN' : 'verification is pending'
@@ -108,7 +113,8 @@ const byAttention = (a: SwarmTask, b: SwarmTask): number => (STATE_RANK[a.state]
 const effortText = (t: SwarmTask, a: LedgerAgent | undefined): string => {
   const parts = [`requested ${t.requestedEffort}`]
   parts.push(t.launchEffort === undefined || t.launchEffort === null ? 'launch: none set on the call' : `launch ${t.launchEffort}`)
-  parts.push(t.appliedEffort === null ? 'applied: not observed' : `applied ${t.appliedEffort}`)
+  // a level Cockpit itself set on requests is not one the engine confirmed: it is named for what it is
+  parts.push(t.appliedEffort === null ? 'applied: not observed' : t.launchEffort !== undefined && t.launchEffort !== null ? `applied ${t.appliedEffort} (the launch level)` : `set on requests by Cockpit ${t.appliedEffort} (not reported back by the engine)`)
   if (a !== undefined) parts.push(known(a.effectiveEffort) ? `engine reported ${a.effectiveEffort}` : a.effortSource === 'engine' && known(a.effort) ? `engine reported ${a.effort}` : 'engine: no report')
 
   return parts.join(' · ')
@@ -156,7 +162,7 @@ export const agentsText = (v: AgentsView): string => {
     ? `AGENTS · wave ${s.wave} · ${used.total} active · ${waiting} waiting · ${count('stalled')} stalled · ${count('escalated')} escalated · ${count('completed')} completed of ${s.tasks.length}`
     : `AGENTS · ${used.total} active · ${waiting} waiting · ${count('stalled') + count('escalated')} stuck · ${count('completed')}/${s.tasks.length} done · ${s.wave}`
   const lines = [clip(head, columns)]
-  lines.push(clip(`CAPACITY · ${used.total} of ${lim.total} slots · SONNET ${used.sonnet}/${lim.sonnet} · HAIKU ${used.haiku}/${lim.haiku}${lim.opus > 0 ? ` · OPUS ${used.opus}/${lim.opus}` : ' · OPUS in the main loop'}${s.conflicts > 0 ? ` · ${s.conflicts} ownership conflict${s.conflicts === 1 ? '' : 's'} recorded` : ''}`, columns))
+  lines.push(clip(`CAPACITY · ${used.counted} of ${lim.total} slots · SONNET ${used.sonnet}/${lim.sonnet} · HAIKU ${used.haiku}/${lim.haiku}${lim.opus > 0 ? ` · OPUS ${used.opus}/${lim.opus}` : ' · OPUS in the main loop'}${s.conflicts > 0 ? ` · ${s.conflicts} ownership conflict${s.conflicts === 1 ? '' : 's'} recorded` : ''}`, columns))
   if (s.tasks.length === 0) lines.push('No tasks assigned in this session. The commander assigns work with the swarm tool; Cockpit invents none.')
   const sorted = [...s.tasks].sort(byAttention)
   for (const t of sorted.slice(0, MAX_LISTED)) {
@@ -192,7 +198,7 @@ export const taskText = (v: AgentsView, wanted: string): string => {
   const a = v.agents.find(x => x.id === t.agentId)
   const blocker = blockerOf(s, t, now)
   const lines = [clip(`TASK ${t.id} · ${t.tier} ${t.role} · ${t.state}${t.cancellationRequested && isLive(t) ? ' (cancellation requested)' : ''}`, columns)]
-  lines.push(clip(`objective: ${clip(one(t.objective), 120)}`, columns))
+  lines.push(clip(`objective: ${clip(shortenPaths(one(t.objective)), 120)}`, columns))
   lines.push(clip(`agent: ${t.agentId === null ? 'none bound' : `${t.agentId.slice(0, 8)}… · ${a === undefined ? 'not in the Ledger' : `host status ${a.status}`}`}`, columns))
   lines.push(clip(`model: ${modelText(t, a)}`, columns))
   lines.push(clip(`effort: ${effortText(t, a)}`, columns))
@@ -203,11 +209,11 @@ export const taskText = (v: AgentsView, wanted: string): string => {
   if (children.length > 0) lines.push(clip(`children: ${children.map(x => `${x.id} ${x.state}`).join(' · ')}`, columns))
   lines.push(clip(`activity: ${activityText(t, now)}`, columns))
   lines.push(clip(`outcome: ${outcomeText(t)}`, columns))
-  if (t.escalation !== null) lines.push(clip(`escalation: to ${t.escalation.to}${t.escalation.effort ? ` (effort ${t.escalation.effort})` : ''} · ${clip(one(t.escalation.question), 100)}`, columns))
+  if (t.escalation !== null) lines.push(clip(`escalation: to ${t.escalation.to}${t.escalation.effort ? ` (effort ${t.escalation.effort})` : ''} · ${clip(shortenPaths(one(t.escalation.question)), 100)}`, columns))
   if (t.effortEscalation !== null) lines.push(clip(`effort raised: ${t.effortEscalation.from} → ${t.effortEscalation.to}`, columns))
   if (t.result !== null && t.result.unresolved.length > 0) lines.push(clip(`unresolved by the agent: ${t.result.unresolved.length}`, columns))
-  lines.push(blocker === null ? (t.state === 'running' || t.state === 'completed' ? 'blocker: none recorded' : 'blocker: none') : clip(`blocker (${blocker.kind}): ${blocker.why}`, Math.max(columns, 60)))
-  if (blocker?.suggestion !== undefined) lines.push(clip(`suggestion (information only; nothing was changed): ${blocker.suggestion}`, Math.max(columns, 60)))
+  lines.push(blocker === null ? (t.state === 'running' || t.state === 'completed' ? 'blocker: none recorded' : 'blocker: none') : clip(`blocker (${blocker.kind}): ${blocker.why}`, Math.max(columns, 20)))
+  if (blocker?.suggestion !== undefined) lines.push(clip(`suggestion (information only; nothing was changed): ${blocker.suggestion}`, Math.max(columns, 20)))
 
   return lines.join('\n')
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Two genuine Claude Code processes against one disposable plugin store (v0.6.0). Engineering evidence only: it shows that two
-# real host processes started in one project read the same alert history, migrate it without losing an occurrence, and agree
-# on the export and the cleanup plan, with the host's own store locking in between. It does not show that a person saw
+# real host processes started in one project read the same alert history, migrate it without losing an occurrence, refuse the
+# person-only export and deletion to their non-person origin, and agree on the cleanup plan, with the host's own store locking
+# in between. It does not show that a person saw
 # anything, and it cannot acknowledge an alert: `claude -p` runs with the `sdk` origin, which Cockpit refuses for
 # acknowledgments on purpose, and the harness does not weaken that.
 #
@@ -25,13 +26,16 @@ root=$(realpath -e -- "$root")
 [[ $root == */cobalt-harness-* ]] || fail "unexpected harness directory: $root"
 cleanup() { if [[ $keep -eq 0 && -n ${root:-} && $root == */cobalt-harness-* && -d $root ]]; then rm -rf -- "$root"; fi; }
 trap cleanup EXIT
-config=$root/config; state=$root/state; plugin=$root/plugin; project=$root/project
-mkdir -p "$config" "$state" "$plugin" "$project"
-for p in "$config" "$state" "$plugin" "$project"; do case "$p/" in "$root"/*) ;; *) fail "path outside the harness directory: $p" ;; esac; done
+config=$root/config; state=$root/state; plugin=$root/plugin; project=$root/project; home=$root/home
+mkdir -p "$config" "$state" "$plugin" "$project" "$home"
+for p in "$config" "$state" "$plugin" "$project" "$home"; do case "$p/" in "$root"/*) ;; *) fail "path outside the harness directory: $p" ;; esac; done
 git -C "$repo" archive --format=tar HEAD | tar -x -C "$plugin"
 settings='{"pluginConfigs":{"cobalt-cockpit@inline":{"options":{"guardRecordOnly":true,"telemetry":false}}}}'
 run() { # one genuine host process: an immediate /cockpit command in the project, isolated configuration, no model
-  (cd "$project" && CLAUDE_CONFIG_DIR=$config XDG_STATE_HOME=$state DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  # a home of its own, and no authentication variable from the operator's environment
+  (cd "$project" && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u ANTHROPIC_CUSTOM_HEADERS -u CLAUDE_CODE_OAUTH_TOKEN \
+    -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY -u CLAUDE_CODE_USE_MANTLE \
+    HOME=$home CLAUDE_CONFIG_DIR=$config XDG_STATE_HOME=$state DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     timeout 90 "$claude_bin" -p "$1" --plugin-dir "$plugin" --settings "$settings" < /dev/null)
 }
 pass=0; failed=0

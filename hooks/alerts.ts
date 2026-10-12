@@ -515,6 +515,9 @@ export const EXPORT_SCHEMA = 'cobalt-cockpit/alerts-export'
 export const EXPORT_VERSION = 1
 export const EXPORT_MAX = 64
 const NOTIFICATION: Record<PinStatus, string> = { sent: 'SENT', recorded: 'RECORDED', deferred: 'DEFERRED', 'not-sent': 'NOT_SENT', held: 'HELD_BACK', 'kind-off': 'NOT_NOTIFIED_KIND_OFF', silenced: 'NOT_NOTIFIED_SILENCED' }
+/** The host's own notification channels: anything else in a stored record is reported as `other`, never echoed. */
+const CHANNELS: readonly string[] = ['iterm2', 'iterm2_with_bell', 'kitty', 'ghostty', 'terminal_bell']
+const channelOf = (c: string | null): string | null => (c === null ? null : CHANNELS.includes(c) ? c : 'other')
 const iso = (at: number): string | null => { try { return new Date(at).toISOString() } catch { return null } }
 /**
  * `/cockpit alerts export`: the project's occurrences as JSON in a closed vocabulary. Each field is an enumerated word, a number,
@@ -528,12 +531,28 @@ export const exportOf = (occ: readonly Occurrence[], project: string | null, now
 
   return JSON.stringify({
     schema: EXPORT_SCHEMA, version: EXPORT_VERSION, project: project !== null && PROJECT_RE.test(project) ? project : null, exportedAt: iso(now),
-    occurrences: shown.map(o => ({ id: o.id, level: o.level, kind: o.kind, task: o.taskId, recordedAt: iso(o.at), lastRecordedAt: iso(o.lastAt), condition: o.state === 'open' ? 'OPEN' : o.state === 'resolved' ? 'RESOLVED' : 'ENDED', notification: NOTIFICATION[o.status], channel: o.status === 'sent' ? o.channel : null, reminders: o.reminders, acknowledged: o.acked })),
+    occurrences: shown.map(o => ({ id: o.id, level: o.level, kind: o.kind, task: o.taskId, recordedAt: iso(o.at), lastRecordedAt: iso(o.lastAt), condition: o.state === 'open' ? 'OPEN' : o.state === 'resolved' ? 'RESOLVED' : 'ENDED', notification: NOTIFICATION[o.status], channel: o.status === 'sent' ? channelOf(o.channel) : null, reminders: o.reminders, acknowledged: o.acked })),
     count: shown.length, truncated: ordered.length > shown.length,
     note: 'Records of what Cockpit wrote and what the host reported; not evidence that anyone saw a notification.',
   }, null, 2)
 }
 
+const recordSig = (r: AlertRecord): string => `${r.key}|${r.at}|${r.outcome}|${r.nth ?? 0}`
+/**
+ * Whether an occurrence an earlier format holds is held, in full, by its own key: the stored value is of the current shape,
+ * every record in it is understood, it is that occurrence, and every earlier record (with its acknowledgment) is among its
+ * records. A key that merely exists, or holds less, does not count: deleting the earlier copy would then lose something.
+ */
+export const isMigratedEpisode = (earlier: readonly AlertRecord[], id: string, stored: unknown): boolean => {
+  if (stored === null || typeof stored !== 'object') return false
+  const v = stored as { v?: unknown; records?: unknown }
+  if (v.v !== 1 || !Array.isArray(v.records)) return false
+  const records = validAlerts(v.records)
+  if (records.length !== v.records.length || episodesOf(records)[0]?.id !== id) return false
+  const have = new Map(records.map(r => [recordSig(r), r]))
+
+  return earlier.every(r => { const s = have.get(recordSig(r)); return s !== undefined && (r.acked !== true || s.acked === true) })
+}
 /** One earlier-format key and what it holds per project: how many occurrences, and how many already have keys of their own. */
 export type LegacyEntry = { key: string; projects: { project: string; occurrences: number; migrated: number }[]; unreadable: boolean }
 export type LegacyPlan = { entries: LegacyEntry[]; deletable: string[]; kept: string[]; token: string }
@@ -552,7 +571,7 @@ const legacyProjectsOf = (value: unknown, single: boolean, keyProject: string | 
  * its own (`alert-occ:<project>:<id>`): deleting it then loses nothing. Anything unreadable, partly understood or not yet migrated
  * is kept. `token` names exactly this plan, so a deletion confirms the plan a person read and not a later one.
  */
-export const legacyPlanOf = (values: readonly { key: string; value: unknown }[], keys: readonly unknown[]): LegacyPlan => {
+export const legacyPlanOf = (values: readonly { key: string; value: unknown }[], keys: readonly unknown[], occ: ReadonlyMap<string, unknown> = new Map()): LegacyPlan => {
   const entries: LegacyEntry[] = []
   const deletable: string[] = []
   const kept: string[] = []
@@ -570,23 +589,27 @@ export const legacyPlanOf = (values: readonly { key: string; value: unknown }[],
       const have = new Set(occIdsOf(keys, project))
       const eps = episodesOf(records)
 
-      return { project, occurrences: eps.length, migrated: eps.filter(e => have.has(e.id)).length }
+      return { project, occurrences: eps.length, migrated: eps.filter(e => have.has(e.id) && isMigratedEpisode(e.records, e.id, occ.get(occKeyOf(project, e.id)))).length }
     })
     entries.push({ key, projects: rows, unreadable: projects === null || !whole })
     if (projects !== null && whole && rows.every(r => r.migrated === r.occurrences)) deletable.push(key)
     else kept.push(key)
   }
 
-  return { entries, deletable, kept, token: hashOf(JSON.stringify([entries, deletable])) }
+  // the code names the values read, not only the counts: a changed record in a counted occurrence changes it too
+  const read = values.map(v => [v.key, JSON.stringify(v.value)])
+  const held = [...occ.entries()].sort(([x], [y]) => (x < y ? -1 : 1)).map(([k, v]) => [k, JSON.stringify(v)])
+
+  return { entries, deletable, kept, token: hashOf(JSON.stringify([entries, deletable, read, held])) }
 }
 export const legacyPlanText = (plan: LegacyPlan): string => {
   if (plan.entries.length === 0) return 'LEGACY ALERT HISTORY · none in the store. Nothing to clean up.'
   const lines = ['LEGACY ALERT HISTORY · DRY RUN · nothing was changed']
   for (const e of plan.entries) {
     lines.push(`  ${e.key}${e.unreadable ? ' · not fully understood by this build: KEPT' : ''}`)
-    for (const r of e.projects) lines.push(`    project ${r.project} · ${r.occurrences} occurrence${r.occurrences === 1 ? '' : 's'} · ${r.migrated} with keys of their own${r.migrated < r.occurrences ? ` · ${r.occurrences - r.migrated} NOT migrated: KEPT` : ''}`)
+    for (const r of e.projects) lines.push(`    project ${r.project} · ${r.occurrences} occurrence${r.occurrences === 1 ? '' : 's'} · ${r.migrated} held in full by keys of their own${r.migrated < r.occurrences ? ` · ${r.occurrences - r.migrated} NOT (or not in full): KEPT` : ''}`)
   }
-  lines.push(plan.deletable.length === 0 ? 'Nothing can be deleted safely: every key above still holds something that exists nowhere else, or was not understood.' : `Safe to delete (every occurrence already has a key of its own): ${plan.deletable.join(', ')}`)
+  lines.push(plan.deletable.length === 0 ? 'Nothing can be deleted safely: every key above still holds something that exists nowhere else, or was not understood.' : `Safe to delete (every occurrence is already held in full by a key of its own): ${plan.deletable.join(', ')}`)
   if (plan.kept.length > 0) lines.push(`Kept: ${plan.kept.join(', ')}. A project's records are migrated when a session with alerts or record-only on starts in that project.`)
   if (plan.deletable.length > 0) lines.push(`To delete exactly what is listed as safe, type: /cockpit alerts legacy delete ${plan.token}  (the code changes if the store changes)`)
 

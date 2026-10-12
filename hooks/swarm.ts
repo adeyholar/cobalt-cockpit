@@ -69,10 +69,12 @@ export const limitsOf = (s: Swarm): { total: number; sonnet: number; haiku: numb
   opus: s.config.opus ?? 0,
 })
 /** How many tasks hold a slot now, in all and by tier: what admission counts, for display. */
-export const occupancyOf = (s: Swarm): { total: number; sonnet: number; haiku: number; opus: number } => {
+export const occupancyOf = (s: Swarm): { total: number; counted: number; sonnet: number; haiku: number; opus: number } => {
   const live = active(s)
+  const opus = s.config.opus ?? 0
 
-  return { total: live.length, sonnet: live.filter(t => t.tier === 'SONNET').length, haiku: live.filter(t => t.tier === 'HAIKU').length, opus: live.filter(t => t.tier === 'OPUS').length }
+  // `counted` is what admission holds against the total for a Sonnet or Haiku task: commander work in the main loop is not a slot
+  return { total: live.length, counted: live.filter(t => opus > 0 || t.tier !== 'OPUS').length, sonnet: live.filter(t => t.tier === 'SONNET').length, haiku: live.filter(t => t.tier === 'HAIKU').length, opus: live.filter(t => t.tier === 'OPUS').length }
 }
 export const admissionReason = (s: Swarm, id: string): string | null => {
   const task = s.tasks.find(t => t.id === id)
