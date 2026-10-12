@@ -76,7 +76,7 @@ The notes (from the operator's screenshot; the complete expanded report was not 
 - **Feature review (R5):** GO WITH FIXES, no blocker; one HIGH (an earlier-format key was counted as migrated when an occurrence key merely existed), two MEDIUM (effort Cockpit set was shown as applied; the capacity count differed from admission's when commander work was live), six LOW. All were corrected (commit "Review corrections …").
 - **Semantic review of the Directory refactor (R6):** NO SEMANTIC CHANGE FOUND across all twelve hunks; two informational notes (a module setting read after an await rather than before, unobservable; an unbraced `const` in a `case`, as elsewhere). An earlier attempt (R4) could not run: the plugin's own swarm policy refused its shell, and it reported "not reviewed" rather than a verdict.
 - **Re-review of the corrections (R7):** GO WITH FIXES, no path that deletes data held nowhere else; three MEDIUM hardening gaps (re-check the occurrence keys at the moment of deletion; compare whole records with multiplicity; the effort label claimed the launch level whatever was applied) and four LOW (a short home path, URLs, unknown channel names, the harness environment). All but the channel note were corrected; the export still reports a channel name outside the host's five as `other`, by design. The original reviewer's own re-review could not run (its task had closed and the swarm policy refused its reads); R7 is a fresh reviewer.
-- **Final re-review (R8)** of those corrections: GO WITH FIXES, no path that deletes data held nowhere else; three LOW. Two were corrected: the automatic removal now reads the earlier key again before, not after, reading the occurrence keys, so the last reads before the delete are of the copies it depends on; and a home directory's user name is never shown, however deep the path. The third (a relative path is no longer shortened) leaks nothing and was left. That last change was re-reviewed on its own (R9).
+- **Final re-review (R8)** of those corrections: GO WITH FIXES, no path that deletes data held nowhere else; three LOW. Two were corrected: the automatic removal now reads the earlier key again before, not after, reading the occurrence keys, so the last reads before the delete are of the copies it depends on; and a home directory's user name is never shown, however deep the path. The third (a relative path is no longer shortened) leaks nothing and was left. That last change was re-reviewed on its own (R10): GO, with two LOW notes recorded under Still NOT VERIFIED and limits.
 
 The reviewers ran with Read only (the swarm policy refuses shell use to read-only review tasks); they read prepared diffs and the code, and the tests, type check and analyzer runs are the coordinator's.
 
@@ -95,6 +95,13 @@ On the development machine (Bun runtime, mean of fifty calls): `agentsText` over
 3. `/cockpit alerts export` prints JSON; `/cockpit alerts legacy` prints a dry run; nothing changes until you type the delete with its code.
 4. Narrow the terminal to about 40 columns and repeat: lines shorten and keep the counts.
 5. Optionally run `scripts/acceptance-harness.sh` and read its checks.
+
+## Known limits
+
+- The automatic removal of a v0.5.8 key and the manual cleanup have no lock between their last read and the delete (the host offers none): a record written into the earlier key by a still-running older build in that instant could be lost. The window is a few store calls.
+- Path shortening hides the user name after `/home/` and `/Users/`, but not in `/var/home/<name>/…` (Fedora Silverblue and similar layouts) or a relative `../home/<name>` form, where the name can still appear in an objective, question or conclusion shown by `/cockpit agents <task>`.
+- A relative path such as `src/a/b/c` in free text is not shortened.
+- The cleanup's code covers every occurrence key's value, so an unrelated write between the dry run and the delete invalidates it (safe; run the dry run again).
 
 ## Still NOT VERIFIED
 
