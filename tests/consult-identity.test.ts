@@ -12,7 +12,7 @@ const LED = { options: { orchestration: true, profile: 'SONNET_LED' } }
 const SWARM = 'mcp__cobalt-cockpit__swarm'
 const GO = 'RATIONALE: nothing blocking.\nDECISION: GO\nFINDINGS: none above medium.'
 let seq = 0
-const spawn = ($: Engine, description: string, subagentType: string) => $.agent.spawn({ prompt: 'brief', description, subagentType, tool_use_id: `ci-${++seq}`, parentModel: SONNET, provider: { plugin: 'cobalt-cockpit', tier: 'user' }, background: true, fork: false } as never)
+const spawn = ($: Engine, description: string, subagentType: string, provider: unknown = { plugin: 'cobalt-cockpit', tier: 'user' }) => $.agent.spawn({ prompt: 'brief', description, subagentType, tool_use_id: `ci-${++seq}`, parentModel: SONNET, provider, background: true, fork: false } as never)
 const ledger = (h: ReturnType<typeof hostState>) => h.get('run-ledger')!.value as Ledger
 const task = (h: ReturnType<typeof hostState>) => h.get('task')!.value as Task
 const releasePacket = { action: 'consult', ground: 'release', objective: 'Release v0.5.3', architecture: 'Plugin hooks', locations: ['hooks/consult.ts'], risk: 'Broken admission', question: 'Approve the release?' }
@@ -42,6 +42,13 @@ describe('M3: an unrelated :architect agent through the host', () => {
     }
     expect(w.spawns).toHaveLength(0)
     expect(task(held).review?.state).not.toBe('adjudicated')
+    // the exact type from a definition the host does not attribute to this plugin (a user's or project's agent, another plugin) is refused too
+    for (const provider of [{ plugin: 'other-plugin', tier: 'user' }, { plugin: 'engine', tier: 'core' }, { plugin: 'cobalt-cockpit-fake', tier: 'user' }, {}, null, 'cobalt-cockpit']) {
+      const r = await spawn($, `[task:${id}] Opus consultation`, 'cobalt-cockpit:architect', provider)
+      expect([JSON.stringify(provider), r.deny ?? 'ALLOWED']).toEqual([JSON.stringify(provider), expect.stringContaining('provided by this plugin')])
+      expect(r.agentId).toBeUndefined()
+    }
+    expect(w.spawns).toHaveLength(0)
     // the real architect still can
     const ok = await spawn($, `[task:${id}] Opus consultation`, 'cobalt-cockpit:architect')
     expect(ok.deny).toBeUndefined()

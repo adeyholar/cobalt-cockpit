@@ -3342,6 +3342,9 @@ export const register: Register = (on, options) => {
     }
     if (!isSupported) return next(e)
     const role = roleOf(e.subagentType)
+    // The architect is Cobalt's own agent: the exact type AND a definition the host attributes to this plugin (`provider` is set by the host,
+    // not by a plugin). A plugin of the same name from another source is not distinguishable by it; the human publication gate stays.
+    if (role === 'ARCHITECT' && (typeof e.provider !== 'object' || e.provider === null || e.provider.plugin !== 'cobalt-cockpit')) return { deny: 'OPUS / the architect must be the agent provided by this plugin (cobalt-cockpit:architect); this definition is attributed elsewhere. Nothing was started.' }
     let assignedId = /\[task:([\w.-]+)\]/.exec(e.description)?.[1]
     let reservedId: string | undefined
     // what this spawn's Agent call was launched with, taken once
