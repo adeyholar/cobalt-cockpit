@@ -4,7 +4,7 @@
 // the host provides. Synthetic: nothing here shows that a person saw, heard or was spared anything.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { ACK_KEYS_MAX, ACK_PREFIX, ALERT_CAP, HISTORY_PROJECTS_MAX, ackKeyOf, ackedIdsOf, applyAcks, bounded, digestOf2, digestText, digestToast, episodesOf, excessAckKeys, excessHistoryKeys, historyKeyOf, markedIdsOf, mergeHistory, occurrencesOf, pendingIdsOf } from '../hooks/alerts'
+import { ACK_KEYS_MAX, ACK_PREFIX, ALERT_CAP, OCC_PER_PROJECT, OCC_PROJECTS_MAX, ackKeyOf, ackedIdsOf, applyAcks, bounded, digestOf2, digestText, digestToast, episodesOf, excessAckKeys, excessOccKeys, historyFrom, historyKeyOf, markedIdsOf, occIdsOf, occKeyOf, occurrencesOf, pendingIdsOf } from '../hooks/alerts'
 import type { AlertKind, AlertRecord, Open } from '../hooks/alerts'
 import { applyAction, newTask, settle } from '../hooks/model'
 import type { Ledger, Task } from '../types'
@@ -60,11 +60,23 @@ describe('acknowledgment keys', () => {
     expect(excess).toEqual(keys.filter(k => k.startsWith(ACK_PREFIX)).slice(0, 5))
     expect(excessAckKeys(keys.slice(0, 20))).toEqual([])
   })
-  test('at most four projects keep a history key; the oldest go, never the one being written', () => {
-    const names = ['1', '2', '3', '4', '5', '6'].map(c => historyKeyOf(c.repeat(12)))
-    expect(excessHistoryKeys(names, names[5]!)).toEqual([names[0], names[1]])
-    expect(excessHistoryKeys(names, names[0]!)).toEqual([names[1], names[2]])
-    expect(excessHistoryKeys([...names.slice(0, HISTORY_PROJECTS_MAX), 'alert-history', 'alert-history:../x'], names[0]!)).toEqual([])
+  test('occurrence keys: at most four projects, 32 occurrences each, the oldest as the store lists them go, a session\'s own last', () => {
+    const projects = ['1', '2', '3', '4', '5', '6'].map(c => c.repeat(12))
+    const keys: string[] = ['ledger:s1']
+    for (const p of projects) for (let i = 0; i < 3; i++) keys.push(occKeyOf(p, i.toString(16).padStart(8, '0')))
+    // the two oldest projects go whole
+    expect(excessOccKeys(keys)).toEqual(keys.filter(k => k.includes(':1111') || k.includes(':2222')))
+    const many = Array.from({ length: OCC_PER_PROJECT + 3 }, (_, i) => occKeyOf(P1, i.toString(16).padStart(8, '0')))
+    expect(excessOccKeys(many)).toEqual(many.slice(0, 3))
+    // the session's own are the last to be given up
+    expect(excessOccKeys(many, new Set(many.slice(0, 3)))).toEqual(many.slice(3, 6))
+    expect(excessOccKeys([...many.slice(0, 5), 'alert-occ:../x', 'alert-occ:' + P1, ackKeyOf(P1, '00000000'), 'alert-history:' + P1])).toEqual([])
+    expect(OCC_PROJECTS_MAX).toBe(4)
+  })
+  test('the ids of a project are read from the keys, in the order listed, and only for that project', () => {
+    const keys = [occKeyOf(P1, 'aaaaaaaa'), occKeyOf(P2, 'bbbbbbbb'), occKeyOf(P1, 'cccccccc'), 'alert-occ:' + P1 + ':zzzzzzzz', historyKeyOf(P1)]
+    expect(occIdsOf(keys, P1)).toEqual(['aaaaaaaa', 'cccccccc'])
+    expect(occIdsOf(keys, P2)).toEqual(['bbbbbbbb'])
   })
 })
 
@@ -100,87 +112,75 @@ describe('applying acknowledgments', () => {
   })
 })
 
-describe('the history merge: stale snapshots, interleaved sessions, conflicting acknowledgments', () => {
+describe('occurrence keys: stale snapshots, interleaved sessions, conflicting acknowledgments', () => {
   const mk = (n: number, base = 0): AlertRecord[] => written(...Array.from({ length: n }, (_, i) => rec(`t${base + i}:run-blocked:task`, { at: 1000 + base + i, taskId: base + i })))
-  test('a stale session writing over a newer history keeps the occurrences it never saw', () => {
-    const stale = mk(2, 0)
-    const newer = mk(3, 10)
-    const out = mergeHistory(stale, newer)
-    expect(out.map(r => r.key)).toEqual([...newer.map(r => r.key), ...stale.map(r => r.key)])
-    expect(out.length).toBeLessThanOrEqual(ALERT_CAP)
+  /** What a session does with its Ledger: one set per occurrence it changed. */
+  const write = (store: Map<string, unknown>, project: string, records: readonly AlertRecord[]): void => {
+    for (const e of episodesOf(records)) store.set(occKeyOf(project, e.id), { v: 1, records: e.records })
+  }
+  const read = (store: Map<string, unknown>, project: string): AlertRecord[] =>
+    historyFrom(occIdsOf([...store.keys()], project).map(id => ({ id, records: (store.get(occKeyOf(project, id)) as { records: AlertRecord[] }).records })), [])
+  test('two sessions recording different occurrences never lose each other\'s, whatever the order and however stale', () => {
+    const store = new Map<string, unknown>()
+    const a = mk(3, 0)
+    const b = mk(3, 10)
+    write(store, P1, a)
+    write(store, P1, b)
+    write(store, P1, a)
+    expect(new Set(episodesOf(read(store, P1)).map(e => e.key))).toEqual(new Set([...a, ...b].map(r => r.key)))
   })
-  test('an acknowledgment the store holds is never lost to a stale copy: the merge applies it to both sides', () => {
-    const stale = mk(2, 0)
-    const newer = mk(2, 10)
-    const ids = new Set([idsOf(stale)[0]!, idsOf(newer)[1]!])
-    const out = mergeHistory(stale, newer, ids)
-    expect(ackedOf(out)).toEqual([...ids].sort())
+  test('the earlier format\'s records are older than the keys\' and are given up for a key that holds the same occurrence', () => {
+    const legacy = mk(2, 0)
+    const stored = [{ id: idsOf(legacy)[0]!, records: written(rec('t0:run-blocked:task', { at: 1000, taskId: 0 }), rec('t0:run-blocked:task', { at: 5000, nth: 1, taskId: 0 })) }]
+    const out = historyFrom(stored, legacy)
+    expect(out.map(r => `${r.key}:${r.nth ?? 0}`)).toEqual(['t1:run-blocked:task:0', 't0:run-blocked:task:0', 't0:run-blocked:task:1'])
+    expect(historyFrom([], legacy)).toEqual(legacy)
+    expect(historyFrom([{ id: 'aaaaaaaa', records: mk(ALERT_CAP + 5, 0) }], []).length).toBe(ALERT_CAP)
   })
-  test('a stored occurrence of a condition this session also holds records of is not added: two runs of one key would become one and lose an id', () => {
-    const k = 'u1:run-blocked:task'
-    const stale = written(rec(k, { at: 1000 }))
-    const own = written(rec(k, { at: 1000 }), rec(k, { outcome: 'resolved', attempts: 0, channel: null, at: 2000 }), rec(k, { at: 3000 }))
-    const out = mergeHistory(own.slice(1), stale)
-    expect(idsOf(out)).toEqual(idsOf(own.slice(1)))
-    const idsNow = new Set([idsOf(own)[1]!])
-    expect(ackedOf(mergeHistory(own.slice(1), stale, idsNow))).toEqual([...idsNow])
-  })
-  test('an acknowledgment marked in either copy survives the merge (history written before v0.5.8 carried them there)', () => {
-    const stale = mk(2, 0)
-    const newer = applyAcks(mk(2, 10), new Set([idsOf(mk(2, 10))[0]!]))
-    const out = mergeHistory(stale, newer)
-    expect(ackedOf(out)).toEqual(ackedOf(newer))
-    const out2 = mergeHistory(applyAcks(stale, new Set([idsOf(stale)[1]!])), mk(2, 10))
-    expect(ackedOf(out2)).toEqual([idsOf(stale)[1]])
+  test('an acknowledgment key is never in the way of a record write, and applies to whichever copy a session assembles', () => {
+    const store = new Map<string, unknown>()
+    const a = mk(2, 0)
+    write(store, P1, a)
+    const [first, second] = idsOf(a)
+    store.set(ackKeyOf(P1, first!), { v: 1 })
+    // a stale session writes its older copy of the same occurrences
+    write(store, P1, a)
+    const acks = ackedIdsOf([...store.keys()], P1)
+    expect([...acks]).toEqual([first])
+    expect(ackedOf(applyAcks(read(store, P1), acks))).toEqual([first])
+    expect(ackedOf(applyAcks(read(store, P1), acks))).not.toContain(second)
   })
   test('conflicting acknowledgments of different occurrences by two sessions both hold, whatever the order they are applied in', () => {
     const base = mk(4, 0)
     const [w, x, y, z] = idsOf(base)
-    const sessionA = new Set([w!, x!])
-    const sessionB = new Set([x!, z!])
-    const ab = mergeHistory(base, base, new Set([...sessionA, ...sessionB]))
-    const ba = mergeHistory(base, base, new Set([...sessionB, ...sessionA]))
+    const keys = [ackKeyOf(P1, w!), ackKeyOf(P1, x!), ackKeyOf(P1, x!), ackKeyOf(P1, z!)]
+    const ab = applyAcks(base, ackedIdsOf(keys, P1))
+    const ba = applyAcks(base, ackedIdsOf([...keys].reverse(), P1))
     expect(ackedOf(ab)).toEqual([w, x, z].sort())
     expect(ackedOf(ba)).toEqual(ackedOf(ab))
     expect(ackedOf(ab)).not.toContain(y)
   })
-  test('the same acknowledgment made twice is the same acknowledgment; merging twice is merging once', () => {
-    const base = mk(3, 0)
-    const ids = new Set([idsOf(base)[0]!])
-    const once = mergeHistory(base, mk(2, 10), ids)
-    expect(mergeHistory(once, mk(2, 10), ids)).toEqual(once)
-    expect(mergeHistory(applyAcks(base, ids), mk(2, 10), ids)).toEqual(once)
-  })
-  test('the merge is bounded, and the records it gives up are the ones this session never saw', () => {
-    const own = mk(20, 0)
-    const stored = mk(ALERT_CAP, 100)
-    const out = mergeHistory(own, stored)
-    expect(out.length).toBe(ALERT_CAP)
-    expect(out.slice(-20).map(r => r.key)).toEqual(own.map(r => r.key))
-  })
-  test('over many interleavings no acknowledgment, once made, is ever shown as undone', () => {
-    // a hand-built schedule of two sessions with stale snapshots: each step is a write of a stale or fresh copy, an
-    // acknowledgment key appearing, or a new occurrence; an acknowledgment key is only ever added
+  test('over many interleavings no occurrence one session wrote is lost to the other, and no acknowledgment is ever shown as undone', () => {
+    // two sessions with stale copies write their own occurrences into one store; acknowledgment keys only ever appear
     for (let seed = 1; seed <= 40; seed++) {
       const rnd = lcg(seed)
-      let store: AlertRecord[] = mk(3, 0)
+      const store = new Map<string, unknown>()
+      let a: AlertRecord[] = []
+      let b: AlertRecord[] = []
+      const wrote = new Set<string>()
       const acks = new Set<string>()
-      let a: AlertRecord[] = store
-      let b: AlertRecord[] = store
-      let n = 3
-      for (let step = 0; step < 30; step++) {
+      let n = 0
+      for (let step = 0; step < 24; step++) {
         const r = rnd()
-        if (r < 0.25) { const ids = idsOf(store); if (ids.length > 0) acks.add(ids[Math.floor(rnd() * ids.length)]!) }
-        else if (r < 0.5) { a = bounded(a, rec(`t${n}:run-blocked:task`, { at: 2000 + n, taskId: n })); n++ }
-        else if (r < 0.7) { b = bounded(b, rec(`t${n}:security-failure:SECURITY`, { kind: 'security-failure', at: 2000 + n, taskId: n })); n++ }
-        else {
-          // a write of a stale or fresh copy, reading the acknowledgment keys as they stand
-          store = mergeHistory(r < 0.85 ? a : b, store, acks)
-          for (const id of acks) {
-            if (idsOf(store).includes(id)) expect(ackedOf(store)).toContain(id)
-          }
-        }
-        expect(store.length).toBeLessThanOrEqual(ALERT_CAP)
+        if (r < 0.3) { a = bounded(a, rec(`a${n}:run-blocked:task`, { at: 2000 + n, taskId: n })); n++ }
+        else if (r < 0.55) { b = bounded(b, rec(`b${n}:security-failure:SECURITY`, { kind: 'security-failure', at: 2000 + n, taskId: n })); n++ }
+        else if (r < 0.75) { write(store, P1, a); for (const e of episodesOf(a)) wrote.add(e.id) }
+        else if (r < 0.9) { write(store, P1, b); for (const e of episodesOf(b)) wrote.add(e.id) }
+        else { const ids = occIdsOf([...store.keys()], P1); if (ids.length > 0) { const id = ids[Math.floor(rnd() * ids.length)]!; acks.add(id); store.set(ackKeyOf(P1, id), { v: 1 }) } }
+        const seen = new Set(episodesOf(read(store, P1)).map(e => e.id))
+        for (const id of wrote) expect(seen.has(id)).toBe(true)
+        const marked = new Set(markedIdsOf(applyAcks(read(store, P1), ackedIdsOf([...store.keys()], P1))))
+        for (const id of acks) expect(marked.has(id)).toBe(true)
       }
     }
   })
@@ -295,8 +295,8 @@ describe('in a run: acknowledgments in the store', () => {
     expect(w.store.get(ackKeyOf(project, id))).toEqual({ v: 1 })
     expect(w.storeWrites.filter(s => s.key === ackKeyOf(project, id))).toEqual([])
     // and the history it wrote shows the occurrence acknowledged
-    const hist = w.storeWrites.filter(s => s.key === historyKeyOf(project)).at(-1)!.value as { alerts: AlertRecord[] }
-    expect(ackedOf(hist.alerts)).toContain(id)
+    const wrote = w.storeWrites.filter(s => s.key === occKeyOf(project, id)).at(-1)!.value as { records: AlertRecord[] }
+    expect(ackedOf(wrote.records)).toContain(id)
   })
   test('an acknowledgment key for another project, or one that is malformed, marks nothing', armed(), async ($, on) => {
     const w = world(on); const held = hostState(on, {}); session(on)

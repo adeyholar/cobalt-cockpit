@@ -3,7 +3,7 @@
 // These are synthetic: no test here shows that a person saw, heard or was spared anything.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { ALERT_CAP, EMPTY_GUARD, ID_RE, isAckedSince, INBOX_PAGE, ackOccurrence, bounded, decide, episodesOf, guardConfigOf, inboxOrder, inboxPages, inboxText, isAlertRecord, isSettledQuietly, occurrencesOf, pinLine, pinsOf, remind, unreadOf, validAlerts, withAck } from '../hooks/alerts'
+import { ALERT_CAP, EMPTY_GUARD, ID_RE, OCC_PER_PROJECT, isAckedSince, occKeyOf, INBOX_PAGE, ackOccurrence, bounded, decide, episodesOf, guardConfigOf, inboxOrder, inboxPages, inboxText, isAlertRecord, isSettledQuietly, occurrencesOf, pinLine, pinsOf, remind, unreadOf, validAlerts, withAck } from '../hooks/alerts'
 import type { AlertKind, AlertRecord, Open } from '../hooks/alerts'
 import { emptyLedger, migrateLedger } from '../hooks/ledger'
 import { applyAction, newTask, settle } from '../hooks/model'
@@ -466,9 +466,10 @@ describe('recovery: restart, reload and project switch', () => {
     await start($); await planAndComplete($, 1); await block($)
     const l = ledger(held)
     expect(l.alertsProject).toMatch(/^[0-9a-f]{12}$/)
-    const stored = lastStored(w, HIST(l.alertsProject!))
-    expect(stored.v).toBe(1)
-    expect(stored.alerts).toEqual(l.alerts)
+    const stored = episodesOf(l.alerts ?? []).map(e => lastStored(w, occKeyOf(l.alertsProject!, e.id)))
+    expect(stored.length).toBeGreaterThan(0)
+    expect(stored.every(x => x.v === 1)).toBe(true)
+    expect(stored.flatMap(x => x.records)).toEqual(l.alerts)
     // the key and the value carry a hash and ids, never the directory
     expect(JSON.stringify(w.storeWrites.filter(s => s.key.startsWith('alert-')))).not.toContain('/work/example')
   })
@@ -497,39 +498,37 @@ describe('recovery: restart, reload and project switch', () => {
     expect(await say($, 'alerts')).toContain('Nothing recorded.')
     expect(w.notified).toEqual([])
   })
-  test('a resumed older session does not replace a newer project history with its stale copy', q, async ($, on) => {
+  test('a resumed older session does not replace a newer occurrence with its stale copy, and the newer ones stay in the store', q, async ($, on) => {
     const project = await projectHash('/work/example')
     const newer = written(rec('8@8:run-blocked:task', { at: 9000 }), rec('9@9:security-failure:SECURITY', { kind: 'security-failure', at: 9500 }))
     const older = written(rec('7@7:run-blocked:task', { at: 100 }))
-    const w = world(on, {}, { [KEEP]: { v: 1, projects: { [project]: newer } }, 'ledger:s1': { ...emptyLedger('s1'), alertsProject: project, alerts: older } }); const held = hostState(on, {}); session(on, 's1')
+    const seed: Record<string, unknown> = { 'ledger:s1': { ...emptyLedger('s1'), alertsProject: project, alerts: older } }
+    for (const e of episodesOf(newer)) seed[occKeyOf(project, e.id)] = { v: 1, records: e.records }
+    const w = world(on, {}, seed); const held = hostState(on, {}); session(on, 's1')
     await start($); await planAndComplete($, 1); await block($)
-    // this session records something new; the newer session's occurrences are still in the project's history
-    const stored = lastStored(w, HIST(project))
-    expect(stored).toBeDefined()
-    const keys = stored.alerts.map((r: AlertRecord) => r.key)
-    expect(keys).toContain('8@8:run-blocked:task')
-    expect(keys).toContain('9@9:security-failure:SECURITY')
+    // this session records something new; the newer occurrences are untouched in the store
+    for (const e of episodesOf(newer)) expect(w.store.get(occKeyOf(project, e.id))).toEqual({ v: 1, records: e.records })
     expect(ledger(held).alerts!.map(r => r.key)).not.toContain('8@8:run-blocked:task')
-    expect(keys).toContain('7@7:run-blocked:task')
+    expect(w.storeWrites.filter(x => x.key.startsWith('alert-occ:')).map(x => x.key)).not.toContain(occKeyOf(project, episodesOf(newer)[0]!.id))
   })
-  test('a project\'s history is written back as it was found, plus what the session recorded', q, async ($, on) => {
+  test('the earlier format\'s records are taken up and written to keys of their own, plus what the session recorded', q, async ($, on) => {
     const earlier = written(rec('9@9:run-blocked:task', { at: 5000 }))
     const w = world(on, {}, { [KEEP]: { v: 1, projects: { [await projectHash('/work/example')]: earlier } } }); const held = hostState(on, {}); session(on, 's2')
     await start($); await planAndComplete($, 1); await block($)
     const l = ledger(held)
     expect(l.alerts!.slice(0, 1)).toEqual(earlier)
-    expect(lastStored(w, HIST(l.alertsProject!)).alerts).toEqual(l.alerts)
+    for (const e of episodesOf(l.alerts ?? [])) expect(lastStored(w, occKeyOf(l.alertsProject!, e.id)).records).toEqual(e.records)
+    expect(w.storeWrites.some(x => x.key === KEEP)).toBe(false)
   })
-  test('history of several projects is kept in keys of their own, bounded to four, the oldest forgotten first', q, async ($, on) => {
+  test('the occurrences of several projects are kept in keys of their own, bounded to four projects, the oldest forgotten first', q, async ($, on) => {
     const seed: Record<string, unknown> = {}
-    for (let i = 0; i < 6; i++) seed[HIST(`${i}`.repeat(12))] = { v: 1, alerts: written(rec(`p${i}:run-blocked:task`)) }
+    for (let i = 0; i < 6; i++) { const r = written(rec(`p${i}:run-blocked:task`)); seed[occKeyOf(`${i}`.repeat(12), episodesOf(r)[0]!.id)] = { v: 1, records: r } }
     const w = world(on, {}, seed); hostState(on, {}); session(on)
     await start($); await planAndComplete($, 1); await block($)
-    const keys = [...w.store.keys()]
-    const histories = keys.filter(k => k.startsWith('alert-history:'))
-    expect(histories.length).toBeLessThanOrEqual(4)
-    expect(histories).not.toContain(HIST('000000000000'))
-    expect(w.storeWrites.some(s => s.key === KEEP)).toBe(false)
+    const projects = new Set([...w.store.keys()].filter(k => k.startsWith('alert-occ:')).map(k => k.split(':')[1]))
+    expect(projects.size).toBeLessThanOrEqual(4)
+    expect(projects.has('000000000000')).toBe(false)
+    expect(w.storeWrites.some(x => x.key === KEEP)).toBe(false)
   })
   const DAMAGED: [string, unknown][] = [['text', 'text'], ['a number', 7], ['null', null], ['an array', []], ['another version', { v: 2, projects: {} }], ['projects not an object', { v: 1, projects: 'x' }], ['bad names and records', { v: 1, projects: { '../etc': [rec('k')], abcdefabcdef: [{ key: 7 }, null, { ...rec('k'), outcome: 'postponed' }] } }]]
   for (const [name, bad] of DAMAGED) {
@@ -580,9 +579,10 @@ describe('recovery: restart, reload and project switch', () => {
       await w.clock.advance(31_000)
     }
     expect((ledger(held).alerts ?? []).length).toBeLessThanOrEqual(ALERT_CAP)
-    const stored = lastStored(w, HIST(ledger(held).alertsProject!))
-    expect(stored.alerts.length).toBeLessThanOrEqual(ALERT_CAP)
-    expect(JSON.stringify(stored).length).toBeLessThan(40_000)
+    const project = ledger(held).alertsProject!
+    const mine = [...w.store.keys()].filter(k => k.startsWith(`alert-occ:${project}:`))
+    expect(mine.length).toBeLessThanOrEqual(OCC_PER_PROJECT)
+    expect(JSON.stringify(mine.map(k => w.store.get(k))).length).toBeLessThan(40_000)
     expect(ids(await say($, 'alerts')).length).toBeLessThanOrEqual(INBOX_PAGE)
   })
 })

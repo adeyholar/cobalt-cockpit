@@ -176,6 +176,12 @@
       "options": ["defer", "notify"],
       "default": "notify"
     },
+    "guardRecordOnly": {
+      "type": "boolean",
+      "title": "Record incidents without notifying",
+      "description": "Off by default. When on and guardAlerts is off, the conditions Cobalt Guard would alert about (a failed security check, a NO-GO, exhausted verification, an open review, a blocked run) are written down, with their level, for /cockpit alerts and /cockpit alerts digest, and nothing is ever sent: no notification, sound or bell. With guardAlerts also on, nothing changes: alerts are sent as they always are and incidents are recorded either way. A condition recorded this way is not announced if you turn guardAlerts on later. Records are the same closed-vocabulary entries alerts keep, in the same bounded project history.",
+      "default": false
+    },
     "guardDigest": {
       "type": "boolean",
       "title": "Return digest at session start",
