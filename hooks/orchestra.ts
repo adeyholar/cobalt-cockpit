@@ -65,11 +65,14 @@ export const limitOf = (value: unknown): number => {
  * The role a spawned agent plays, from its agent type alone: Cockpit's own
  * four, the built-ins that do the same job, and `AGENT` for everything else.
  */
+export const ARCHITECT_TYPE = 'cobalt-cockpit:architect'
+
 export const roleOf = (subagentType: string): AgentRole => {
+  // Opus runs only as Cobalt's own architect: another plugin's or a project's agent that merely ends in `:architect` is not it
+  if (subagentType === ARCHITECT_TYPE) return 'ARCHITECT'
   const name = subagentType.toLowerCase().replace(/^.*:/, '')
   if (/^(scout|inventory)$/.test(name)) return 'SCOUT'
   if (/^(utility|triage)$/.test(name)) return 'UTILITY'
-  if (/^architect$/.test(name)) return 'ARCHITECT'
   if (/review/.test(name)) return 'REVIEWER'
   if (/^(explore|explorer)$/.test(name)) return 'EXPLORER'
   if (/^(researcher|research|claude-code-guide)$/.test(name)) return 'RESEARCHER'
