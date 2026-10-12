@@ -32,9 +32,8 @@ for p in "$config" "$state" "$plugin" "$project" "$home"; do case "$p/" in "$roo
 git -C "$repo" archive --format=tar HEAD | tar -x -C "$plugin"
 settings='{"pluginConfigs":{"cobalt-cockpit@inline":{"options":{"guardRecordOnly":true,"telemetry":false}}}}'
 run() { # one genuine host process: an immediate /cockpit command in the project, isolated configuration, no model
-  # a home of its own, and no authentication variable from the operator's environment
-  (cd "$project" && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u ANTHROPIC_CUSTOM_HEADERS -u CLAUDE_CODE_OAUTH_TOKEN \
-    -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY -u CLAUDE_CODE_USE_MANTLE \
+  # an environment of its own: nothing from the operator's but PATH and the terminal type, so no credential variable of any provider
+  (cd "$project" && env -i PATH="$PATH" TERM="${TERM:-dumb}" LANG=C.UTF-8 \
     HOME=$home CLAUDE_CONFIG_DIR=$config XDG_STATE_HOME=$state DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     timeout 90 "$claude_bin" -p "$1" --plugin-dir "$plugin" --settings "$settings" < /dev/null)
 }

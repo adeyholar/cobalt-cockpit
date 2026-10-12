@@ -537,7 +537,9 @@ export const exportOf = (occ: readonly Occurrence[], project: string | null, now
   }, null, 2)
 }
 
-const recordSig = (r: AlertRecord): string => `${r.key}|${r.at}|${r.outcome}|${r.nth ?? 0}`
+// every field but the acknowledgment (counted apart), the cue (it may be set after a write) and the id (derived, and checked as the
+// occurrence's own): the content of the record, not its address
+const recordSig = (r: AlertRecord): string => JSON.stringify([r.key, r.kind, r.taskId, r.at, r.outcome, r.attempts, r.channel, r.why ?? null, r.nth ?? 0])
 /**
  * Whether an occurrence an earlier format holds is held, in full, by its own key: the stored value is of the current shape,
  * every record in it is understood, it is that occurrence, and every earlier record (with its acknowledgment) is among its
@@ -549,9 +551,13 @@ export const isMigratedEpisode = (earlier: readonly AlertRecord[], id: string, s
   if (v.v !== 1 || !Array.isArray(v.records)) return false
   const records = validAlerts(v.records)
   if (records.length !== v.records.length || episodesOf(records)[0]?.id !== id) return false
-  const have = new Map(records.map(r => [recordSig(r), r]))
+  // counted with multiplicity: two equal earlier records need two in the key, and an acknowledged one an acknowledged one
+  const have = new Map<string, { all: number; acked: number }>()
+  for (const r of records) { const c = have.get(recordSig(r)) ?? { all: 0, acked: 0 }; have.set(recordSig(r), { all: c.all + 1, acked: c.acked + (r.acked === true ? 1 : 0) }) }
+  const need = new Map<string, { all: number; acked: number }>()
+  for (const r of earlier) { const c = need.get(recordSig(r)) ?? { all: 0, acked: 0 }; need.set(recordSig(r), { all: c.all + 1, acked: c.acked + (r.acked === true ? 1 : 0) }) }
 
-  return earlier.every(r => { const s = have.get(recordSig(r)); return s !== undefined && (r.acked !== true || s.acked === true) })
+  return [...need].every(([sig, n]) => { const h = have.get(sig); return h !== undefined && h.all >= n.all && h.acked >= n.acked })
 }
 /** One earlier-format key and what it holds per project: how many occurrences, and how many already have keys of their own. */
 export type LegacyEntry = { key: string; projects: { project: string; occurrences: number; migrated: number }[]; unreadable: boolean }

@@ -18,7 +18,12 @@ const known = (v: unknown): v is string => typeof v === 'string' && v !== UNKNOW
 const clip = (text: string, n: number): string => (text.length <= n ? text : `${text.slice(0, Math.max(0, n - 1))}…`)
 const one = (text: string): string => text.replace(/\s+/g, ' ').trim()
 /** Free text written by the commander or an agent, with any path in it cut to its last two segments, as claims are. */
-export const shortenPaths = (text: string): string => text.replace(/(?:~|\.{1,2})?\/(?:[^\s/'"`]+\/)+[^\s/'"`]*/g, m => { const parts = m.split('/').filter(p => p !== '' && p !== '~' && p !== '.' && p !== '..'); return parts.length <= 2 ? m : `…/${parts.slice(-2).join('/')}` })
+export const shortenPaths = (text: string): string => text.replace(/(?<![\w:/])(?:~|\.{1,2})?\/(?:[^\s/'"`]+\/)+[^\s/'"`]*/g, m => {
+  const parts = m.split('/').filter(p => p !== '' && p !== '~' && p !== '.' && p !== '..')
+  // a home directory names a person even when it is short
+  if (/^\/(?:home|Users)\//.test(m) && parts.length <= 2) return '…/'
+  return parts.length <= 2 ? m : `…/${parts.slice(-2).join('/')}`
+})
 
 /** How long ago, in the coarsest honest unit; null when the clock is behind the moment. */
 export const ageOf = (ms: number): string | null => (ms < 0 ? null : ms < 60_000 ? 'just now' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)}m ago` : ms < 172_800_000 ? `${Math.floor(ms / 3_600_000)}h ago` : `${Math.floor(ms / 86_400_000)}d ago`)
@@ -114,7 +119,7 @@ const effortText = (t: SwarmTask, a: LedgerAgent | undefined): string => {
   const parts = [`requested ${t.requestedEffort}`]
   parts.push(t.launchEffort === undefined || t.launchEffort === null ? 'launch: none set on the call' : `launch ${t.launchEffort}`)
   // a level Cockpit itself set on requests is not one the engine confirmed: it is named for what it is
-  parts.push(t.appliedEffort === null ? 'applied: not observed' : t.launchEffort !== undefined && t.launchEffort !== null ? `applied ${t.appliedEffort} (the launch level)` : `set on requests by Cockpit ${t.appliedEffort} (not reported back by the engine)`)
+  parts.push(t.appliedEffort === null ? 'applied: not observed' : t.launchEffort !== undefined && t.launchEffort !== null ? (t.appliedEffort === t.launchEffort ? `applied ${t.appliedEffort} (the launch level)` : `applied ${t.appliedEffort}`) : `set on requests by Cockpit ${t.appliedEffort} (not reported back by the engine)`)
   if (a !== undefined) parts.push(known(a.effectiveEffort) ? `engine reported ${a.effectiveEffort}` : a.effortSource === 'engine' && known(a.effort) ? `engine reported ${a.effort}` : 'engine: no report')
 
   return parts.join(' · ')

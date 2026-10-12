@@ -111,6 +111,24 @@ describe('the cleanup plan for the earlier formats', () => {
     const ackedLegacy = [{ key: `alert-history:${P1}`, value: { v: 1, alerts: legacy.map((r, n) => (n === 0 ? { ...r, acked: true as const } : r)) } }]
     expect(legacyPlanOf(ackedLegacy, keys, full).deletable).toEqual([])
   })
+  test('a record that differs in any field, or one too few of two equal records, is not held in full', () => {
+    const values = [{ key: `alert-history:${P1}`, value: { v: 1, alerts: legacy } }]
+    const keys = [occKeyOf(P1, i1!), occKeyOf(P1, i2!)]
+    const k1 = occKeyOf(P1, i1!)
+    const base = (held(P1, i1!, i2!).get(k1) as { records: AlertRecord[] }).records
+    for (const change of [{ kind: 'security-failure' as const }, { taskId: 99 }, { attempts: 7 }, { channel: 'ghostty' }, { outcome: 'failed' as const }]) {
+      const occ = held(P1, i1!, i2!)
+      occ.set(k1, { v: 1, records: base.map(r => ({ ...r, ...change })) })
+      expect(legacyPlanOf(values, keys, occ).deletable).toEqual([])
+    }
+    // two equal earlier records need two in the key
+    const twice = written(rec('t1:run-blocked:task', { outcome: 'throttled', channel: null, attempts: 0, why: 'cooldown' }))
+    const dup = [...twice, { ...twice[0]! }]
+    const id = idsOf(dup)[0]!
+    const v2 = [{ key: `alert-history:${P1}`, value: { v: 1, alerts: dup } }]
+    expect(legacyPlanOf(v2, [occKeyOf(P1, id)], new Map([[occKeyOf(P1, id), { v: 1, records: twice }]])).deletable).toEqual([])
+    expect(legacyPlanOf(v2, [occKeyOf(P1, id)], new Map([[occKeyOf(P1, id), { v: 1, records: dup }]])).deletable).toEqual([`alert-history:${P1}`])
+  })
   test('a value not understood in full is never deletable', () => {
     for (const value of ['x', 7, null, { v: 2 }, { v: 1, projects: 'x' }, { v: 1, projects: { [P1]: [...legacy, { key: 7 }] } }, { v: 1, projects: { '../etc': [] } }]) {
       const plan = legacyPlanOf([{ key: 'alert-history', value }], [occKeyOf(P1, i1!), occKeyOf(P1, i2!)], held(P1, i1!, i2!))
@@ -170,6 +188,7 @@ describe('in a run', () => {
     expect(w.store.has('alert-history')).toBe(true)
     const fresh = /legacy delete ([0-9a-f]{8})/.exec(await say($, 'alerts legacy'))![1]!
     const done = await say($, `alerts legacy delete ${fresh}`)
+    expect(done).not.toContain('Could not delete')
     expect(done).toContain('deleted alert-history')
     expect(w.store.has('alert-history')).toBe(false)
     expect(w.store.has(occKeyOf(P1, id))).toBe(true)
@@ -180,5 +199,20 @@ describe('in a run', () => {
     expect(await say($, 'alerts legacy remove x')).toContain('Usage')
     expect(await say($, 'alerts export now')).toContain('Usage')
     expect(w.storeWrites.filter(s => s.key.startsWith('alert-'))).toEqual([])
+  })
+})
+
+describe('the automatic removal at session start', () => {
+  test('a damaged occurrence key is not taken for a migration: it is rewritten from the earlier key and checked before that key goes', { options: { guardRecordOnly: true } }, async ($, on) => {
+    const projectHash = async (cwd: string): Promise<string> => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`cobalt-cockpit/alerts/v1\0${cwd}`)))].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 12)
+    const project = await projectHash('/work/example')
+    const earlier = written(rec('t1:run-blocked:task'))
+    const id = idsOf(earlier)[0]!
+    // the occurrence key exists but holds another shape: the session writes its own copy, then checks that copy, then gives the old key up
+    const w = world(on, {}, { [`alert-history:${project}`]: { v: 1, alerts: earlier }, [occKeyOf(project, id)]: { v: 9, junk: true } }); hostState(on, {}); session(on, 's2')
+    await start($)
+    // the damaged value is not taken up; the session writes the occurrence from the earlier key, reads it back in full, and only then lets the old key go
+    expect(w.store.get(occKeyOf(project, id))).toEqual({ v: 1, records: earlier })
+    expect(w.store.has(`alert-history:${project}`)).toBe(false)
   })
 })

@@ -182,7 +182,9 @@ describe('the agents view shows what was observed and says what was not', () => 
     const bound = { ...s, tasks: s.tasks.map(t => (t.id === 'A' ? { ...t, launchEffort: 'high', appliedEffort: 'medium' } : t)) }
     const text = taskText(view(bound, [agent(a.agentId!, { model: 'claude-sonnet-5-5', requestedModel: 'sonnet', effort: 'high', effortSource: 'engine', effectiveEffort: 'high' })]), 'A')
     expect(text).toContain('model: claude-sonnet-5-5 (asked for sonnet) · tier SONNET')
-    expect(text).toContain('effort: requested high · launch high · applied medium (the launch level) · engine reported high')
+    expect(text).toContain('effort: requested high · launch high · applied medium · engine reported high')
+    const same = { ...s, tasks: s.tasks.map(t => (t.id === 'A' ? { ...t, launchEffort: 'high', appliedEffort: 'high' } : t)) }
+    expect(taskText(view(same, [], 200), 'A')).toContain('applied high (the launch level)')
     const rewritten = { ...s, tasks: s.tasks.map(t => (t.id === 'A' ? { ...t, launchEffort: null, appliedEffort: 'high' } : t)) }
     expect(taskText(view(rewritten, [], 200), 'A')).toContain('set on requests by Cockpit high (not reported back by the engine)')
     const none = taskText(view(bound, [agent(a.agentId!)]), 'A')
@@ -223,6 +225,10 @@ describe('the agents view shows what was observed and says what was not', () => 
     const text = taskText(view(s), 'P')
     expect(text).toContain('fix …/hooks/alerts.ts and …/y/z.ts now')
     expect(text).not.toContain('secret-client')
+    const short = add(emptySwarm(), input('Q', { objective: 'look in /home/alice and https://example.org/a/b/c' }))
+    const t2 = taskText(view(short, [], 200), 'Q')
+    expect(t2).not.toContain('alice')
+    expect(t2).toContain('https://example.org/a/b/c')
   })
   test('an unknown task says so and lists what is known; a task is found whatever the case', () => {
     expect(taskText(view(swarm), 'zzz')).toBe('No task "zzz" in this session. Known: A, B, C.')

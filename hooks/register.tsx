@@ -2743,7 +2743,9 @@ const seedAlerts = async ($: EngineInterface): Promise<void> => {
         const value = await $.store.get(occKeyOf(project, e.id)).catch(() => undefined)
         if (!isMigratedEpisode(e.records, e.id, value)) { held = false; break }
       }
-      if (held) await $.store.delete(historyKeyOf(project))
+      // and the key is still what was checked
+      const again = await $.store.get(historyKeyOf(project)).catch(() => undefined)
+      if (held && JSON.stringify(again) === JSON.stringify(old)) await $.store.delete(historyKeyOf(project))
     })
   }
   await syncAcks($, false)
@@ -4695,10 +4697,18 @@ export const register: Register = (on, options) => {
           if (plan.deletable.length === 0) return { text: 'Cockpit: nothing can be deleted safely. Nothing was changed.' }
           const removed: string[] = []
           for (const key of plan.deletable) {
-            // read again just before the delete: a key that changed since the plan was computed is left alone
+            // read again just before the delete: the key itself, and every occurrence key it depends on, must be as the plan saw them
             const now = await $.store.get(key).catch(() => undefined)
             const was = values.find(v => v.key === key)?.value
             if (JSON.stringify(now) !== JSON.stringify(was)) continue
+            const occNow = new Map<string, unknown>()
+            for (const k of [...occ.keys()]) {
+              const value = await $.store.get(k).catch(() => undefined)
+              occNow.set(k, value)
+            }
+            const keysNow = await $.store.keys().catch(() => [] as string[])
+            const again = legacyPlanOf(values.filter(v => v.key === key), keysNow, occNow)
+            if (!again.deletable.includes(key)) continue
             try {
               await $.store.delete(key)
               removed.push(key)
