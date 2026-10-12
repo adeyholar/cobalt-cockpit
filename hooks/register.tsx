@@ -10,6 +10,8 @@
 
 import { emptySwarm, configureSwarm, submitTask, admitTask, bindAgent, finishTask, resolveEscalation, setWave, escalateTask, verifyTask, reportResult, acknowledgeHandback, requestCancel, releaseReservation, summarizeSwarm, markStalled, heartbeat, normalizeOwned, overlaps, ownershipAllows, setAppliedEffort, setLaunchEffort, SONNET_LED_SWARM } from './swarm'
 import type { Swarm, SwarmTask, ModelTier, Wave, Verification } from './swarm'
+import { agentsText, taskText } from './inspector'
+import { readyText } from './readiness'
 import { textOf } from './ledger'
 import { atom, read, update } from 'claude-code'
 import { desiredRequest, policyMismatch, AGENT_MODEL, HAIKU_MODEL, MAIN_MODEL, OPUS_MODEL, isProfile, DEFAULT_PROFILE } from './model-policy'
@@ -880,6 +882,8 @@ const HELP =
   '/cockpit discovery  show the discovery level, unknowns, decisions and goal check; pin light | standard | deep, or auto\n' +
   '/cockpit router     show this session\'s router, or switch it: off, nobodywho, jev (this session only)\n' +
   '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
+  '/cockpit agents    the agent inspector: tasks, agents, waves, ownership, requested versus applied effort, and why a task is waiting (read-only); agents <task> explains one\n' +
+  '/cockpit ready     which recorded conditions stand between the task and DONE: gates, review, goal check, guard, escalations (read-only; approves nothing)\n' +
   '/cockpit flow      the Neural Flow in words: which of input, discovery, routing, workers, verify and done are verified\n' +
   '/cockpit guard     Cobalt Guard owner alerts: status, priorities, quiet hours and active conditions; ack, silence or unsilence; test and seen check that a notification reaches you (none changes a verdict)\n' +
   '/cockpit alerts   the alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; alerts digest summarises the unacknowledged and what is new since your last look; alerts ack <id> acknowledges one (changes no verdict)\n' +
@@ -3653,7 +3657,7 @@ export const register: Register = (on, options) => {
       $.command.register({
         name: 'cockpit',
         description: 'Mission Control: task progress, milestones, verification gates, git and context',
-        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|flow|guard|alerts|doctor|sound]',
+        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|flow|guard|alerts|agents|ready|doctor|sound]',
         immediate: true,
       }),
     )
@@ -4508,6 +4512,25 @@ export const register: Register = (on, options) => {
         if (format === 'csv') return { text: statsCsv(stats) }
 
         return { text: [statsText(stats), note, healthLine()].filter(Boolean).join('\n') }
+      }
+      case 'agents': {
+        // read-only: the swarm and the Ledger as recorded, explained; nothing is changed, admitted or cancelled from here
+        const words = e.args.trim().split(/\s+/)
+        const columns = (e as { presentation?: { columns?: number } }).presentation?.columns ?? 100
+        const held = await read($, ledgerAtom)
+        const at = await $.clock.now()
+        const view = { swarm: swarmState(held), agents: held.agents, now: at, columns }
+        if (words.length > 2) return { text: 'Usage: /cockpit agents | /cockpit agents <task>' }
+
+        return { text: words[1] === undefined ? agentsText(view) : taskText(view, words[1]) }
+      }
+      case 'ready': {
+        // read-only: which recorded conditions stand between the task and DONE; it approves and clears nothing
+        const columns = (e as { presentation?: { columns?: number } }).presentation?.columns ?? 100
+        const task = await read($, taskAtom)
+        const held = await read($, ledgerAtom)
+
+        return { text: readyText(task, swarmState(held), columns) }
       }
       case 'flow': {
         const task = await read($, taskAtom)
