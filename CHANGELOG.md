@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased (0.5.4) — Persistent alerts
+
+Opt-in extension of Cobalt Guard's owner alerts (`hooks/alerts.ts`). With every new option off, 0.5.3 behaviour is unchanged. Details: [docs/implementation-v0.5.4.md](docs/implementation-v0.5.4.md).
+
+- `guardRepeat` (default off, needs `guardAlerts`): an alert whose condition is still open is repeated every `guardRepeatSec` (default 900, minimum 60), at most `guardMaxReminders` times for each condition (default 3, maximum 10), inside the existing cooldown and session budget. The budget's last alert is never spent on a reminder, and a reminder that failed to send counts.
+- Lifecycle: `/cockpit guard ack` ends the reminders of what is open; `/cockpit guard silence` stops everything for the session and the new `/cockpit guard unsilence` resumes for new conditions (all three typed by a person only); a condition that no longer holds is recorded `resolved` without a notification, and is told as a new alert if it returns.
+- `guardSound` (default off): the existing checkpoint cue, with the terminal bell as the player chain's last resort, is tried with each alert and reminder; it honours `sounds` and `/cockpit mute`. Recorded as attempted, never as heard.
+- One host timer (`$.clock.every`, 30 s) exists only while something can still be repeated; it is cancelled on acknowledgment, silence, resolution, exhaustion and session end and re-armed from the kept records after a reload. No new process, no network, no desktop notifier.
+- `/cockpit guard` and `/cockpit doctor` show persistence, sound, each open condition and its reminders. An acknowledgment now survives a restart.
+- The four new options are protected like the other guard settings: only the person changes them in the config menu.
+- Alerts and reminders still change no gate, hold, review, release approval or percentage, and their text is a closed sentence with numbers only.
+- Not verified here: that a terminal notification or sound raised on a remote machine reaches the operator's desktop. That is interactive acceptance.
+
 ## Unreleased (0.5.3) — Authorization and identity hardening
 
 Remediation of the reproduced findings of the independent review of 0.5.2. Details and compatibility notes: [docs/implementation-v0.5.3.md](docs/implementation-v0.5.3.md).

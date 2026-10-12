@@ -1,6 +1,6 @@
 # Privacy
 
-This policy describes what Cobalt Cockpit v0.5.3 observes, what it keeps, where it keeps it, how long it stays, how to remove it, and what can reach a model. It is written from the plugin's source. Where the plugin gives no guarantee, this page says so rather than implying one. Last updated 2026-10-12.
+This policy describes what Cobalt Cockpit v0.5.4 observes, what it keeps, where it keeps it, how long it stays, how to remove it, and what can reach a model. It is written from the plugin's source. Where the plugin gives no guarantee, this page says so rather than implying one. Last updated 2026-10-12.
 
 [SECURITY.md](SECURITY.md) covers the guards, process access and vulnerability reporting. This page covers data.
 
@@ -71,7 +71,7 @@ A Run Ledger contains:
 - Opus consultations (`SONNET_LED`): the ground, and the evidence packet the main session wrote for it (objective, architecture, file locations, alternatives, failures, risk and question), with credential-shaped spans replaced by `[redacted]` before it is kept or briefed. `/ledger export json` passes it through the credential patterns again.
 - Session router decisions, as described under [The session router](#the-session-router).
 - Warnings Cockpit raised.
-- Stop-guard check records (v0.5.2, the same records as `stop-checks`, kept with their session) and, with `guardAlerts` on, alert outcomes: kind, task number, time, sent or failed, the channel name the host reported; newest 32.
+- Stop-guard check records (v0.5.2, the same records as `stop-checks`, kept with their session) and, with `guardAlerts` on, alert outcomes: kind, task number, time, sent, failed or resolved, the channel name the host reported, a reminder's ordinal and whether a sound or bell was attempted; newest 32.
 - A checkpoint, rewritten when a turn completes, when you run `/park` or `/ledger`, and when a session ends: the phase, completed and remaining milestone titles, gate states, the task's explicit goal if a plan named one (a prompt excerpt is not used as the goal), any blocker text, the branch, commit ids, repository folder name, changed-file count and the ids of running background agents.
 
 **Treat the store as private.** It can contain file paths, branch names, milestone and task wording, and fragments of source code in replay snapshots.
@@ -145,6 +145,8 @@ It never stores a prompt, code, diff, file path, command, session id, agent name
 ## Owner alerts (0.5.2)
 
 With `guardAlerts` on (off by default) Cockpit asks Claude Code to raise a terminal notification whose text is one fixed sentence and a task number. It contains no prompt, path or code. Alert outcomes (kind, task number, time, sent/failed, channel name) are kept in the Run Ledger. SENT means the host reported that it wrote the notification to the channel it names (for example `terminal_bell`); Cockpit cannot tell whether you saw it. Nothing leaves your machine; the terminal decides what to show.
+
+With `guardRepeat` also on (off by default) the same kind of notification is repeated for a condition that is still open, as one fixed sentence, the task number and the reminder's ordinal and cap. With `guardSound` on (off by default) the bundled checkpoint cue is played through the same local players as the other cues, the terminal bell last. No new data is collected for either: the record adds only the reminder's ordinal, `resolved`, and `sound` or `bell` when a player exited 0.
 
 ## What can reach a model
 
