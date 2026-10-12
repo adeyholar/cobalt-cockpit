@@ -25,7 +25,7 @@ The Run Ledger's `alerts` array (newest 32) stays the only event history. An **o
 
 ## Acknowledging one occurrence
 
-`/cockpit alerts ack <id>` (person-only, the same allow-list as `/cockpit guard ack`: the terminal's Enter and the Remote Control bridge). It marks every record of that occurrence `acked` and nothing else. Because reminders and the pin already read `acked`, reminders for it end at once (`remind` answers `acknowledged`), the pin goes, and the timer re-arms from the records. A held-back occurrence (deferred, or throttled by the cooldown or budget) that was acknowledged before anything was written is not announced afterwards (`isSettledQuietly` now covers throttled as well as deferred; a failed send is still retried). It touches no gate, hold, review, approval, percentage or other occurrence.
+`/cockpit alerts ack <id>` (person-only, the same allow-list as `/cockpit guard ack`: the terminal's Enter and the Remote Control bridge). It marks every record of that occurrence `acked` and nothing else. Because reminders and the pin already read `acked`, reminders for it end at once (`remind` answers `acknowledged`), the pin goes, and the timer re-arms from the records. A deferred occurrence acknowledged before anything was written is not announced afterwards (as in v0.5.6). One held back by the cooldown or budget is still told when they allow it, and a failed send is still retried (each retry is a new, unacknowledged record): acknowledging must not silence a condition, `/cockpit guard ack` included, that nobody was told of. It touches no gate, hold, review, approval, percentage or other occurrence.
 
 - Malformed (not 8 lowercase hex after the command lowercases it), unknown, and expired ids change nothing and say so. An expired id is indistinguishable from a mistyped one, and the message says both.
 - An occurrence already acknowledged says so and changes nothing. One whose condition no longer holds can be acknowledged; the answer says that this only marks the record.
@@ -64,7 +64,10 @@ See `PRIVACY.md` (Owner alerts). New data: the 8-hex occurrence id on each alert
 ## Known limits
 
 - **A cleared condition that recurs before any look.** A look happens at tool results, stops and the timer. A condition that clears and holds again between two looks is one occurrence, with or without persistence.
-- **A concurrent session in one project** overwrites the project's history with its own records (last write wins); each session's Ledger is intact.
+- **A concurrent session in one project** overwrites the project's history with its own records when it records something (last write wins); each session's Ledger is intact. When a session writes, occurrences it never saw that the history holds are kept beside its own (oldest forgotten first), so a resumed older session does not erase a newer one's.
+- **Eviction and the 30-second gap.** When the records are full, the oldest held-back record goes first, which can be an open condition's only record; the next look writes it again (as in v0.5.6).
+- **Seeded but stale.** A seeded record of a task that is gone reads `ended` (and the label `SENT`) until the first look records it resolved.
+- **The HUD count** is shown when nothing is pinned; while a condition is pinned, only `+N more` is.
 - **An expired id** cannot be told from a mistyped one.
 - **Times** are this machine's clock as recorded, shown in UTC. A clock changed by a person or by NTP can put recorded times out of order; the list keeps the order records were written.
 - **"Open now"** is evaluated for the current task only; an occurrence of another task in the same project reads as no longer open.

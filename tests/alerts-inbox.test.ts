@@ -3,7 +3,7 @@
 // These are synthetic: no test here shows that a person saw, heard or was spared anything.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { ALERT_CAP, EMPTY_GUARD, ID_RE, INBOX_PAGE, ackOccurrence, bounded, decide, episodesOf, guardConfigOf, inboxOrder, inboxPages, inboxText, isAlertRecord, isSettledQuietly, occurrencesOf, pinLine, pinsOf, remind, unreadOf, validAlerts, withAck } from '../hooks/alerts'
+import { ALERT_CAP, EMPTY_GUARD, ID_RE, isAckedSince, INBOX_PAGE, ackOccurrence, bounded, decide, episodesOf, guardConfigOf, inboxOrder, inboxPages, inboxText, isAlertRecord, isSettledQuietly, occurrencesOf, pinLine, pinsOf, remind, unreadOf, validAlerts, withAck } from '../hooks/alerts'
 import type { AlertKind, AlertRecord, Open } from '../hooks/alerts'
 import { emptyLedger, migrateLedger } from '../hooks/ledger'
 import { applyAction, newTask, settle } from '../hooks/model'
@@ -94,6 +94,7 @@ describe('occurrence identity', () => {
     expect(isAlertRecord(good)).toBe(true)
     for (const bad of ['0123ABCD', '0123abc', '0123abcde', 'zzzzzzzz', '', 7, null, '../../etc']) expect(isAlertRecord({ ...good, id: bad })).toBe(false)
     expect(validAlerts([good, { ...good, id: 'nope' }])).toEqual([good])
+    for (const at of [Number.NaN, Infinity]) expect(isAlertRecord({ ...good, at })).toBe(false)
   })
 })
 
@@ -209,12 +210,13 @@ describe('acknowledging one occurrence', () => {
     const r = ackOccurrence(k2, open([a, 'run-blocked']), old!.id)
     expect(occurrencesOf(r.alerts, open([a, 'run-blocked'])).map(o => [o.id === now!.id, o.acked])).toEqual([[false, true], [true, false]])
   })
-  test('a deferred or held-back occurrence the person acknowledged is not announced afterwards', () => {
+  test('a deferred occurrence the person acknowledged is not announced afterwards; a throttled one still is', () => {
     const d = written(rec(a, { outcome: 'deferred', channel: null, attempts: 0, why: 'quiet' }))
     expect(isSettledQuietly(d, a)).toBe(false)
     expect(isSettledQuietly(ackOccurrence(d, holds, idA).alerts, a)).toBe(true)
     const t = written(rec(a, { outcome: 'throttled', channel: null, attempts: 0, why: 'budget' }))
-    expect(isSettledQuietly(ackOccurrence(t, holds, episodesOf(t)[0]!.id).alerts, a)).toBe(true)
+    // one held back by the cooldown or budget is still told: acknowledging it must not silence a condition nobody was told of
+    expect(isSettledQuietly(ackOccurrence(t, holds, episodesOf(t)[0]!.id).alerts, a)).toBe(false)
     // a notification that was written ends the matter another way, and a failed one is still retried
     const s = written(rec(a))
     expect(isSettledQuietly(ackOccurrence(s, holds, episodesOf(s)[0]!.id).alerts, a)).toBe(false)
@@ -227,6 +229,10 @@ describe('acknowledging one occurrence', () => {
     const state = withAck(withAck(EMPTY_GUARD, null), a)
     expect(state.seq).toBe(2)
     expect(state.ackSeq).toBe(1)
+    // a pass that began at count 0 is covered; one that began after both is not; a clock reading never enters
+    expect(isAckedSince(state, a, 0)).toBe(true)
+    expect(isAckedSince(state, a, 2)).toBe(false)
+    expect(isAckedSince(state, K('u1', 'security-failure', 'SECURITY'), 1)).toBe(false)
   })
 })
 
@@ -484,6 +490,20 @@ describe('recovery: restart, reload and project switch', () => {
     await start($)
     expect(await say($, 'alerts')).toContain('Nothing recorded.')
     expect(w.notified).toEqual([])
+  })
+  test('a resumed older session does not replace a newer project history with its stale copy', q, async ($, on) => {
+    const project = await projectHash('/work/example')
+    const newer = written(rec('8@8:run-blocked:task', { at: 9000 }), rec('9@9:security-failure:SECURITY', { kind: 'security-failure', at: 9500 }))
+    const older = written(rec('7@7:run-blocked:task', { at: 100 }))
+    const w = world(on, {}, { [KEEP]: { v: 1, projects: { [project]: newer } }, 'ledger:s1': { ...emptyLedger('s1'), alertsProject: project, alerts: older } }); const held = hostState(on, {}); session(on, 's1')
+    await start($); await planAndComplete($, 1)
+    await w.clock.advance(31_000)
+    // whatever this session writes, the newer session's occurrences are still in the project's history
+    const stored = lastStored(w, KEEP)
+    const keys = (stored?.projects[project] ?? newer).map((r: AlertRecord) => r.key)
+    expect(keys).toContain('8@8:run-blocked:task')
+    expect(keys).toContain('9@9:security-failure:SECURITY')
+    expect(ledger(held).alerts!.every(r => r.key === '7@7:run-blocked:task')).toBe(true)
   })
   test('a project\'s history is written back as it was found, plus what the session recorded', q, async ($, on) => {
     const earlier = written(rec('9@9:run-blocked:task', { at: 5000 }))

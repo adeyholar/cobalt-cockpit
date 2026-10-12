@@ -61,7 +61,7 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { EMPTY_GUARD, ackOccurrence, episodesOf,  inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import { ALERT_CAP, EMPTY_GUARD, ackOccurrence, episodesOf,  inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
@@ -2591,13 +2591,21 @@ const durableAlerts = async ($: EngineInterface): Promise<Record<string, AlertRe
   return out
 }
 const alertProject = async ($: EngineInterface): Promise<string> => (await sha256Text(`cobalt-cockpit/alerts/v1\0${(await $.session.cwd().catch(() => '')) || ''}`)).slice(0, 12)
+let writtenSig = ''
 const keepAlertHistory = async ($: EngineInterface, ledger: Ledger): Promise<void> => {
   const records = validAlerts(ledger.alerts)
-  if (ledger.alertsProject === undefined || records.length === 0) return
+  if (ledger.alertsProject === undefined || !/^[0-9a-f]{12}$/.test(ledger.alertsProject) || records.length === 0) return
+  // only a change this session made is written: a resumed older session must not replace a newer history with its stale copy
+  const sig = `${ledger.alertsProject}${JSON.stringify(records)}`
+  if (sig === writtenSig) return
+  writtenSig = sig
   const all = await durableAlerts($)
-  if (JSON.stringify(all[ledger.alertsProject]) === JSON.stringify(records)) return
+  // occurrences another session of this project recorded and this one never saw are kept beside its own, oldest forgotten first
+  const mine = new Set(episodesOf(records).map(e => e.id))
+  const merged = [...episodesOf(all[ledger.alertsProject] ?? []).filter(e => !mine.has(e.id)).flatMap(e => e.records), ...records].slice(-ALERT_CAP)
+  if (JSON.stringify(all[ledger.alertsProject]) === JSON.stringify(merged)) return
   const { [ledger.alertsProject]: _old, ...others } = all
-  await $.store.set(ALERT_HISTORY_KEY, { v: 1, projects: Object.fromEntries(Object.entries({ ...others, [ledger.alertsProject]: records }).slice(-HISTORY_PROJECTS)) })
+  await $.store.set(ALERT_HISTORY_KEY, { v: 1, projects: Object.fromEntries(Object.entries({ ...others, [ledger.alertsProject]: merged }).slice(-HISTORY_PROJECTS)) })
 }
 /** Once per session: a Ledger with no alerts of its own takes up what its project's history holds; either way it is tied to the project. */
 let seededFor = ''
@@ -2605,10 +2613,10 @@ const seedAlerts = async ($: EngineInterface): Promise<void> => {
   const held = await read($, ledgerAtom)
   if (held.sessionId === UNKNOWN || seededFor === held.sessionId) return
   seededFor = held.sessionId
-  if (held.alertsProject !== undefined) return
+  if (held.alertsProject !== undefined) { writtenSig = `${held.alertsProject}${JSON.stringify(validAlerts(held.alerts))}`; return }
   const project = await alertProject($)
   const past = (await durableAlerts($))[project] ?? []
-  if ((held.alerts ?? []).length === 0 && past.length === 0) return
+  writtenSig = `${project}${JSON.stringify((held.alerts ?? []).length === 0 ? past : validAlerts(held.alerts))}`
   await update($, ledgerAtom, old => (old.alertsProject !== undefined ? old : { ...old, alertsProject: project, alerts: (old.alerts ?? []).length === 0 ? past : old.alerts }))
   await persist($)
 }

@@ -227,11 +227,11 @@ export const deferredOf = (kept: readonly AlertRecord[]): AlertRecord[] => {
   return out
 }
 
-/** A condition the person acknowledged before any notification of it was written (held back by quiet hours, the cooldown or the budget): they know, so it is not announced afterwards. */
+/** A deferred condition the person acknowledged before anything was sent: they know, so it is not announced afterwards. (One held back by the cooldown or budget is still told: `guard ack` must not silence a critical condition nobody was told of.) */
 export const isSettledQuietly = (kept: readonly AlertRecord[], key: string): boolean => {
   const run = episodeOf(kept, key)
 
-  return run.length > 0 && !wasSent(run) && run.at(-1)?.acked === true && (wasDeferred(run) || run.some(a => a.outcome === 'throttled'))
+  return run.length > 0 && !wasSent(run) && run.at(-1)?.acked === true && wasDeferred(run)
 }
 
 /** The deferred conditions that no longer hold, acknowledged or not: each is recorded resolved once and never announced. */
@@ -595,7 +595,7 @@ export const isAlertRecord = (x: unknown): x is AlertRecord => {
   if (x === null || typeof x !== 'object') return false
   const r = x as Record<string, unknown>
 
-  return typeof r['key'] === 'string' && r['key'].length <= 120 && KINDS.includes(r['kind'] as AlertKind) && Number.isSafeInteger(r['taskId']) && typeof r['at'] === 'number'
+  return typeof r['key'] === 'string' && r['key'].length <= 120 && KINDS.includes(r['kind'] as AlertKind) && Number.isSafeInteger(r['taskId']) && typeof r['at'] === 'number' && Number.isFinite(r['at'])
     && OUTCOME_SET.includes(r['outcome'] as string) && Number.isSafeInteger(r['attempts']) && (r['channel'] === null || (typeof r['channel'] === 'string' && r['channel'].length <= 32))
     && (r['why'] === undefined || WHY_SET.includes(r['why'] as string)) && (r['acked'] === undefined || r['acked'] === true)
     && (r['nth'] === undefined || (Number.isSafeInteger(r['nth']) && (r['nth'] as number) >= 1 && (r['nth'] as number) <= REMINDERS_CEILING))
