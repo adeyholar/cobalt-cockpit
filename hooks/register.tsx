@@ -2654,6 +2654,17 @@ const rawSha = async ($: EngineInterface, path: string): Promise<string | null> 
   } catch { return null }
 }
 
+/** The Stop guard's and the alerts' own settings: they decide whether a task may finish, so only the person changes them. */
+const GUARD_FIELDS = /^(?:stopGuard|verifyScript|verifyScriptSha256|verifyTimeoutSec|stopMaxContinuations|stopVolatile|stopWatch|guardAlerts|guardCooldownSec|guardMaxAlerts)$/
+const isGuardRow = (e: { key: string }): boolean => {
+  const at = e.key.indexOf('.')
+
+  return (at > 0 && e.key.slice(0, at) === 'cobalt-cockpit' && GUARD_FIELDS.test(e.key.slice(at + 1)))
+}
+/** Only the person's own change in the config menu: the bridge is not attestably the owner's hand, a plugin's `$.config.set` never is. */
+const isMenuChange = (e: { origin?: unknown }): boolean => typeof e.origin === 'object' && e.origin !== null && (e.origin as { kind?: unknown }).kind === 'composer'
+const GUARD_ROW_REFUSED = 'COBALT / the Stop guard and alert settings are changed only by you in the config menu; nothing was changed.'
+
 const TRUST_KEY = 'stop-trust'
 type TrustRecord = { sha: string; at: number }
 const trustMap = async ($: EngineInterface): Promise<Record<string, TrustRecord>> => {
@@ -3548,6 +3559,7 @@ export const register: Register = (on, options) => {
   })
 
   on('config.set', async ($, e, next) => {
+    if (isGuardRow(e) && !isMenuChange(e)) return { deny: GUARD_ROW_REFUSED }
     // A config row that chooses a model (the session's, the advisor's, a
     // fallback's) is not set to Fable. The rows that deny models are left alone.
     if (config.isStrict && /advisor/i.test(e.key) && e.value) return { deny: 'COBALT STRICT / external advisor disabled.' }
@@ -3563,6 +3575,7 @@ export const register: Register = (on, options) => {
     // The row this handler was given is judged by the rule this hook holds, so
     // an ordinary row is written and only the rows it would have refused are not.
     if (next.called) return next(e)
+    if (isGuardRow(e) && !isMenuChange(e)) return { deny: GUARD_ROW_REFUSED }
     const names = typeof e.value === 'string' ? [e.value] : Array.isArray(e.value) ? e.value : []
     if (config.blocksFable && /model|advisor/i.test(e.key) && !/denied|blocked/i.test(e.key) && names.some(isFable)) return { deny: 'COBALT / the model-configuration guard failed, so the row was left as it was.' }
     if (config.isStrict && /advisor/i.test(e.key) && e.value) return { deny: 'COBALT STRICT / the advisor guard failed, so the row was left as it was.' }
