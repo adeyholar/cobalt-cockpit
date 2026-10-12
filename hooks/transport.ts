@@ -169,7 +169,7 @@ export const transportLines = (t: Transport, session: string, link: Link, now: n
   if (seen === undefined) lines.push('  human confirmation: none in this session')
   else {
     const fits = seen.link !== link ? 'made on a different kind of connection; does not apply now'
-      : !applies(seen, session, link, now) ? `older than ${CONFIRM_TTL_MS / 3_600_000}h; no longer counted, test again`
+      : !applies(seen, session, link, now) ? (now - (seen.seenAt ?? now) > CONFIRM_TTL_MS ? `older than ${CONFIRM_TTL_MS / 3_600_000}h; no longer counted, test again` : 'its time cannot be placed against the clock; not counted, test again')
         : link === 'ssh' ? 'applies to this session, unless you reconnected since (that cannot be detected)' : 'applies to this session'
     lines.push(`  human confirmation: ${ago(now, seen.seenAt ?? now)} · ${seen.seenBy === 'code' ? 'the code shown was typed back' : 'confirmed without the code'} · via ${seen.channel ?? 'unknown'} · ${fits}`)
     if (last !== undefined && seen !== last) lines.push('  a newer test has not been confirmed.')

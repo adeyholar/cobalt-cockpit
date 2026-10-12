@@ -106,6 +106,7 @@ describe('policy', () => {
     expect(statusOf(t, 's1', 'local', 2000 + CONFIRM_TTL_MS)).toBe('USER CONFIRMED')
     expect(statusOf(t, 's1', 'local', 2000 + CONFIRM_TTL_MS + 1)).toBe('SENT')
     expect(statusOf(t, 's1', 'local', 1999)).toBe('SENT')
+    expect(text(transportLines(t, 's1', 'local', 1999, armed))).toContain('its time cannot be placed against the clock; not counted')
     expect(statusOf(t, 's1', 'local', Number.NaN)).toBe('SENT')
     const old = text(transportLines(t, 's1', 'local', 2000 + CONFIRM_TTL_MS + 1, armed))
     expect(old).toContain('older than 12h; no longer counted, test again')
@@ -309,6 +310,27 @@ describe('/cockpit guard seen', () => {
     expect(sent).toContain('the channel is the terminal bell only')
     expect(await say($, 'guard seen')).toContain('confirmed without the code')
     expect(held(h).tests[0]).toMatchObject({ seenBy: 'no-code', channel: 'terminal_bell' })
+  })
+  test('iTerm2 with the bell shows the text as well as ringing, so it still needs the code', async ($, on) => {
+    const w = world(on); w.notifyChannel = 'iterm2_with_bell'; const h = hostState(on, {}); session(on)
+    await start($)
+    const sent = await say($, 'guard test')
+    expect(sent).toContain('SENT via iterm2_with_bell')
+    expect(sent).toContain('type /cockpit guard seen <the code it shows>')
+    expect(sent).not.toContain('the channel is the terminal bell only')
+    expect(await say($, 'guard seen')).toContain('type the code it showed')
+    expect(held(h).tests[0]!.seenAt).toBeUndefined()
+    expect(await say($, `guard seen ${codeIn(w)}`)).toContain('TRANSPORT: USER CONFIRMED')
+  })
+  test('a second test asked for while one is still being written sends nothing more', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); session(on)
+    await start($)
+    let second = ''
+    w.duringNotify = async () => { second = await say($, 'guard test') }
+    await say($, 'guard test')
+    expect(second).toContain('a test notification is being sent right now. Nothing more was sent.')
+    expect(w.notified.length).toBe(1)
+    expect(held(h).tests.length).toBe(1)
   })
   test('a channel that shows the text is not confirmed without its code', async ($, on) => {
     world(on); const h = hostState(on, {}); session(on)

@@ -55,6 +55,6 @@ Then, with `guardAlerts` and `guardRepeat` on, block a task once and check that 
 
 ## Independent review
 
-A separate reviewer approved the complete diff with three non-blocking findings, corrected before merge: the README stated terminal behaviour as fact where it is expectation; a confirmation never aged; and a read failure printed a fifth label. Its notes were also taken: the code is now required except on a bell-only channel, an empty session id is refused everywhere, a stale `pending` sound is reported as unknown, tests cannot overlap, and a failing clock cannot throw out of the command. The corrected diff was reviewed again.
+A separate reviewer approved the complete diff with three non-blocking findings, corrected before merge: the README stated terminal behaviour as fact where it is expectation; a confirmation never aged; and a read failure printed a fifth label. Its notes were also taken: the code is now required except on a bell-only channel, an empty session id is refused everywhere, a stale `pending` sound is reported as unknown, tests cannot overlap, and a failing clock cannot throw out of the command. A second reviewer then read the complete corrected diff and approved it, with two documentation corrections (a leftover v0.5.4 sentence about the bell, and this paragraph) and a request for an `iterm2_with_bell` test; those were applied and that last delta was reviewed as well.
 
 No automated test here shows that a person saw or heard anything. Real-terminal acceptance is NOT VERIFIED until the checklist is run.
