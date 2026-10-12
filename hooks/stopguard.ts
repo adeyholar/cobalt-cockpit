@@ -162,7 +162,7 @@ export const isCheckRecord = (x: unknown): x is CheckRecord => {
 
   return Number.isSafeInteger(r['taskId']) && isText(r['uid'], 64) && isText(r['verifier'], 32) && typeof r['complete'] === 'boolean' && isText(r['name'], 160)
     && (r['sha'] === null || isText(r['sha'], 16)) && typeof r['at'] === 'number' && OUTCOMES.includes(r['outcome'] as Outcome)
-    && (r['exit'] === null || Number.isSafeInteger(r['exit'])) && (r['ms'] === null || typeof r['ms'] === 'number') && (r['tree'] === null || isText(r['tree'], 96))
+    && (r['exit'] === null || Number.isSafeInteger(r['exit'])) && (r['ms'] === null || typeof r['ms'] === 'number') && (r['tree'] === null || isText(r['tree'], STAMP_MAX))
     && isText(r['summary'], 700) && typeof r['hasSummary'] === 'boolean'
 }
 export const validChecks = (x: unknown): CheckRecord[] => (Array.isArray(x) ? retainChecks(x.filter(isCheckRecord)) : [])
@@ -291,12 +291,30 @@ export const migrateStopHold = (task: Task, checks: readonly CheckRecord[], drop
 /** What a fingerprint comparison proves. UNKNOWN is never read as UNCHANGED, and it is not read as CHANGED either. */
 export type TreeVerdict = 'UNCHANGED' | 'CHANGED' | 'UNKNOWN'
 
-/** The project identity a fingerprint was taken in (`@id`), absent from fingerprints saved by v0.5.2. */
-const projectOf = (stamp: string): string | null => (stamp.includes('@') ? stamp.slice(stamp.lastIndexOf('@') + 1) : null)
+/**
+ * The longest fingerprint this build writes and stores: a SHA-256 repository (64 hex), a nine-digit entry count, two 32-bit
+ * content hashes and the 128-bit project identity come to 124 characters. Schema validation and storage use this one bound.
+ */
+export const STAMP_MAX = 160
+const PROJECT_ID = /^[0-9a-f]{32}$/
+
+/** The project identity a fingerprint was taken in (`@` and 32 lowercase hex): absent from v0.5.2 fingerprints and from the earlier 32-bit form. */
+const projectOf = (stamp: string): string | null => {
+  const id = stamp.slice(stamp.lastIndexOf('@') + 1)
+
+  return stamp.includes('@') && PROJECT_ID.test(id) ? id : null
+}
 
 /**
- * A fingerprint is only comparable with one taken in the same project: another checkout, worktree or repository, or a
- * fingerprint from a build that did not record the project, is UNKNOWN (the check runs), never UNCHANGED.
+ * A fingerprint is only comparable with one taken in the same project, and only when both name it: another checkout, worktree or
+ * repository, a fingerprint without a valid project identity (v0.5.2, the earlier 32-bit form, a malformed or oversized one) is
+ * UNKNOWN (the check runs), never UNCHANGED.
  */
-export const compareTree = (start: string | null | undefined, now: string | null): TreeVerdict =>
-  typeof start !== 'string' || now === null ? 'UNKNOWN' : projectOf(start) !== projectOf(now) ? 'UNKNOWN' : start === now ? 'UNCHANGED' : 'CHANGED'
+export const compareTree = (start: string | null | undefined, now: string | null): TreeVerdict => {
+  if (typeof start !== 'string' || now === null || start.length > STAMP_MAX || now.length > STAMP_MAX) return 'UNKNOWN'
+  const a = projectOf(start)
+  const b = projectOf(now)
+  if (a === null || b === null || a !== b) return 'UNKNOWN'
+
+  return start === now ? 'UNCHANGED' : 'CHANGED'
+}
