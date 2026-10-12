@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 232" width="400" height="232" role="img" aria-label="01 SWARM">
+<defs><clipPath id="box"><rect x="-0.41" y="-0.41" width="4.82" height="6.82"/></clipPath><style>text{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace;font-kerning:none}</style></defs>
+<path d="M14 1H399V217L385 231H1V14Z" fill="#080D1A" stroke="#24345F" stroke-width="1.5"/>
+<path d="M1 44V14L14 1H52" fill="none" stroke="#B18CFF" stroke-width="3"/>
+<path d="M399 184V217L385 231H348" fill="none" stroke="#B18CFF" stroke-width="3" opacity=".55"/>
+<text x="30" y="52" font-size="26" fill="#B18CFF" textLength="31.2" font-weight="700">01</text>
+<text x="73.2" y="52" font-size="13" fill="#7B8496" textLength="58.8">MODULE</text>
+<g transform="translate(318 76) scale(1.25)"><path d="M0 -26L12 -19V-5L0 2L-12 -5V-19Z" fill="none" stroke="#B18CFF" stroke-width="2.4"/><path d="M0 2V12M-26 22V12H26V22" fill="none" stroke="#24345F" stroke-width="2"/><rect x="-33" y="22" width="14" height="14" fill="#B18CFF" fill-opacity=".25" stroke="#B18CFF" stroke-width="2"/><circle cx="26" cy="29" r="7" fill="#B18CFF" fill-opacity=".25" stroke="#B18CFF" stroke-width="2"/><circle cx="0" cy="-12" r="3.4" fill="#B18CFF"/></g>
+<g transform="translate(33.12 123.12) scale(7.6)" fill="none" stroke="#E8EDFF" stroke-width="0.82" stroke-linecap="square" stroke-linejoin="miter"><path d="M4 0H1L0 1V2L1 3H3L4 4V5L3 6H0"/><path d="M0 0V6L2 3.4L4 6V0" transform="translate(5.38 0)" clip-path="url(#box)"/><path d="M0 6V1L1 0H3L4 1V6M0 3.7H4" transform="translate(10.76 0)"/><path d="M0 6V0H3L4 1V2.7L3 3.7H0M2 3.7L4.5 6.9" transform="translate(16.14 0)" clip-path="url(#box)"/><path d="M0 6V0L2 2.6L4 0V6" transform="translate(21.52 0)" clip-path="url(#box)"/></g>
+<path d="M30 186H370" stroke="#1B2748" stroke-width="1.5"/>
+<text x="30" y="210" font-size="17" fill="#7B8496" textLength="201">orchestration: true</text>
+</svg>

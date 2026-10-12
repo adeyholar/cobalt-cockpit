@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 232" width="400" height="232" role="img" aria-label="06 LEDGER">
+<defs><clipPath id="box"><rect x="-0.41" y="-0.41" width="4.82" height="6.82"/></clipPath><style>text{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace;font-kerning:none}</style></defs>
+<path d="M14 1H399V217L385 231H1V14Z" fill="#FFFFFF" stroke="#B4C1E0" stroke-width="1.5"/>
+<path d="M1 44V14L14 1H52" fill="none" stroke="#3A4152" stroke-width="3"/>
+<path d="M399 184V217L385 231H348" fill="none" stroke="#3A4152" stroke-width="3" opacity=".55"/>
+<text x="30" y="52" font-size="26" fill="#3A4152" textLength="31.2" font-weight="700">06</text>
+<text x="73.2" y="52" font-size="13" fill="#646A7E" textLength="58.8">MODULE</text>
+<g transform="translate(318 76) scale(1.25)"><path d="M-30 -20V30" stroke="#3D74FF" stroke-width="2.6" stroke-linecap="round"/><path d="M-20 -16H26M-20 -2H10M-20 12H26M-20 26H-2" stroke="#3A4152" stroke-width="2.6" stroke-linecap="round"/><path d="M14 -9l12 7l-12 7z" fill="#3D74FF"/></g>
+<g transform="translate(33.12 123.12) scale(7.6)" fill="none" stroke="#0B1020" stroke-width="0.82" stroke-linecap="square" stroke-linejoin="miter"><path d="M0 0V6H4"/><path d="M4 0H0V6H4M0 3H3" transform="translate(5.38 0)"/><path d="M0 0H3L4 1V5L3 6H0Z" transform="translate(10.76 0)"/><path d="M4 0H1L0 1V5L1 6H3L4 5V3.2H2.2" transform="translate(16.14 0)"/><path d="M4 0H0V6H4M0 3H3" transform="translate(21.52 0)"/><path d="M0 6V0H3L4 1V2.7L3 3.7H0M2 3.7L4.5 6.9" transform="translate(26.9 0)" clip-path="url(#box)"/></g>
+<path d="M30 186H370" stroke="#CCD6EE" stroke-width="1.5"/>
+<text x="30" y="210" font-size="17" fill="#646A7E" textLength="169.2">/ledger  /replay</text>
+</svg>
