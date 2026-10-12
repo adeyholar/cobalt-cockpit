@@ -1,4 +1,4 @@
-# Cobalt Cockpit v0.5.8 — Elastic Swarm + Adaptive Intelligence
+# Cobalt Cockpit v0.5.9 — Elastic Swarm + Adaptive Intelligence
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
@@ -269,6 +269,19 @@ HISTORY (recorded earlier; the condition no longer holds)
 - **`/cockpit alerts digest`** prints a few lines computed from the records: unacknowledged occurrences by level, how many hold now and how many are history, how many notifications were deferred, not sent or held back, and when the oldest was recorded. It holds no id, key or text from a record, and says what was recorded, never what anyone saw.
 - **`guardDigest`** (Cockpit settings, off by default, person-only) shows a one-line count by level when a session starts, if anything is unacknowledged: once per session (a plugin reload does not repeat it; a resumed session gets it again unless it was shown within half an hour), no desktop notification, no model call.
 - **Notifications off.** With `guardAlerts` off, `/cockpit alerts`, `/cockpit alerts digest`, acknowledgment and `guardDigest` still work on history recorded earlier. Nothing new is recorded or sent, no notification is turned on, and a user who never had alerts on keeps no history and no project tie.
+
+#### Record-only mode and since your last look (v0.5.9)
+
+| `guardAlerts` | `guardRecordOnly` | What happens |
+| --- | --- | --- |
+| off | off | The default. Nothing new is recorded or told. Earlier history can still be read. |
+| on | off | Alerts as always. |
+| off | on | **Recording.** Incidents are written down for `/cockpit alerts` and the digest; no notification, sound, bell or reminder is ever sent for them. |
+| on | on | Alerts as always, which take precedence: `guardRecordOnly` changes nothing, and the status says so. |
+
+- **What is recorded.** The conditions alerts are raised for (a failed security check, a release NO-GO, exhausted verification, an open review at a stop, a blocked run), once per occurrence, with their level and a stable id, resolved when they stop holding and recorded again as a new occurrence if they recur. The outcome is `recorded` (`RECORDED only, no notification`), never SENT, FAILED or DEFERRED. It uses no cooldown or budget, and silence, the notified kinds and quiet hours govern telling, not recording. A critical incident is pinned on the HUD (`GUARD ▲ CRITICAL … RECORDED, no notification`) until acknowledged or resolved.
+- **Switching.** Turning `guardAlerts` on later does not announce an incident that was already recorded; a new one is told as usual. `/cockpit guard test`, which you type, still sends its one labelled test; nothing automatic does.
+- **`SINCE LAST LOOK: 1 CRITICAL · 2 HIGH · 3 NORMAL`** heads `/cockpit alerts`, with a second line of active versus history and what became of the notifications (recorded only, SENT, DEFERRED, NOT SENT, held back, acknowledged). It counts the occurrences not shown at your last look, by id. Displaying the inbox marks what it showed; the digest, the start-of-session line and anything that is not you mark nothing; looking never acknowledges. Across two sessions the marker is best effort: a read and a write of one key, which can show an occurrence as new again but never as seen when it was not shown. It counts records, not what anyone read.
 
 ### Alert priorities, quiet hours and the pinned alert row (v0.5.6)
 
