@@ -2853,7 +2853,7 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
       for (const one of open) {
         const now = await $.clock.now()
         const state = await read($, guardAtom)
-        // a notice marked in flight is not this pass's own (each is settled before the next): whoever holds it finishes first
+        // this pass settles each notice before the next, so a mark seen here was left by a module that is gone: it costs one look, the `finally` clears it
         if (state.pending) continue
         const again = remind(guardCfg, state, (await read($, ledgerAtom)).alerts ?? [], one.key, now)
         if (!again.send) continue
@@ -4143,9 +4143,10 @@ export const register: Register = (on, options) => {
         }
         if ((arg === 'ack' || arg === 'silence' || arg === 'unsilence') && !isHumanAuthority(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
         if (arg === 'ack' || arg === 'silence') {
-          await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
+          // the moment first, then the records: a notice appended between the two is covered by one or the other
           const at = await $.clock.now()
           await update($, guardAtom, old => ({ ...old, ackAt: at, ...(arg === 'silence' ? { all: true } : {}) }))
+          await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
           await hush(() => persist($))
         } else if (arg === 'unsilence') await update($, guardAtom, old => (old.all ? { ...old, all: false } : old))
         else if (arg !== '') return { text: 'Usage: /cockpit guard | ack | silence | unsilence | trust [hash] | untrust | release' }

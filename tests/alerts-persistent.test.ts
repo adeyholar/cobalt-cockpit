@@ -174,6 +174,18 @@ describe('in a run', () => {
     await progress($, { action: 'status' })
     expect(w.notified.length).toBe(2)
   })
+  test('a condition raised after an acknowledgment is still told, and reminded', armed(), async ($, on) => {
+    const w = world(on)
+    await start($); await planAndComplete($, 1); await failSecurity($)
+    await command($, 'guard ack')
+    await w.clock.advance(MIN)
+    await progress($, { action: 'block', milestone: 'm2', note: 'needs the owner' })
+    expect(w.notified.length).toBe(2)
+    expect(w.notified[1]!.text).toContain('the run is blocked')
+    await w.clock.advance(MIN + 30_000)
+    expect(w.notified.length).toBe(3)
+    expect(w.notified[2]!.text).toContain('still open (reminder 1 of 2): the run is blocked')
+  })
   test('a silence stops everything and acknowledges what is open; unsilence lets a new condition be told', armed(), async ($, on) => {
     const w = world(on)
     await start($); await planAndComplete($, 1); await failSecurity($)
