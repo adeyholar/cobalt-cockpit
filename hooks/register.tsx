@@ -61,7 +61,7 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { ALERT_CAP, EMPTY_GUARD, ackOccurrence, episodesOf,  inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import { EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessHistoryKeys, historyKeyOf, mergeHistory, pendingIdsOf, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
@@ -880,7 +880,7 @@ const HELP =
   '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
   '/cockpit flow      the Neural Flow in words: which of input, discovery, routing, workers, verify and done are verified\n' +
   '/cockpit guard     Cobalt Guard owner alerts: status, priorities, quiet hours and active conditions; ack, silence or unsilence; test and seen check that a notification reaches you (none changes a verdict)\n' +
-  '/cockpit alerts   the alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; alerts ack <id> acknowledges one (changes no verdict)\n' +
+  '/cockpit alerts   the alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; alerts digest summarises the unacknowledged; alerts ack <id> acknowledges one (changes no verdict)\n' +
   '/cockpit doctor    read-only checks: installs, profile, telemetry storage, host and prompt-cache policy\n' +
   '/cockpit sound      play both cues'
 
@@ -2571,54 +2571,97 @@ export const ledgerRequest = async ($: EngineInterface, e: { turnId: string; ind
   await persist($)
 }
 /**
- * The alerts a project has had are also kept in a durable store key of their own (v0.5.7), because a new session's Run Ledger
- * starts empty and the operator comes back to a new session as often as to the old one. It holds the alert records Cockpit
- * wrote, nothing else: a closed vocabulary, numbers and a short channel name, the same as the Ledger. The project is a hash of
- * its directory, never the path. It is bounded (four projects, the Ledger's alert cap each), validated on read, and read back
- * once into a Ledger that has not got alerts of its own.
+ * What the host's store does, read from its implementation in Claude Code 2.1.296 and not documented by it: every
+ * `$.store.set` and `$.store.delete` takes a lock file beside the store (retried a few times, so a contended set can be
+ * rejected), reads the whole store inside the lock, changes that one key and writes; so one session's set is serialised
+ * against another's while the lock holds, and a set of one key never changes another. Stale-lock takeover and the atomicity
+ * of the file write itself were not examined. There is no compare-and-set and no transaction: a `get` followed by a `set` is two steps, and another session's set may come between
+ * them. Nothing here claims more than that.
+ *
+ * So the alerts are kept in two kinds of key (v0.5.8):
+ *  - one key per acknowledged occurrence, `alert-ack:<project>:<id>`, written once with a constant value. It is never read
+ *    and then written back, so no stale session can undo it; two sessions acknowledging the same occurrence write the same
+ *    thing. Sessions find acknowledgments with `$.store.keys()` and apply them to their own records.
+ *  - one key per project for its records, `alert-history:<project>`, replaced by a read, a merge and a set. That one is
+ *    last-writer-wins: a session's records written between another's read and set can be lost from the stored history (not
+ *    from their own Ledger). An acknowledgment is not among the things that can be lost, because it is not kept there.
+ * v0.5.7 kept all projects under one key, `alert-history`; it is still read (never written) when a project has no key yet.
+ * Both kinds hold only what the Ledger holds: a closed vocabulary, numbers, a short channel name, a hash of the directory
+ * and an occurrence id. Bounded: four projects of 32 records, 128 acknowledgments.
  */
-const ALERT_HISTORY_KEY = 'alert-history'
-const HISTORY_PROJECTS = 4
-const durableAlerts = async ($: EngineInterface): Promise<Record<string, AlertRecord[]>> => {
-  const stored = (await $.store.get(ALERT_HISTORY_KEY).catch(() => undefined)) as { v?: unknown; projects?: unknown } | undefined
-  const out: Record<string, AlertRecord[]> = {}
-  if (stored?.v !== 1 || stored.projects === null || typeof stored.projects !== 'object') return out
-  for (const [project, records] of Object.entries(stored.projects as Record<string, unknown>).slice(-HISTORY_PROJECTS)) {
-    const valid = /^[0-9a-f]{12}$/.test(project) ? validAlerts(records) : []
-    if (valid.length > 0) out[project] = valid
-  }
+const LEGACY_HISTORY_KEY = 'alert-history'
+const historyOf = async ($: EngineInterface, project: string): Promise<AlertRecord[]> => {
+  const own = (await $.store.get(historyKeyOf(project)).catch(() => undefined)) as { v?: unknown; alerts?: unknown } | undefined
+  if (own?.v === 1) return validAlerts(own.alerts)
+  const legacy = (await $.store.get(LEGACY_HISTORY_KEY).catch(() => undefined)) as { v?: unknown; projects?: unknown } | undefined
+  if (legacy?.v === 1 && legacy.projects !== null && typeof legacy.projects === 'object' && Object.hasOwn(legacy.projects as object, project)) return validAlerts((legacy.projects as Record<string, unknown>)[project])
 
-  return out
+  return []
 }
 const alertProject = async ($: EngineInterface): Promise<string> => (await sha256Text(`cobalt-cockpit/alerts/v1\0${(await $.session.cwd().catch(() => '')) || ''}`)).slice(0, 12)
+/** The occurrences of a project that the store holds an acknowledgment for. Unreadable: none, so nothing is marked on a guess. */
+const storedAcks = async ($: EngineInterface, project: string): Promise<Set<string>> => ackedIdsOf(await $.store.keys().catch(() => [] as string[]), project)
+/** Writes one key per acknowledged occurrence (one atomic set each) and forgets the oldest beyond the bound. False if any set failed. */
+const recordAcks = async ($: EngineInterface, project: string, ids: readonly string[]): Promise<boolean> => {
+  let ok = true
+  for (const id of ids) {
+    try { await $.store.set(ackKeyOf(project, id), { v: 1 }) } catch { ok = false }
+  }
+  await hush(async () => { for (const k of excessAckKeys(await $.store.keys())) await $.store.delete(k) })
+
+  return ok
+}
+/** Marks the Ledger's records of every occurrence acknowledged in the store, in this session or another. Writes nothing to the store. */
+let syncedAt = -Infinity
+const SYNC_MIN_MS = 5000
+const syncAcks = async ($: EngineInterface, rearm = true, throttled = false): Promise<void> => {
+  // an alert pass runs on every tool result: the store's key list is read at most every few seconds there; a command or a start always reads it
+  if (throttled) {
+    const now = await $.clock.now()
+    if (now >= syncedAt && now - syncedAt < SYNC_MIN_MS) return
+    syncedAt = now
+  }
+  const held = await read($, ledgerAtom)
+  const alerts = held.alerts ?? []
+  if (held.alertsProject === undefined || alerts.every(a => a.acked === true || a.outcome === 'resolved')) return
+  const ids = await storedAcks($, held.alertsProject)
+  if (applyAcks(alerts, ids) === alerts) return
+  await update($, ledgerAtom, old => ({ ...old, alerts: applyAcks(old.alerts ?? [], ids) }))
+  await hush(() => persist($))
+  // an acknowledgment made elsewhere ends the reminders here at once, not at the timer's next look
+  if (rearm) await armReminders($)
+}
 let writtenSig = ''
 const keepAlertHistory = async ($: EngineInterface, ledger: Ledger): Promise<void> => {
+  const project = ledger.alertsProject
   const records = validAlerts(ledger.alerts)
-  if (ledger.alertsProject === undefined || !/^[0-9a-f]{12}$/.test(ledger.alertsProject) || records.length === 0) return
+  if (project === undefined || !PROJECT_RE.test(project) || records.length === 0) return
   // only a change this session made is written: a resumed older session must not replace a newer history with its stale copy
-  const sig = `${ledger.alertsProject}${JSON.stringify(records)}`
+  const sig = `${project}${JSON.stringify(records)}`
   if (sig === writtenSig) return
-  const all = await durableAlerts($)
-  // occurrences another session of this project recorded and this one never saw are kept beside its own, oldest forgotten first
-  const mine = new Set(episodesOf(records).map(e => e.id))
-  const merged = [...episodesOf(all[ledger.alertsProject] ?? []).filter(e => !mine.has(e.id)).flatMap(e => e.records), ...records].slice(-ALERT_CAP)
-  if (JSON.stringify(all[ledger.alertsProject]) === JSON.stringify(merged)) { writtenSig = sig; return }
-  const { [ledger.alertsProject]: _old, ...others } = all
-  await $.store.set(ALERT_HISTORY_KEY, { v: 1, projects: Object.fromEntries(Object.entries({ ...others, [ledger.alertsProject]: merged }).slice(-HISTORY_PROJECTS)) })
+  const stored = await historyOf($, project)
+  const merged = mergeHistory(records, stored, await storedAcks($, project))
+  if (JSON.stringify(stored) !== JSON.stringify(merged)) {
+    await $.store.set(historyKeyOf(project), { v: 1, alerts: merged })
+    await hush(async () => { for (const k of excessHistoryKeys(await $.store.keys(), historyKeyOf(project))) await $.store.delete(k) })
+  }
   writtenSig = sig
 }
-/** Once per session: a Ledger with no alerts of its own takes up what its project's history holds; either way it is tied to the project. */
+/** Once per session: a Ledger with no alerts of its own takes up what its project's history holds, with the acknowledgments the store has; either way it is tied to the project. */
 let seededFor = ''
 const seedAlerts = async ($: EngineInterface): Promise<void> => {
   const held = await read($, ledgerAtom)
   if (held.sessionId === UNKNOWN || seededFor === held.sessionId) return
   seededFor = held.sessionId
-  if (held.alertsProject !== undefined) { writtenSig = `${held.alertsProject}${JSON.stringify(validAlerts(held.alerts))}`; return }
+  if (held.alertsProject !== undefined) { writtenSig = `${held.alertsProject}${JSON.stringify(validAlerts(held.alerts))}`; await syncAcks($, false); return }
   const project = await alertProject($)
-  const past = (await durableAlerts($))[project] ?? []
+  const past = applyAcks(await historyOf($, project), await storedAcks($, project))
   writtenSig = `${project}${JSON.stringify((held.alerts ?? []).length === 0 ? past : validAlerts(held.alerts))}`
+  // with alerts off and nothing recorded earlier, nothing is taken up and nothing is written: turning alerts off keeps no new history
+  if ((held.alerts ?? []).length === 0 && past.length === 0 && !guardCfg.enabled) return
   await update($, ledgerAtom, old => (old.alertsProject !== undefined ? old : { ...old, alertsProject: project, alerts: (old.alerts ?? []).length === 0 ? past : old.alerts }))
   await persist($)
+  await syncAcks($, false)
 }
 const persist = async ($: EngineInterface): Promise<void> => {
   let ledger = await read($, ledgerAtom)
@@ -2890,6 +2933,8 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
   if (!guardCfg.enabled || guarding) return
   guarding = true
   try {
+    // an occurrence acknowledged in another session is acknowledged here before anything is decided about it
+    await hush(() => syncAcks($, false, true))
     const task = await read($, taskAtom)
     if (task === null) {
       // no task: only a condition still to be closed (told, or held back by quiet hours) calls for a look
@@ -3012,6 +3057,30 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
 
 /** The key of the occurrence with this id: what a single acknowledgment is noted against while a pass may be writing. */
 const episodesKey = (kept: readonly AlertRecord[], id: string): string | null => episodesOf(kept).find(e => e.id === id)?.key ?? null
+const DIGEST_KEY = 'alert-digest'
+const DIGEST_RELOAD_MS = 30 * 60_000
+/**
+ * The session start's one line, when `guardDigest` is on: shown in the terminal's own toast (never a desktop notification),
+ * computed from the records. A hot reload fires the session start again and finds the host-held Ledger already this session's:
+ * it shows nothing. A resume comes back with the same session id and an empty Ledger: the marker holds the session id and the
+ * moment, and the line is not shown again for the same session within half an hour (two starts of one process in a row). A moment in the future (a clock stepped back) counts as recent. The marker is a read and a write of
+ * one key, so two sessions starting at once can drop each other's entry; that can only show the line once more.
+ */
+const showDigest = async ($: EngineInterface): Promise<void> => {
+  if (!guardCfg.digest) return
+  const id = (await read($, ledgerAtom)).sessionId
+  if (id === UNKNOWN) return
+  const held = (await $.store.get(DIGEST_KEY).catch(() => undefined)) as { v?: unknown; shown?: unknown } | undefined
+  const shown = held?.v === 1 && Array.isArray(held.shown) ? held.shown.filter((x): x is { id: string; at: number } => x !== null && typeof x === 'object' && typeof (x as { id?: unknown }).id === 'string' && typeof (x as { at?: unknown }).at === 'number').slice(-15) : []
+  const now = await $.clock.now()
+  if (shown.some(x => x.id === id && !(now - x.at >= DIGEST_RELOAD_MS))) return
+  // marked before it is shown: a reload that comes straight after does not show it twice
+  await $.store.set(DIGEST_KEY, { v: 1, shown: [...shown.filter(x => x.id !== id), { id, at: now }] })
+  await hush(() => syncAcks($, false))
+  const kept = (await read($, ledgerAtom)).alerts ?? []
+  const line = digestToast(occurrencesOf(kept, await openAlerts($, kept)))
+  if (line !== null) await $.ui.toast(line, { timeoutMs: 12_000 })
+}
 const guardView = async ($: EngineInterface) => ({ state: await read($, guardAtom), kept: (await read($, ledgerAtom)).alerts ?? [] })
 
 // --- Verified notification transport (policy and wording: transport.ts). Tests are kept apart from the alerts and change no verdict. ---
@@ -3139,7 +3208,7 @@ const rawSha = async ($: EngineInterface, path: string): Promise<string | null> 
 }
 
 /** The Stop guard's and the alerts' own settings: they decide whether a task may finish, so only the person changes them. */
-const GUARD_FIELDS = /^(?:stopGuard|verifyScript|verifyScriptSha256|verifyTimeoutSec|stopMaxContinuations|stopVolatile|stopWatch|guardAlerts|guardCooldownSec|guardMaxAlerts|guardRepeat|guardRepeatSec|guardMaxReminders|guardSound|guardNotifyKinds|guardQuietHours|guardQuietTimezone|guardQuietOrdinary|guardQuietCritical)$/
+const GUARD_FIELDS = /^(?:stopGuard|verifyScript|verifyScriptSha256|verifyTimeoutSec|stopMaxContinuations|stopVolatile|stopWatch|guardAlerts|guardCooldownSec|guardMaxAlerts|guardRepeat|guardRepeatSec|guardMaxReminders|guardSound|guardNotifyKinds|guardQuietHours|guardQuietTimezone|guardQuietOrdinary|guardQuietCritical|guardDigest)$/
 const isGuardRow = (e: { key: string }): boolean => {
   const at = e.key.indexOf('.')
 
@@ -3504,7 +3573,15 @@ export const register: Register = (on, options) => {
         startTicker($)
       }
     })
+    // a hot reload finds the host-held Ledger already belonging to this session; a resume or a new process finds it empty
+    let isReload = false
+    try {
+      const id = (await $.session.id().catch(() => '')) || UNKNOWN
+      isReload = id !== UNKNOWN && (await read($, ledgerAtom)).sessionId === id
+    } catch { /* unreadable: treated as not a reload, and the marker decides */ }
     await ledgerStart($)
+    // opt-in (guardDigest): one line about unacknowledged recorded alerts, once for this session, never again on a reload
+    if (!isReload) await quiet(() => showDigest($))
     await changeSwarm($, held => configureSwarm(held, { total: config.maxSubagents, sonnet: config.maxSonnet, haiku: config.maxHaiku, opus: isSonnetLed() ? (SONNET_LED_SWARM.opus as number) : 0 }))
     void refreshGit($)
     void refreshMeter($)
@@ -4387,9 +4464,15 @@ export const register: Register = (on, options) => {
         if (arg === 'ack' || arg === 'silence') {
           // the count first, then the records: a notice appended between the two is covered by one or the other
           await update($, guardAtom, old => ({ ...withAck(old, null), ...(arg === 'silence' ? { all: true } : {}) }))
-          await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
+          // the occurrences acknowledged are those the update itself marks, so a record appended meanwhile is not left without its key
+          let pending: string[] = []
+          await update($, ledgerAtom, old => { pending = pendingIdsOf(old.alerts ?? []); return { ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) } })
+          // each occurrence acknowledged here is a key of its own as well, so another session reads it
+          const project = (await read($, ledgerAtom)).alertsProject
+          if (project !== undefined && pending.length > 0) await hush(() => recordAcks($, project, pending))
           await hush(() => persist($))
         } else if (arg === 'unsilence') await update($, guardAtom, old => (old.all ? { ...old, all: false } : old))
+        else if (arg === '' && guardCfg.enabled) await hush(() => syncAcks($))
         else if (arg !== '') return { text: 'Usage: /cockpit guard | ack | silence | unsilence | test [sound] | seen [code] | trust [hash] | untrust | release' }
         // an acknowledgment or a silence ends the repeats now, not at the timer's next look
         if (arg !== '') await armReminders($)
@@ -4417,15 +4500,26 @@ export const register: Register = (on, options) => {
           const key = episodesKey(before, id)
           if (key !== null) await update($, guardAtom, old => withAck(old, key))
           await update($, ledgerAtom, old => ({ ...old, alerts: ackOccurrence(old.alerts ?? [], open, id).alerts }))
+          // the acknowledgment as a key of its own: one atomic set that no other session's write can undo
+          const project = (await read($, ledgerAtom)).alertsProject
+          const shared = project === undefined ? false : await recordAcks($, project, [id])
           await hush(() => persist($))
           // its reminders end now, not at the timer's next look
           await armReminders($)
           const holds = o?.state === 'open'
+          const where = shared ? ' It is recorded for this project, so another session reads it too.' : ' It could not be recorded for the project: it holds in this session only.'
 
-          return { text: `Cockpit: alert ${named} was acknowledged${holds ? '; its condition is still open, and no more reminders will be sent for it' : '; its condition no longer holds, so this only marks the record'}. Other alerts, gates, reviews, approvals and the verification verdict were not changed.` }
+          return { text: `Cockpit: alert ${named} was acknowledged${holds ? '; its condition is still open, and no more reminders will be sent for it' : '; its condition no longer holds, so this only marks the record'}.${where} Other alerts, gates, reviews, approvals and the verification verdict were not changed.` }
+        }
+        await hush(() => syncAcks($))
+        if (arg === 'digest') {
+          if (words.length > 2) return { text: 'Usage: /cockpit alerts digest' }
+          const recorded = (await read($, ledgerAtom)).alerts ?? []
+
+          return { text: digestText(occurrencesOf(recorded, await openAlerts($, recorded)), await $.clock.now(), guardCfg.enabled) }
         }
         const page = arg === '' ? 1 : /^\d{1,3}$/.test(arg) ? Number(arg) : -1
-        if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | /cockpit alerts ack <id>' }
+        if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | /cockpit alerts digest | /cockpit alerts ack <id>' }
         const kept = (await read($, ledgerAtom)).alerts ?? []
         const occ = occurrencesOf(kept, await openAlerts($, kept))
 

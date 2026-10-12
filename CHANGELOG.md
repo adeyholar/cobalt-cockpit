@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (0.5.8) — Inbox consistency and return digest
+
+Details, what the host's store does and does not guarantee, and the acceptance procedure for two concurrent sessions: [docs/implementation-v0.5.8.md](docs/implementation-v0.5.8.md).
+
+- Acknowledgments are keys of their own, `alert-ack:<project>:<id>`, set once with a fixed value (one atomic host `set`, no read-modify-write), so a stale or concurrent session cannot undo one. Sessions apply them to their own records at each look (a tool call, a command, the timer, a session start).
+- History is one key per project, `alert-history:<project>` (four projects, 32 records each), so projects cannot overwrite each other. The v0.5.7 single key is still read and never written. The stored history is last-writer-wins for records and says so; an acknowledgment is not kept there.
+- `/cockpit alerts digest` and the opt-in `guardDigest` (one terminal line at session start, once per session, no desktop notification, no model call).
+- `/cockpit alerts`, `digest`, acknowledgment and `guardDigest` work with `guardAlerts` off; nothing new is recorded or retained for a user who has alerts off.
+- A held-back record that is all an open condition has is the last to be evicted. The unfinished v0.5.7 limit about concurrent acknowledgments is closed for acknowledgments; it remains for records.
+
 ## Unreleased (0.5.7) — Alert inbox and recovery
 
 A bounded, persistent and actionable inbox over the alert records Cobalt Guard already keeps. Notifications, quiet hours, priorities, budgets and the single timer are unchanged, with the two corrections listed below. Details and the acceptance procedure: [docs/implementation-v0.5.7.md](docs/implementation-v0.5.7.md).

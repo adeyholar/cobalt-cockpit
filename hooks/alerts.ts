@@ -52,6 +52,8 @@ export type GuardConfig = {
   /** What in `guardNotifyKinds` was not understood. Closed sentences. */
   kindProblems: string[]
   quiet: QuietConfig
+  /** `guardDigest` (v0.5.8): one line about unacknowledged recorded alerts, once, at the start of a session. Independent of `guardAlerts`. */
+  digest: boolean
 }
 export const COOLDOWN_DEFAULT_SEC = 300
 export const MAX_DEFAULT = 5
@@ -91,6 +93,7 @@ export const guardConfigOf = (options: Readonly<Record<string, unknown>>, zone: 
   kinds: kindsOf(options['guardNotifyKinds']).kinds,
   kindProblems: options['guardAlerts'] === true ? kindsOf(options['guardNotifyKinds']).problems : [],
   quiet: quietConfigOf(options, zone),
+  digest: options['guardDigest'] === true,
 })
 
 /** One alert as the Run Ledger keeps it: closed vocabulary and numbers only. */
@@ -319,7 +322,8 @@ export const withAck = (state: GuardState, key: string | null): GuardState => {
 export const bounded = (kept: readonly AlertRecord[], add: AlertRecord): AlertRecord[] => {
   const all = [...kept, add.id === undefined || !ID_RE.test(add.id) ? { ...add, id: nextIdOf(kept, add) } : add]
   while (all.length > ALERT_CAP) {
-    let drop = all.findIndex(a => a.outcome === 'throttled' || a.outcome === 'silenced')
+    // a held-back or silenced record goes first, unless it is the only record its condition has: that one keeps it on the HUD
+    let drop = all.findIndex((a, i) => (a.outcome === 'throttled' || a.outcome === 'silenced') && all.some((b, j) => j !== i && b.key === a.key))
     if (drop < 0 || drop >= all.length - 1) drop = all.findIndex((a, i) => a.outcome !== 'resolved' && all.some((b, j) => j > i && b.key === a.key && b.outcome === 'resolved'))
     if (drop < 0) drop = all.findIndex((a, i) => i < all.length - 1 && a.outcome === 'resolved')
     all.splice(drop >= 0 && drop < all.length - 1 ? drop : 0, 1)
@@ -432,6 +436,119 @@ export const ackOccurrence = (kept: readonly AlertRecord[], open: readonly Open[
   if (pending.length === 0) return { alerts: [...kept], result: 'already', ...(occurrence === undefined ? {} : { occurrence }) }
 
   return { alerts: kept.map(a => (pending.includes(a) ? { ...a, acked: true as const } : a)), result: 'acked', ...(occurrence === undefined ? {} : { occurrence: { ...occurrence, acked: true } }) }
+}
+
+// --- v0.5.8: acknowledgments as keys of their own, the history merge, and the return digest ---
+
+export const ACK_PREFIX = 'alert-ack:'
+export const HISTORY_PREFIX = 'alert-history:'
+export const PROJECT_RE = /^[0-9a-f]{12}$/
+/** At most this many acknowledgment keys are kept in all: four projects of 32 occurrences each. */
+export const ACK_KEYS_MAX = 128
+export const HISTORY_PROJECTS_MAX = 4
+
+/** The store key of one acknowledged occurrence. The host sets a key in one step, so writing it is one atomic act that no other write can undo. */
+export const ackKeyOf = (project: string, id: string): string => `${ACK_PREFIX}${project}:${id}`
+const parseAckKey = (key: unknown): { project: string; id: string } | null => {
+  if (typeof key !== 'string' || !key.startsWith(ACK_PREFIX)) return null
+  const [project, id, ...rest] = key.slice(ACK_PREFIX.length).split(':')
+
+  return rest.length === 0 && project !== undefined && id !== undefined && PROJECT_RE.test(project) && ID_RE.test(id) ? { project, id } : null
+}
+export const historyKeyOf = (project: string): string => `${HISTORY_PREFIX}${project}`
+export const isHistoryKey = (key: unknown): key is string => typeof key === 'string' && key.startsWith(HISTORY_PREFIX) && PROJECT_RE.test(key.slice(HISTORY_PREFIX.length))
+/** The occurrences of this project acknowledged in the store, from the keys it lists. A key that is not exactly ours is ignored. */
+export const ackedIdsOf = (keys: readonly unknown[], project: string): Set<string> => new Set(keys.flatMap(k => { const a = parseAckKey(k); return a !== null && a.project === project ? [a.id] : [] }))
+/** The acknowledgment keys to forget so that at most `max` remain: the oldest, as the store lists them. */
+export const excessAckKeys = (keys: readonly unknown[], max: number = ACK_KEYS_MAX): string[] => {
+  const mine = keys.filter((k): k is string => parseAckKey(k) !== null)
+
+  return mine.slice(0, Math.max(0, mine.length - max))
+}
+/** The history keys to forget so that at most `max` projects remain, never `keep`: the oldest, as the store lists them. */
+export const excessHistoryKeys = (keys: readonly unknown[], keep: string, max: number = HISTORY_PROJECTS_MAX): string[] => {
+  const mine = keys.filter(isHistoryKey)
+
+  return mine.filter(k => k !== keep).slice(0, Math.max(0, mine.length - max))
+}
+/** The occurrences with a record not yet acknowledged, resolved ones apart: what `guard ack` acknowledges. */
+export const pendingIdsOf = (kept: readonly AlertRecord[]): string[] =>
+  episodesOf(kept).filter(e => e.records.some(a => a.outcome !== 'resolved' && a.acked !== true)).map(e => e.id)
+/** The ids of the occurrences some record already marks acknowledged: what a history written before v0.5.8 knows. */
+export const markedIdsOf = (kept: readonly AlertRecord[]): string[] =>
+  episodesOf(kept).filter(e => e.records.some(a => a.outcome !== 'resolved' && a.acked === true)).map(e => e.id)
+/** Marks every record of the occurrences in `ids` acknowledged. Pure; the same array when nothing changes. */
+export const applyAcks = (kept: readonly AlertRecord[], ids: ReadonlySet<string>): AlertRecord[] => {
+  if (ids.size === 0) return kept as AlertRecord[]
+  const pending = new Set(episodesOf(kept).filter(e => ids.has(e.id)).flatMap(e => e.records.filter(a => a.acked !== true && a.outcome !== 'resolved')))
+  if (pending.size === 0) return kept as AlertRecord[]
+
+  return kept.map(a => (pending.has(a) ? { ...a, acked: true as const } : a))
+}
+/**
+ * What a session writes as its project's history: the occurrences the stored history has and this session never saw,
+ * then this session's own records, capped. An occurrence both hold is this session's copy (its records are the live ones);
+ * what they differ in is not decided by guessing. An acknowledgment is never lost to the merge: the ids acknowledged in
+ * the store, or marked acknowledged in either copy, are applied to the result. Pure.
+ */
+export const mergeHistory = (own: readonly AlertRecord[], stored: readonly AlertRecord[], acked: ReadonlySet<string> = new Set()): AlertRecord[] => {
+  const mine = new Set(episodesOf(own).map(e => e.id))
+  const ownKeys = new Set(own.map(a => a.key))
+  // an occurrence of a condition this session also holds records of is not added from the stored copy: grouped with the session's
+  // own, the two would become one run and the later occurrence would lose its id
+  const foreign = episodesOf(stored).filter(e => !mine.has(e.id) && !ownKeys.has(e.key)).flatMap(e => e.records)
+  const all = new Set([...acked, ...markedIdsOf(own), ...markedIdsOf(stored)])
+
+  return applyAcks([...foreign, ...own], all).slice(-ALERT_CAP)
+}
+
+export type Digest = {
+  recorded: number; unacked: number
+  levels: Record<Level, number>
+  open: number; history: number
+  deferred: number; notSent: number; held: number
+  oldest: Occurrence | null
+}
+/** The unacknowledged occurrences counted: by level, open or historical, by what became of the notification, and the oldest. Deterministic, from the records. */
+export const digestOf2 = (occ: readonly Occurrence[]): Digest => {
+  const un = occ.filter(o => !o.acked)
+  const oldest = [...un].sort((a, b) => a.at - b.at || a.seq - b.seq)[0] ?? null
+
+  return {
+    recorded: occ.length, unacked: un.length,
+    levels: { CRITICAL: un.filter(o => o.level === 'CRITICAL').length, HIGH: un.filter(o => o.level === 'HIGH').length, NORMAL: un.filter(o => o.level === 'NORMAL').length },
+    open: un.filter(o => o.state === 'open').length, history: un.filter(o => o.state !== 'open').length,
+    deferred: un.filter(o => o.status === 'deferred').length, notSent: un.filter(o => o.status === 'not-sent').length, held: un.filter(o => o.status === 'held').length,
+    oldest,
+  }
+}
+/** `/cockpit alerts digest`. Counts only: no id, key, path or text from a record beyond its moment. Says what was recorded, never what anyone saw. */
+export const digestText = (occ: readonly Occurrence[], now: number, enabled: boolean): string => {
+  const d = digestOf2(occ)
+  const lines: string[] = []
+  if (d.recorded === 0) lines.push('ALERT DIGEST · nothing recorded.')
+  else if (d.unacked === 0) lines.push(`ALERT DIGEST · nothing unacknowledged of ${d.recorded} recorded.`)
+  else {
+    lines.push(`ALERT DIGEST · ${d.unacked} unacknowledged of ${d.recorded} recorded`)
+    lines.push(`By level: CRITICAL ${d.levels.CRITICAL} · HIGH ${d.levels.HIGH} · NORMAL ${d.levels.NORMAL}`)
+    lines.push(`Condition open now: ${d.open} · no longer open (history): ${d.history}`)
+    const notes = [d.deferred > 0 ? `${d.deferred} DEFERRED, quiet hours` : '', d.notSent > 0 ? `${d.notSent} NOT SENT` : '', d.held > 0 ? `${d.held} HELD BACK, cooldown or budget` : ''].filter(n => n !== '')
+    if (notes.length > 0) lines.push(`Notifications: ${notes.join(' · ')}`)
+    if (d.oldest !== null) lines.push(`Oldest unacknowledged: recorded ${stamp(d.oldest.at)}${ageOf(now - d.oldest.at)}`)
+    lines.push('These are records of what Cockpit wrote and what the host reported; they say nothing about what anyone saw.')
+  }
+  if (!enabled) lines.push('Alerts are off (guardAlerts): this is what was recorded earlier; nothing new is recorded or sent.')
+  lines.push('Details: /cockpit alerts · acknowledge one: /cockpit alerts ack <id>')
+
+  return lines.join('\n')
+}
+/** The one line shown once at the start of a session when `guardDigest` is on; null when there is nothing unacknowledged. */
+export const digestToast = (occ: readonly Occurrence[]): string | null => {
+  const d = digestOf2(occ)
+  if (d.unacked === 0) return null
+  const lv = (['CRITICAL', 'HIGH', 'NORMAL'] as const).filter(l => d.levels[l] > 0).map(l => `${d.levels[l]} ${l}`).join(', ')
+
+  return `Cobalt alerts: ${d.unacked} unacknowledged recorded (${lv}) · /cockpit alerts digest`
 }
 
 const stamp = (at: number): string => {

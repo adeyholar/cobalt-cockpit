@@ -1,4 +1,4 @@
-# Cobalt Cockpit v0.5.7 — Elastic Swarm + Adaptive Intelligence
+# Cobalt Cockpit v0.5.8 — Elastic Swarm + Adaptive Intelligence
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
@@ -117,7 +117,7 @@ A `--plugin-dir` copy stops loading when you omit the flag next session.
 | `/cockpit stats` / `/cockpit stats 7d\|30d\|all [--json\|--csv]` | Print the local model telemetry for a window; reads the telemetry files and nothing else |
 | `/cockpit doctor` | Read-only installation, host, Auto-mode, telemetry-storage and prompt-cache diagnostics |
 | `/cockpit guard` / `/cockpit guard ack\|silence\|unsilence\|trust [hash]\|untrust\|release` | Owner-alert status (open conditions, reminders used, persistence and sound, notification transport), acknowledgment and silence, and the Stop guard's script enrollment and release (typed by a person only) |
-| `/cockpit alerts [page]` / `/cockpit alerts ack <id>` | The alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; acknowledge exactly one occurrence. Person-only to acknowledge; changes no gate, hold, review, approval or verdict |
+| `/cockpit alerts [page]` / `/cockpit alerts digest` / `/cockpit alerts ack <id>` | The alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; acknowledge exactly one occurrence. Person-only to acknowledge; changes no gate, hold, review, approval or verdict |
 | `/cockpit guard test [sound]` / `/cockpit guard seen [code]` | Send one labelled TEST notification (and optionally the alert sound), then record that you saw it. Typed by a person only; changes no alert, budget, gate or approval |
 | `/cockpit flow` | Print the Neural Flow row in words |
 | `/ledger` | Open local Run Ledger |
@@ -262,6 +262,13 @@ HISTORY (recorded earlier; the condition no longer holds)
 - **Occurrences.** A condition that clears and holds again is a new occurrence with its own id, told again inside the cooldown, the session budget and the retry cap (v0.5.6 did this only with `guardRepeat` on). A new task with the same number is a different occurrence: ids come from the task's identity, not its number.
 - **Recovery.** The records are in the Run Ledger and, per project (a hash of the directory), in a bounded plugin-store key, so a new session in the same project lists them. Nothing is announced again because a session restarted: what was told stays told, and only what was owed (held back by quiet hours) is still owed. The newest 32 records of up to four projects are kept; older ones expire.
 - **HUD.** Open conditions are pinned as before. When recorded alerts no longer hold and were never acknowledged, the row says `GUARD: ARMED · 2 unacknowledged in history · /cockpit alerts` until you acknowledge them. It shortens to fit and never animates.
+
+#### Shared history, the digest, and notifications off (v0.5.8)
+
+- **What is shared, and how far it can be trusted.** Claude Code's plugin store is one JSON file per plugin. Its `set` and `delete` each take a file lock, read the whole file inside it, change one key and write, so one session's `set` is serialised against another's while the lock holds (a contended `set` can be rejected) and a `set` of one key never changes another. This was read from the host's implementation, not from its documentation. It has no compare-and-set and no transaction: reading a key and then writing it back is two steps another session can fall between. Cockpit therefore keeps an **acknowledgment as a key of its own** (`alert-ack:<project>:<id>`), written once with a fixed value and never read back and rewritten. No other write can undo it, and two sessions acknowledging the same occurrence write the same thing. Other sessions find it with the store's key list and mark their own records. The **records** are kept per project in `alert-history:<project>` by a read, a merge and a write; that part is last-writer-wins, so a record written by one session between another's read and write can be missing from the stored history (never from that session's own Ledger). It cannot take an acknowledgment with it. A session that has not looked since another acknowledged shows the occurrence unacknowledged until its next look: the next tool call, command or 30-second timer, and its reminders stop then.
+- **`/cockpit alerts digest`** prints a few lines computed from the records: unacknowledged occurrences by level, how many hold now and how many are history, how many notifications were deferred, not sent or held back, and when the oldest was recorded. It holds no id, key or text from a record, and says what was recorded, never what anyone saw.
+- **`guardDigest`** (Cockpit settings, off by default, person-only) shows a one-line count by level when a session starts, if anything is unacknowledged: once per session (a plugin reload does not repeat it; a resumed session gets it again unless it was shown within half an hour), no desktop notification, no model call.
+- **Notifications off.** With `guardAlerts` off, `/cockpit alerts`, `/cockpit alerts digest`, acknowledgment and `guardDigest` still work on history recorded earlier. Nothing new is recorded or sent, no notification is turned on, and a user who never had alerts on keeps no history and no project tie.
 
 ### Alert priorities, quiet hours and the pinned alert row (v0.5.6)
 

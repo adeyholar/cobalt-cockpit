@@ -33,6 +33,8 @@ const guardRow = async ($: any, columns = 120) => (await rowsOf(await mountHud($
 const armed = (extra: Record<string, unknown> = {}) => ({ options: { guardAlerts: true, guardCooldownSec: 30, guardMaxAlerts: 20, ...extra } })
 const session = (on: any, id = 's1') => on('session.id', () => ({ value: id }))
 const KEEP = 'alert-history'
+const HIST = (project: string): string => `alert-history:${project}`
+const ACK = (project: string, id: string): string => `alert-ack:${project}:${id}`
 const lastStored = (w: ReturnType<typeof world>, key: string): any => w.storeWrites.filter(s => s.key === key).at(-1)?.value
 const blockedTask = (): Task => {
   let t = newTask(1, 'goal', 100, null)
@@ -76,7 +78,11 @@ describe('occurrence identity', () => {
     const k = K('u1', 'run-blocked', 'task')
     let kept = written(rec(k, { outcome: 'throttled', channel: null, attempts: 0, why: 'cooldown' }), rec(k, { at: 2000 }))
     const id = kept[0]!.id
-    for (let i = 0; i < ALERT_CAP; i++) kept = bounded(kept, rec(K('u1', 'review-hold', `r${i}`), { kind: 'review-hold', at: 3000 + i, outcome: 'throttled', channel: null, attempts: 0, why: 'budget' }))
+    // each filler condition has two records, so its held-back one may go, and the first of this occurrence goes with them
+    for (let i = 0; i < 20; i++) {
+      const fk = K('u1', 'review-hold', `r${i}`)
+      kept = bounded(bounded(kept, rec(fk, { kind: 'review-hold', at: 3000 + i, outcome: 'throttled', channel: null, attempts: 0, why: 'budget' })), rec(fk, { kind: 'review-hold', at: 3500 + i }))
+    }
     const mine = episodesOf(kept).find(e => e.key === k)!
     expect(mine.id).toBe(id)
     expect(kept.length).toBeLessThanOrEqual(ALERT_CAP)
@@ -460,11 +466,11 @@ describe('recovery: restart, reload and project switch', () => {
     await start($); await planAndComplete($, 1); await block($)
     const l = ledger(held)
     expect(l.alertsProject).toMatch(/^[0-9a-f]{12}$/)
-    const stored = lastStored(w, KEEP)
+    const stored = lastStored(w, HIST(l.alertsProject!))
     expect(stored.v).toBe(1)
-    expect(Object.keys(stored.projects)).toEqual([l.alertsProject])
-    expect(JSON.stringify(stored)).not.toContain('/work/example')
-    expect(stored.projects[l.alertsProject!]).toEqual(l.alerts)
+    expect(stored.alerts).toEqual(l.alerts)
+    // the key and the value carry a hash and ids, never the directory
+    expect(JSON.stringify(w.storeWrites.filter(s => s.key.startsWith('alert-')))).not.toContain('/work/example')
   })
   test('a new session of the same project finds the history, and sends nothing for it', q, async ($, on) => {
     // a new session: another id, an empty Ledger, no task, the same project and store
@@ -498,9 +504,9 @@ describe('recovery: restart, reload and project switch', () => {
     const w = world(on, {}, { [KEEP]: { v: 1, projects: { [project]: newer } }, 'ledger:s1': { ...emptyLedger('s1'), alertsProject: project, alerts: older } }); const held = hostState(on, {}); session(on, 's1')
     await start($); await planAndComplete($, 1); await block($)
     // this session records something new; the newer session's occurrences are still in the project's history
-    const stored = lastStored(w, KEEP)
+    const stored = lastStored(w, HIST(project))
     expect(stored).toBeDefined()
-    const keys = stored.projects[project].map((r: AlertRecord) => r.key)
+    const keys = stored.alerts.map((r: AlertRecord) => r.key)
     expect(keys).toContain('8@8:run-blocked:task')
     expect(keys).toContain('9@9:security-failure:SECURITY')
     expect(ledger(held).alerts!.map(r => r.key)).not.toContain('8@8:run-blocked:task')
@@ -512,21 +518,23 @@ describe('recovery: restart, reload and project switch', () => {
     await start($); await planAndComplete($, 1); await block($)
     const l = ledger(held)
     expect(l.alerts!.slice(0, 1)).toEqual(earlier)
-    expect(lastStored(w, KEEP).projects[l.alertsProject!]).toEqual(l.alerts)
+    expect(lastStored(w, HIST(l.alertsProject!)).alerts).toEqual(l.alerts)
   })
-  test('history of several projects is kept side by side, bounded to four, the oldest forgotten first', q, async ($, on) => {
-    const many: Record<string, AlertRecord[]> = {}
-    for (let i = 0; i < 6; i++) many[`${i}`.repeat(12)] = written(rec(`p${i}:run-blocked:task`))
-    const w = world(on, {}, { [KEEP]: { v: 1, projects: many } }); hostState(on, {}); session(on)
+  test('history of several projects is kept in keys of their own, bounded to four, the oldest forgotten first', q, async ($, on) => {
+    const seed: Record<string, unknown> = {}
+    for (let i = 0; i < 6; i++) seed[HIST(`${i}`.repeat(12))] = { v: 1, alerts: written(rec(`p${i}:run-blocked:task`)) }
+    const w = world(on, {}, seed); hostState(on, {}); session(on)
     await start($); await planAndComplete($, 1); await block($)
-    const stored = lastStored(w, KEEP)
-    expect(Object.keys(stored.projects).length).toBeLessThanOrEqual(4)
-    expect(Object.keys(stored.projects)).not.toContain('000000000000')
+    const keys = [...w.store.keys()]
+    const histories = keys.filter(k => k.startsWith('alert-history:'))
+    expect(histories.length).toBeLessThanOrEqual(4)
+    expect(histories).not.toContain(HIST('000000000000'))
+    expect(w.storeWrites.some(s => s.key === KEEP)).toBe(false)
   })
   const DAMAGED: [string, unknown][] = [['text', 'text'], ['a number', 7], ['null', null], ['an array', []], ['another version', { v: 2, projects: {} }], ['projects not an object', { v: 1, projects: 'x' }], ['bad names and records', { v: 1, projects: { '../etc': [rec('k')], abcdefabcdef: [{ key: 7 }, null, { ...rec('k'), outcome: 'postponed' }] } }]]
   for (const [name, bad] of DAMAGED) {
     test(`a damaged project history (${name}) is ignored: nothing is believed, nothing throws`, q, async ($, on) => {
-      const w = world(on, {}, { [KEEP]: bad }); hostState(on, {}); session(on)
+      const w = world(on, {}, { [KEEP]: bad, [HIST('abcdefabcdef')]: bad }); hostState(on, {}); session(on)
       await start($)
       expect(await say($, 'alerts')).toContain('Nothing recorded.')
       expect(w.notified).toEqual([])
@@ -572,8 +580,8 @@ describe('recovery: restart, reload and project switch', () => {
       await w.clock.advance(31_000)
     }
     expect((ledger(held).alerts ?? []).length).toBeLessThanOrEqual(ALERT_CAP)
-    const stored = lastStored(w, KEEP)
-    expect(stored.projects[ledger(held).alertsProject!].length).toBeLessThanOrEqual(ALERT_CAP)
+    const stored = lastStored(w, HIST(ledger(held).alertsProject!))
+    expect(stored.alerts.length).toBeLessThanOrEqual(ALERT_CAP)
     expect(JSON.stringify(stored).length).toBeLessThan(40_000)
     expect(ids(await say($, 'alerts')).length).toBeLessThanOrEqual(INBOX_PAGE)
   })

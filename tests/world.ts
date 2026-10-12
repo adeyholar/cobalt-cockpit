@@ -155,6 +155,8 @@ export type World = {
   /** Every value the plugin handed to `$.store.set`, in order: what it persisted
    * beyond the session, so a test can read back a stored ledger. */
   storeWrites: { key: string; value: unknown }[]
+  /** What the plugin's store holds now: a test reads it, and writes to it as another session would. */
+  store: Map<string, unknown>
   /** Durable store keys whose write raises an error, for persistence recovery tests. */
   failStoreWrites: string[]
   /** Runs inside a process call, before it answers: a host event racing a process (a command typed while a router request is in flight). */
@@ -246,6 +248,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     configured: [],
     outbound: [],
     storeWrites: [],
+    store: new Map(),
     failStoreWrites: [],
     duringToolCall: null,
     duringRun: null,
@@ -263,7 +266,13 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
     return next(e)
   })
-  mock.store(on, stored)
+  // The store is held here, as the engine keeps a plugin's own, so a test can read it and can write to it as another session would.
+  const data = new Map<string, unknown>(Object.entries(stored).map(([k, v]) => [k, JSON.parse(JSON.stringify(v)) as unknown]))
+  w.store = data
+  on('store.get', (_$, e) => ({ value: data.has(e.key) ? JSON.parse(JSON.stringify(data.get(e.key))) as unknown : undefined }))
+  on('store.set', (_$, e) => { data.set(e.key, JSON.parse(JSON.stringify(e.value))); return { value: undefined } })
+  on('store.delete', (_$, e) => { data.delete(e.key); return { value: undefined } })
+  on('store.keys', () => ({ value: [...data.keys()] }))
   mock.env(on, { HOME: '/home/tester', ...w.env })
 
   on('session.version', () => ({ value: { version: w.version, base: w.version } }))
