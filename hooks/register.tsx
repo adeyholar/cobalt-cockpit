@@ -45,7 +45,9 @@ import { ASSETS, PLAYERS, PLAY_TIMEOUT_MS, clampVolume } from './audio'
 import type { Player } from './audio'
 import { EMPTY_LOG, EVENT_TTL_MS, callOf, closeOf, liveOf, push } from './activity'
 import { activityOf, readBash } from './classify'
-import { parseStatus, projectOf } from './git'
+import { parseStatus, projectOf, filterCommands, activeFilter } from './git'
+import { GIT_SAFE, commitEntries } from './git-integrity'
+import type { CommitEntry, DiskEntry, Measurement } from './git-integrity'
 import { assessCommand } from './guard'
 import {
   addedAttribution,
@@ -59,7 +61,7 @@ import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
 import { EMPTY_GUARD, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, dueOf, guardConfigOf, guardText, labelOf as guardLabel, messageOf as alertMessage } from './alerts'
 import type { GuardConfig } from './alerts'
-import { uidOf, attemptsOf, boundedChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
+import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
 import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
 import { basename, parseShell, unwrap } from './shell'
@@ -124,7 +126,7 @@ import {
 } from './orchestra'
 import type { OrchestraView } from './orchestra'
 import { BLOCK_DENY, BLOCK_LINE, EMPTY_POLICY, FABLE_RULE, answered, blocked, fableConfigured, fableRoute, isFable } from './policy'
-import { isPersonOrigin } from './origin'
+import { isHumanAuthority, isPersonOrigin } from './origin'
 import { agentsOf, readCache } from './cache'
 import type { CacheReading } from './cache'
 import { doctorText, shown as shownPath } from './doctor'
@@ -256,17 +258,180 @@ const finishObserved = (s: Swarm, id: string, reason: string, conclusion: string
  * commit says nothing of changes that are not in it. `dirty` is a real difference; `unknown` is git failing.
  */
 type Candidate = { sha: string } | { sha: null; why: 'dirty' | 'unknown' }
+/** Match Git's root + relative prefix to the actual session directory. A linked worktree or a session
+ * below the root is valid; core.worktree / environment redirection to a different directory is not. */
+const verifiedGitRoot = async ($: EngineInterface): Promise<string | null> => {
+  const intended = await $.session.cwd()
+  if (!intended) return null
+  const top = await $.process.run(['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd: intended, timeoutMs: GIT_TIMEOUT_MS })
+  const prefix = await $.process.run(['git', ...GIT_SAFE, 'rev-parse', '--show-prefix'], { cwd: intended, timeoutMs: GIT_TIMEOUT_MS })
+  if (top.exitCode !== 0 || prefix.exitCode !== 0 || top.isStdoutTruncated || prefix.isStdoutTruncated || top.isStderrTruncated || prefix.isStderrTruncated || top.stderr.trim() !== '' || prefix.stderr.trim() !== '') return null
+  const root = top.stdout.replace(/\n$/, '')
+  const relative = prefix.stdout.replace(/\n$/, '')
+  if (!root.startsWith('/') || relative.startsWith('/') || relative.split('/').some(part => part === '..' || part === '.')) return null
+  const actual = await $.process.run(['realpath', '-e', '--', intended], { timeoutMs: GIT_TIMEOUT_MS })
+  const reported = await $.process.run(['realpath', '-e', '--', `${root}/${relative}`], { timeoutMs: GIT_TIMEOUT_MS })
+  if (actual.exitCode !== 0 || reported.exitCode !== 0 || actual.isStdoutTruncated || reported.isStdoutTruncated || actual.isStderrTruncated || reported.isStderrTruncated || actual.stderr.trim() !== '' || reported.stderr.trim() !== '') return null
+  const canonical = (value: string) => value.replace(/\n$/, '').replace(/\/+$/, '') || '/'
+  return canonical(actual.stdout) === canonical(reported.stdout) ? root : null
+}
+/** Check attributes before status/diff can run a repository-controlled clean/process command. The effective
+ * command value wins; dormant filters (for example globally installed LFS) do not make ordinary trees unknown. */
+const gitFiltersReliable = async ($: EngineInterface, top: string, committed: string[] = []): Promise<boolean> => {
+  const cfg = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'config', '--null', '--get-regexp', '^filter\\..*\\.(clean|process)$'], { timeoutMs: GIT_TIMEOUT_MS })
+  if (cfg.isStdoutTruncated || cfg.isStderrTruncated || cfg.stderr.trim() !== '' || (cfg.exitCode !== 0 && cfg.exitCode !== 1)) return false
+  if (cfg.exitCode === 1) return cfg.stdout === ''
+  const drivers = filterCommands(cfg.stdout)
+  if (drivers === null) return false
+  if (drivers.size === 0) return true
+  const tree = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'ls-tree', '-r', '-z', '--full-tree', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS })
+  const base = gitAnswered(tree) ? commitEntries(tree.stdout) : null
+  if (base === null) return false
+  const paths = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'ls-files', '-z'], { timeoutMs: GIT_TIMEOUT_MS })
+  if (paths.exitCode !== 0 || paths.isStdoutTruncated || paths.isStderrTruncated || paths.stderr.trim() !== '') return false
+  if (paths.stdout !== '' && !paths.stdout.endsWith('\0')) return false
+  const all = [...new Set([...paths.stdout.split('\0').filter(Boolean), ...base.map(e => e.path), ...committed])]
+  if (all.length > 100_000) return false
+  for (let i = 0; i < all.length; i += HASH_CHUNK) {
+    const names = all.slice(i, i + HASH_CHUNK).join('\0') + '\0'
+    const attrs = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'check-attr', '-z', '--stdin', 'filter'], { stdin: names, timeoutMs: GIT_TIMEOUT_MS })
+    if (attrs.exitCode !== 0 || attrs.isStdoutTruncated || attrs.isStderrTruncated || attrs.stderr.trim() !== '' || activeFilter(attrs.stdout, drivers, names) !== false) return false
+  }
+  return true
+}
+const gitAnswered = (r: { exitCode: number | null; stdout: string; stderr: string; isStdoutTruncated: boolean; isStderrTruncated: boolean }) =>
+  r.exitCode === 0 && !r.isStdoutTruncated && !r.isStderrTruncated && r.stderr.trim() === ''
+const hashesOf = (text: string, count: number): string[] | null => {
+  const hashes = text.split('\n').filter(Boolean)
+  return hashes.length === count && hashes.every(x => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(x)) ? hashes : null
+}
+
+/** Read every intended tracked file even if status, diff, and the index's dirty listing all say clean. */
+const measureCommit = async ($: EngineInterface, root: string, sha: string): Promise<Measurement> => {
+  try {
+    const began = await $.clock.now()
+    const git = (args: string[], stdin?: string) => $.process.run(['git', ...GIT_SAFE, '-C', root, ...args], { timeoutMs: GIT_TIMEOUT_MS, ...(stdin === undefined ? {} : { stdin }) })
+    const tree = await git(['ls-tree', '-r', '-z', '--full-tree', sha])
+    const entries = gitAnswered(tree) ? commitEntries(tree.stdout) : null
+    if (entries === null) return { why: 'the intended commit tree is unreadable, malformed or exceeds the tracked-file limit' }
+    if (entries.some(e => e.mode === '160000')) return { why: 'a submodule needs independent nested-tree verification; its index/status alone is insufficient' }
+    const out: DiskEntry[] = []
+    let regularLinks: boolean | undefined
+    for (let i = 0; i < entries.length; i += HASH_CHUNK) {
+      if (await $.clock.now() - began > FINGERPRINT_BUDGET_MS) return { why: 'tracked-file measurement exceeded its time budget' }
+      const chunk = entries.slice(i, i + HASH_CHUNK)
+      const paths = chunk.map(e => `./${e.path}`)
+      let stat = await $.process.run(['stat', '--printf', '%f\\0', '--', ...paths], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
+      let modes = gitAnswered(stat) && stat.stdout.endsWith('\0') ? stat.stdout.split('\0').slice(0, -1).map(x => /^[0-9a-f]+$/.test(x) ? parseInt(x, 16) : NaN) : []
+      if (!gitAnswered(stat)) {
+        stat = await $.process.run(['stat', '-f', '%p', '--', ...paths], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
+        modes = gitAnswered(stat) ? stat.stdout.trimEnd().split('\n').map(x => /^[0-7]+$/.test(x) ? parseInt(x, 8) : NaN) : []
+      }
+      if (modes.length !== chunk.length || modes.some(x => !Number.isSafeInteger(x))) {
+        // A missing tracked file is a known deletion; a permission or partial-read failure is UNKNOWN.
+        modes = []
+        for (const path of paths) {
+          if (await $.clock.now() - began > FINGERPRINT_BUDGET_MS) return { why: 'tracked-file measurement exceeded its time budget' }
+          let one = await $.process.run(['stat', '--printf', '%f\\0', '--', path], { cwd: root, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } })
+          if (gitAnswered(one) && /^[0-9a-f]+\0$/.test(one.stdout)) modes.push(parseInt(one.stdout, 16))
+          else if (one.exitCode !== 0 && !one.isStderrTruncated && /No such file or directory/.test(one.stderr)) modes.push(0)
+          else {
+            one = await $.process.run(['stat', '-f', '%p', '--', path], { cwd: root, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } })
+            if (gitAnswered(one) && /^[0-7]+\n$/.test(one.stdout)) modes.push(parseInt(one.stdout, 8))
+            else if (one.exitCode !== 0 && !one.isStderrTruncated && /No such file or directory/.test(one.stderr)) modes.push(0)
+            else return { why: 'tracked files could not be inspected completely' }
+          }
+        }
+      }
+      const regular = chunk.filter((_, n) => (modes[n]! & 0xf000) === 0x8000)
+      const read = regular.length ? await git(['hash-object', '--no-filters', '--', ...regular.map(e => `./${e.path}`)]) : null
+      const hashes = read === null ? [] : gitAnswered(read) ? hashesOf(read.stdout, regular.length) : null
+      if (hashes === null) return { why: 'tracked working-tree bytes could not be hashed completely' }
+      let at = 0
+      for (let n = 0; n < chunk.length; n++) {
+        if (await $.clock.now() - began > FINGERPRINT_BUDGET_MS) return { why: 'tracked-file measurement exceeded its time budget' }
+        const e = chunk[n]!, type = modes[n]! & 0xf000
+        if (type === 0x8000) {
+          let isSameType = e.mode !== '120000'
+          if (!isSameType) {
+            if (regularLinks === undefined) {
+              const config = await git(['config', '--bool', '--get', 'core.symlinks'])
+              regularLinks = gitAnswered(config) && config.stdout.trim() === 'false'
+            }
+            isSameType = regularLinks
+          }
+          out.push({ ...e, raw: hashes[at++]!, isSameType, diskMode: modes[n]! & 0o111 ? '100755' : '100644' })
+        } else if (type === 0xa000) {
+          // Hash the link target, not the file it leads to; Git commits the target's bytes.
+          let link = await $.process.run(['readlink', '-z', '--', `./${e.path}`], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
+          if (!gitAnswered(link)) {
+            const fallback = await $.process.run(['readlink', `./${e.path}`], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
+            if (!gitAnswered(fallback) || !fallback.stdout.endsWith('\n')) return { why: 'a tracked symbolic link could not be read reliably' }
+            link = { ...fallback, stdout: fallback.stdout.slice(0, -1) + '\0' }
+          }
+          if (!gitAnswered(link) || !link.stdout.endsWith('\0') || link.stdout.length > 4096 || link.stdout.slice(0, -1).includes('\0')) return { why: 'a tracked symbolic link could not be read reliably' }
+          const hash = await git(['hash-object', '--no-filters', '--stdin'], link.stdout.slice(0, -1))
+          const got = gitAnswered(hash) ? hashesOf(hash.stdout, 1) : null
+          if (got === null) return { why: 'a tracked symbolic link could not be hashed' }
+          out.push({ ...e, raw: got[0]!, isSameType: e.mode === '120000', diskMode: '120000' })
+        } else if (type === 0) {
+          out.push({ ...e, raw: '', isSameType: false, diskMode: 'missing' })
+        } else return { why: 'a tracked path is not an ordinary file or symbolic link' }
+      }
+    }
+    return await $.clock.now() - began > FINGERPRINT_BUDGET_MS ? { why: 'tracked-file measurement exceeded its time budget' } : { entries: out }
+  } catch { return { why: 'tracked-content verification failed or timed out' } }
+}
+
+/** Called only after effective external clean/process filters have been ruled out for all commit paths.
+ * Native Git EOL/encoding normalization remains supported without trusting cached index content. */
+const matchesCommit = async ($: EngineInterface, root: string, entries: DiskEntry[]): Promise<boolean | null> => {
+  const began = await $.clock.now()
+  if (entries.some(e => !e.isSameType)) return false
+  if (entries.some(e => e.mode !== '120000' && e.diskMode !== undefined && e.diskMode !== e.mode)) {
+    const config = await $.process.run(['git', ...GIT_SAFE, '-C', root, 'config', '--bool', '--get', 'core.filemode'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+    if (config === null || config.isStdoutTruncated || config.isStderrTruncated || config.stderr.trim() !== '' || ![0, 1].includes(config.exitCode ?? -1)) return null
+    if (config.exitCode === 1 || config.stdout.trim() === 'true') return false
+    if (config.stdout.trim() !== 'false') return null
+  }
+  const changed = entries.filter(e => e.raw !== e.oid)
+  if (changed.some(e => e.mode === '120000')) return false
+  for (let i = 0; i < changed.length; i += HASH_CHUNK) {
+    if (await $.clock.now() - began > FINGERPRINT_BUDGET_MS) return null
+    const chunk = changed.slice(i, i + HASH_CHUNK)
+    const r = await $.process.run(['git', ...GIT_SAFE, '-C', root, 'hash-object', '--', ...chunk.map(e => `./${e.path}`)], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+    const hashes = r !== null && gitAnswered(r) ? hashesOf(r.stdout, chunk.length) : null
+    if (hashes === null) return null
+    if (chunk.some((e, n) => hashes[n] !== e.oid)) return false
+  }
+  return await $.clock.now() - began > FINGERPRINT_BUDGET_MS ? null : true
+}
+
 const candidateOf = async ($: EngineInterface): Promise<Candidate> => {
   try {
-    const run = (argv: string[]) => $.process.run(['git', '--no-optional-locks', ...argv], { timeoutMs: GIT_TIMEOUT_MS })
+    const top = await verifiedGitRoot($)
+    if (top === null || !(await gitFiltersReliable($, top))) return { sha: null, why: 'unknown' }
+    const run = (argv: string[]) => $.process.run(['git', ...GIT_SAFE, '-C', top, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
     const head = await run(['rev-parse', '--verify', 'HEAD'])
-    if (head.exitCode !== 0 || head.isStdoutTruncated) return { sha: null, why: 'unknown' }
-    const status = await run(['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'])
-    if (status.exitCode !== 0 || status.isStdoutTruncated) return { sha: null, why: 'unknown' }
-    if (status.stdout.trim() !== '') return { sha: null, why: 'dirty' }
+    if (head.exitCode !== 0 || head.isStdoutTruncated || head.isStderrTruncated || head.stderr.trim() !== '') return { sha: null, why: 'unknown' }
     const sha = head.stdout.trim()
-
-    return isCandidate(sha) ? { sha } : { sha: null, why: 'unknown' }
+    if (!isCandidate(sha)) return { sha: null, why: 'unknown' }
+    const measured = await measureCommit($, top, sha)
+    if ('why' in measured || !(await gitFiltersReliable($, top, measured.entries.map(e => e.path)))) return { sha: null, why: 'unknown' }
+    const matches = await matchesCommit($, top, measured.entries)
+    if (matches === null) return { sha: null, why: 'unknown' }
+    if (!matches) return { sha: null, why: 'dirty' }
+    const status = await run(['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'])
+    if (status.exitCode !== 0 || status.isStdoutTruncated || status.isStderrTruncated || status.stderr.trim() !== '') return { sha: null, why: 'unknown' }
+    if (status.stdout.trim() !== '') return { sha: null, why: 'dirty' }
+    // `status` does not see a path the index is told to ignore: assume-unchanged (a lowercase tag) or skip-worktree (S or s). A flagged
+    // path can hide a change, so the tree is not shown clean; an unreadable listing is no answer either.
+    const flags = await run(['ls-files', '-v', '-z'])
+    if (flags.exitCode !== 0 || flags.isStdoutTruncated || flags.isStderrTruncated || flags.stderr.trim() !== '') return { sha: null, why: 'unknown' }
+    if (flags.stdout.split('\0').some(entry => /^[a-zSs] /.test(entry))) return { sha: null, why: 'unknown' }
+    const finalHead = await run(['rev-parse', '--verify', 'HEAD'])
+    if (finalHead.exitCode !== 0 || finalHead.isStdoutTruncated || finalHead.isStderrTruncated || finalHead.stderr.trim() !== '' || finalHead.stdout.trim() !== sha) return { sha: null, why: 'unknown' }
+    return { sha }
   } catch {
     return { sha: null, why: 'unknown' }
   }
@@ -322,8 +487,7 @@ const syncRelease = async ($: EngineInterface): Promise<void> => {
 /**
  * A release approval stands only for the commit it was given for, on a clean tree: a change takes it back, and the
  * same commit, clean again, gives it back from the stored record of a verified GO (`revalidateRelease`). A git that
- * does not answer grants nothing and restores nothing; an approval already held is kept, since nothing shows it moved,
- * and the stored records are never touched.
+ * does not answer suspends current clearance; the stored historical records are never touched.
  */
 const reconcileRelease = async ($: EngineInterface): Promise<void> => {
   const task = await read($, taskAtom)
@@ -504,9 +668,22 @@ const readOnlyShell = (command: string): boolean => {
     if (!parsed.pipelines.length || parsed.substitutions.length) return false
     return parsed.pipelines.every(p => p.commands.every(c => {
       const r = unwrap(c.argv)
-      return !!r && r.program === 'git' && ['diff','status','log','show','ls-files','rev-parse','grep'].includes(r.args[0] ?? '') && !r.args.some(a=>a === '-c' || a.startsWith('--output') || a === '--exec' || a === '--help' || a === '-h' || a.startsWith('--open') || a.startsWith('-O') || a.startsWith('--out') || a.startsWith('--ext') || a.startsWith('--text')) && r.wrappers.length === 0 && c.argv[0] === 'git'
+      return !!r && r.program === 'git' && ['diff','status','log','show','ls-files','rev-parse','grep'].includes(r.args[0] ?? '') && !r.args.some(a=>a.includes('%G') || (a.startsWith('--') && ['--show-signature', '--pretty', '--format'].some(option => option.startsWith(a.split('=')[0]!))) || a === '-c' || a.startsWith('--output') || a === '--exec' || a === '--help' || a === '-h' || a.startsWith('--open') || a.startsWith('-O') || a.startsWith('--out') || a.startsWith('--ext') || a.startsWith('--text')) && r.wrappers.length === 0 && c.argv[0] === 'git'
     }))
   } catch { return false }
+}
+/** Rebuild accepted literal Git inspections so quoted arguments stay data and every invocation carries safe flags. */
+const safeGitInspection = (command: string): string => {
+  const quote = (word: string) => `'${word.replace(/'/g, "'\\''")}'`
+  return parseShell(command).pipelines.map(p => {
+    const pipeline = p.commands.map(c => {
+      const args = c.argv.slice(1)
+      const sub = args.shift()!
+      const noDrivers = ['diff', 'show', 'log'].includes(sub) ? ['--no-ext-diff', '--no-textconv'] : []
+      return ['git', '--no-pager', ...GIT_SAFE, sub, ...noDrivers, ...args].map(quote).join(' ')
+    }).join(' | ')
+    return pipeline + (p.next === null ? '' : ` ${p.next} `)
+  }).join('')
 }
 /**
  * Sets the reasoning level on an Agent call natively, on the tool's own
@@ -1449,7 +1626,7 @@ const checksOf = async ($: EngineInterface): Promise<CheckRecord[]> => {
     if (n > (inLedger.get(k) ?? 0)) missing.push(c)
   }
 
-  return [...missing, ...mine].map((c, i) => ({ c, i })).sort((a, b) => a.c.at - b.c.at || a.i - b.i).map(x => x.c).slice(-24)
+  return retainChecks([...missing, ...mine].map((c, i) => ({ c, i })).sort((a, b) => a.c.at - b.c.at || a.i - b.i).map(x => x.c))
 }
 const keepCheck = async ($: EngineInterface, rec: CheckRecord): Promise<void> => {
   await update($, ledgerAtom, old => ({ ...old, stopChecks: boundedChecks(old.stopChecks ?? [], rec) }))
@@ -1518,9 +1695,12 @@ const refreshGit = async ($: EngineInterface): Promise<void> => {
   try {
     const now = await $.clock.now()
     cwd = await $.session.cwd()
-    const status = await $.process.run(['git', ...GIT_SAFE, 'status', '--porcelain=v2', '--branch'], {
+    const root = await verifiedGitRoot($)
+    // HUD reads must not run repository-controlled clean/process filters either.
+    const reliable = root !== null && await gitFiltersReliable($, root)
+    const status = reliable ? await $.process.run(['git', ...GIT_SAFE, '-C', root!, 'status', '--porcelain=v2', '--branch'], {
       timeoutMs: GIT_TIMEOUT_MS,
-    })
+    }) : { exitCode: 128, stdout: '' }
     const old = await read($, gitAtom)
     let state: GitState
     if (status.exitCode !== 0) {
@@ -1703,7 +1883,7 @@ const selectRouter = async ($: EngineInterface, mode: RouterMode): Promise<strin
   return [
     `ROUTER / ${routerLabel(now)}${isUp ? ` · ${detail}` : ''}`,
     mode === 'JEV'
-      ? `JEV is the TypeSafe API, reached through the local decision router${dir.dir !== null ? ` with the router configuration at ${dir.dir} (routerConfigDir)` : dir.refused !== null ? ` under its own JEV switch: routerConfigDir was NOT used because ${dir.refused}` : ' under its own JEV switch (no routerConfigDir is set)'}. Each prompt you submit outside a planned task counts as a new task: when the rules do not settle it, its first 400 characters are sent to JEV in ten small requests. Nothing else is sent, and a prompt in which credential-shaped text is recognised is withheld (a pattern list, not a guarantee: do not paste secrets).`
+      ? `JEV is the TypeSafe API, reached through the local decision router${dir.dir !== null ? ` with the router configuration at ${dir.dir} (routerConfigDir)` : dir.refused !== null ? ` under its own JEV switch: routerConfigDir was NOT used because ${dir.refused}` : ' under its own JEV switch (no routerConfigDir is set)'}. Each prompt you submit outside a planned task counts as a new task: when the rules do not settle it, only fixed-vocabulary engineering keywords and a size bucket are sent to JEV in ten small requests. Nothing else is sent, and a prompt in which credential-shaped text is recognised is withheld (a pattern list, not a guarantee: do not paste secrets).`
       : 'NobodyWho is asked through the local decision router with its local provider only (--mode local); an answer from any other provider is discarded. Each prompt you submit outside a planned task counts as a new task and is asked about when the rules do not settle it.',
     'Advisory only: Cockpit\'s rules still decide admission, ownership, mandatory consultations and verification gates. This session only; a new session starts OFF.',
   ].join('\n')
@@ -1850,7 +2030,6 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
  * (a replaced blob makes HEAD look like the working file; reproduced), a filesystem monitor that reports nothing, a submodule
  * set to ignore=all (reproduced), an untracked cache. A user's git configuration is not trusted to describe the work.
  */
-const GIT_SAFE = ['--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'diff.ignoreSubmodules=none', '-c', 'status.submoduleSummary=false', '-c', 'core.checkStat=default', '-c', 'core.trustctime=true']
 const TREE_FILES = 20_000
 const HASH_CHUNK = 400
 /** Most ignored and watched files one fingerprint measures. Measured: 100,000 files take about 0.65 s; beyond it the tree is UNKNOWN. */
@@ -1877,8 +2056,9 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
 
       return r.exitCode === 0 && !r.isStdoutTruncated && r.stderr.trim() === '' ? r.stdout : null
     }
-    const top = (await sh(['rev-parse', '--show-toplevel']))?.trim()
-    if (!top) return unknown('not a git work tree, or git is unavailable')
+    const top = await verifiedGitRoot($)
+    if (top === null) return unknown('not a git work tree, or the work tree does not match the session directory, or its identity could not be verified')
+    if (!(await gitFiltersReliable($, top))) return unknown('an active clean/process filter or unreadable filter configuration makes the working tree unreliable')
     const at = (...argv: string[]) => sh(['-C', top, ...argv])
     // The files (and links) under a directory, for what git cannot hash or list file by file. A directory that exists but cannot be read
     // in full is never "missing" and never a partial answer: the caller makes the tree UNKNOWN.
@@ -1894,6 +2074,9 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     }
     const head = base ?? (await at('rev-parse', '--verify', 'HEAD'))?.trim()
     if (!head) return unknown('no commit to measure against')
+    const tracked = await measureCommit($, top, head)
+    if ('why' in tracked) return unknown(tracked.why)
+    if (!(await gitFiltersReliable($, top, tracked.entries.map(e => e.path)))) return unknown('active commit-path filters make the working tree unreliable')
     const changed = await at('diff', head, '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=d')
     const deleted = await at('diff', head, '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=D')
     const untracked = await listing(['-C', top, 'ls-files', '-o', '--exclude-standard', '-z'])
@@ -1905,11 +2088,8 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     // Paths the index is told to ignore (assume-unchanged: a lowercase tag; skip-worktree: S or s) are invisible to diff. They are
     // hashed from the disk instead; a path that cannot be hashed (a sparse-checkout file that is not there) makes the tree unknown.
     const flags = await at('ls-files', '-v', '-z')
-    // A clean filter or an attributes line can make `git diff` report a modified tracked file as unchanged (reproduced). Tracked files
-    // git sees as stat-dirty are therefore also hashed WITHOUT filters and compared with their blob at the base commit.
-    const statDirty = await at('ls-files', '-m', '-z')
     if (incomplete !== '') return unknown(`git could not read part of the work tree, so its listing is incomplete (${incomplete})`)
-    if (changed === null || deleted === null || untracked === null || statDirty === null) return unknown('a git command failed, timed out or its output was cut short')
+    if (changed === null || deleted === null || untracked === null) return unknown('a git command failed, timed out or its output was cut short')
     if (ignored === null) return unknown('the ignored-entry listing failed, timed out or was cut short')
     if (flags === null) return unknown('the index listing failed, timed out or was cut short by the host output limit')
     const hidden = flags.split('\0').filter(l => l.length > 2 && (/[a-z]/.test(l[0] as string) || l[0] === 'S')).map(l => l.slice(2))
@@ -1925,9 +2105,6 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       sources.push(r.exitCode === 0 ? r.stdout.trim() : 'none')
     }
     // Operator-authorized volatile directories (caches, build output) leave the IGNORED part of the stamp; nothing else is excluded.
-    const known = new Set([...changed.split('\0'), ...deleted.split('\0')])
-    const filtered = [...new Set(statDirty.split('\0').filter(path => path !== '' && !known.has(path)))].sort()
-    if (filtered.length > TREE_FILES) return unknown(`more than ${TREE_FILES} stat-dirty tracked files`)
     const ignoredNames = ignored.split('\0').filter(Boolean).sort().filter(name => !stopCfg.volatile.some(v => name.startsWith(v) || `${name}/` === v))
     if (ignoredNames.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored files (list the generated directories in stopVolatile, or the check runs every time)`)
     // git lists an ignored directory that holds its own repository (a clone, a vendored checkout) as ONE entry even without
@@ -1977,7 +2154,8 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       if (r.exitCode !== 0 || r.isStdoutTruncated || lines.length !== chunk.length) return unknown('ignored entries could not be measured (stat failed, or an entry vanished meanwhile)')
       measured.push(...lines)
     }
-    const paths = [...new Set([...changed.split('\0'), ...untracked.split('\0'), ...hidden].filter(Boolean))].sort()
+    const committedPaths = new Set(tracked.entries.map(e => e.path))
+    const paths = [...new Set([...changed.split('\0'), ...untracked.split('\0'), ...hidden].filter(path => path !== '' && !committedPaths.has(path)))].sort()
     if (paths.length > TREE_FILES) return unknown(`more than ${TREE_FILES} changed, untracked or flagged files`)
     const lines: string[] = [...deleted.split('\0').filter(Boolean).sort().map(path => `D\0${path}`), `X\0${sources.join('\0')}`, ...measured.map(line => `S\0${line}`), ...watched]
     for (let i = 0; i < paths.length; i += HASH_CHUNK) {
@@ -1987,24 +2165,23 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       if (got === undefined || got.length !== chunk.length) return unknown('a file could not be hashed (deleted meanwhile, unreadable or not present in a sparse checkout)')
       chunk.forEach((path, n) => lines.push(`${got[n]}\0${path}`))
     }
-    for (let i = 0; i < filtered.length; i += HASH_CHUNK) {
-      const chunk = filtered.slice(i, i + HASH_CHUNK)
-      const hashes = (await at('hash-object', '--no-filters', '--', ...chunk))?.split('\n').filter(Boolean)
-      const tree = await at('ls-tree', '-r', '-z', head, '--', ...chunk)
-      if (hashes === undefined || hashes.length !== chunk.length || tree === null) return unknown('a stat-dirty tracked file could not be hashed or compared with the base commit')
-      const blobs = new Map<string, string>()
-      for (const entry of tree.split('\0').filter(Boolean)) {
-        const tab = entry.indexOf('\t')
-        blobs.set(entry.slice(tab + 1), (entry.slice(0, tab).split(' ')[2] ?? ''))
-      }
-      chunk.forEach((path, n) => { if (blobs.get(path) !== hashes[n]) lines.push(`${hashes[n]}\0${path}`) })
+    // The commit enumerates authority; raw disk bytes are measured even when the index says every entry is clean.
+    for (const e of tracked.entries) {
+      if (e.diskMode === 'missing') {
+        if (!deleted.split('\0').includes(e.path)) lines.push(`D\0${e.path}`)
+      } else if (e.raw !== e.oid || !e.isSameType || (e.diskMode !== undefined && e.diskMode !== e.mode)) lines.push(`${e.raw}\0${e.path}\0${e.isSameType ? 'blob' : 'type-changed'}\0${e.diskMode}`)
     }
     const text = lines.join('\n')
     // FNV-1a twice with different seeds: a change detector, not a security boundary. Paths and hashes never leave this function.
     let a = 0x811c9dc5, b = 0x01000193
     for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); a = Math.imul(a ^ c, 0x01000193) >>> 0; b = Math.imul(b + c, 0x85ebca6b) >>> 0 }
 
-    return `${head}:${lines.length}.${a.toString(16)}${b.toString(16)}`
+    // The project is part of the fingerprint: the same measurement from another checkout, worktree or repository is another project
+    // and compares UNKNOWN (see compareTree), never as an unchanged tree. A SHA-256 of the work tree path, cut to 128 bits: the path
+    // itself is never stored.
+    const id = (await sha256Text(`cobalt-cockpit/project/v1\0${top}`)).slice(0, 32)
+
+    return `${head}:${lines.length}.${a.toString(16)}${b.toString(16)}@${id}`
   } catch {
     return unknown('git raised an error or timed out')
   }
@@ -2649,6 +2826,17 @@ const rawSha = async ($: EngineInterface, path: string): Promise<string | null> 
   } catch { return null }
 }
 
+/** The Stop guard's and the alerts' own settings: they decide whether a task may finish, so only the person changes them. */
+const GUARD_FIELDS = /^(?:stopGuard|verifyScript|verifyScriptSha256|verifyTimeoutSec|stopMaxContinuations|stopVolatile|stopWatch|guardAlerts|guardCooldownSec|guardMaxAlerts)$/
+const isGuardRow = (e: { key: string }): boolean => {
+  const at = e.key.indexOf('.')
+
+  return (at > 0 && e.key.slice(0, at) === 'cobalt-cockpit' && GUARD_FIELDS.test(e.key.slice(at + 1)))
+}
+/** Only the person's own change in the config menu: the bridge is not attestably the owner's hand, a plugin's `$.config.set` never is. */
+const isMenuChange = (e: { origin?: unknown }): boolean => typeof e.origin === 'object' && e.origin !== null && (e.origin as { kind?: unknown }).kind === 'composer'
+const GUARD_ROW_REFUSED = 'COBALT / the Stop guard and alert settings are changed only by you in the config menu; nothing was changed.'
+
 const TRUST_KEY = 'stop-trust'
 type TrustRecord = { sha: string; at: number }
 const trustMap = async ($: EngineInterface): Promise<Record<string, TrustRecord>> => {
@@ -2848,7 +3036,7 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
   const uid = uidOf(task)
   // the Ledger is where the attempts are kept, so a resumed session finds the budget as it was left
   const checks = await checksOf($)
-  const spent = attemptsOf(checks, uid)
+  const spent = spentOf(checks, task)
   const hasSummary = hasChangeSummary(e.last_assistant_message)
   const lastRun = [...checks].reverse().find(c => c.uid === uid)
   // every check since the last one that completed the task is an attempt, whatever it said: the budget cannot be reset by a pass.
@@ -2864,9 +3052,16 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
 
     return null
   }
-  // The hold goes in BEFORE the check: a host that kills this hook, an error, an Esc or a crash then leaves a held task, not one
-  // that reads DONE. It is replaced by the decision (a lasting hold, or the completion record) once the result is persisted.
-  if (!isGuardHeld(task)) await change($, (t, now) => holdTask(t, 'a Stop check is in progress', spent, now))
+  // Reserve the attempt BEFORE running or writing its log. Exceptions, failed log writes and recovery cannot renew it.
+  // If the task changed or its allowance was consumed meanwhile, this check no longer has a reservation.
+  let reserved = false
+  await change($, (t, now) => {
+    reserved = false
+    if (uidOf(t) !== uid || spentOf(checks, t) !== spent) return t
+    reserved = true
+    return holdTask(t, 'a Stop check is in progress', spent + 1, now)
+  })
+  if (!reserved) return null
   const run = await runStopCheck($, task, hasSummary, checks)
   const unidentified = run.outcome === 'pass' && run.tree === null
   const whyNow = treeWhy
@@ -2881,6 +3076,7 @@ const stopGuard = async ($: EngineInterface, e: { stop_hook_active?: boolean; la
   await hush(() => persist($))
   const detail = run.exit === null ? run.outcome : `${run.outcome} (exit ${run.exit})`
   await change($, (t, now) => {
+    if (uidOf(t) !== uid) return t // a result for a replaced task cannot hold or complete its successor
     let chain = t
     if (run.outcome === 'pass' && run.tree !== null) chain = checkedAt(chain, run.tree)
     if (run.outcome === 'pass' || run.outcome === 'fail' || run.outcome === 'timeout') chain = setGate(chain, 'TEST', run.outcome === 'pass' ? 'pass' : 'fail', `stop check ${run.name} ${detail}${unidentified ? ' (tree identity unknown)' : ''}`, 'auto', now)
@@ -3236,7 +3432,15 @@ export const register: Register = (on, options) => {
     const refusal = await guard($, call).catch(() => null)
     if (refusal !== null) { await ledgerToolEnd($, call, refusal); return refusal }
 
-    if (config.hasOrchestration && e.agentId && e.tool === 'Bash' && readOnlyShell(String(call['command'] ?? ''))) (call as Record<string,unknown>)['command'] = String(call['command']).replace(/\bgit\s+(diff|show|log)\b/g, 'git $1 --no-ext-diff --no-textconv').replace(/\bgit\b/g,'git --no-pager')
+    if (config.hasOrchestration && e.agentId && e.tool === 'Bash' && readOnlyShell(String(call['command'] ?? ''))) {
+      const root = await verifiedGitRoot($)
+      if (root === null || !(await gitFiltersReliable($, root))) {
+        const deny = 'SWARM / read-only Git inspection cannot establish safe repository identity and filter configuration; use the host Read/Grep tools instead'
+        await ledgerToolEnd($, call, { deny })
+        return { deny }
+      }
+      (call as Record<string, unknown>)['command'] = safeGitInspection(String(call['command']))
+    }
     // A subagent's reasoning level goes on its own Agent call: the engine's
     // native, per-invocation setting, so nothing global moves under a sibling.
     if (config.hasOrchestration && hasNativeEffort && !e.agentId && e.tool === 'Agent') await quiet(() => launchEffort($, call))
@@ -3321,6 +3525,9 @@ export const register: Register = (on, options) => {
     }
     if (!isSupported) return next(e)
     const role = roleOf(e.subagentType)
+    // The architect is Cobalt's own agent: the exact type AND a definition the host attributes to this plugin (`provider` is set by the host,
+    // not by a plugin). A plugin of the same name from another source is not distinguishable by it; the human publication gate stays.
+    if (role === 'ARCHITECT' && (typeof e.provider !== 'object' || e.provider === null || e.provider.plugin !== 'cobalt-cockpit')) return { deny: 'OPUS / the architect must be the agent provided by this plugin (cobalt-cockpit:architect); this definition is attributed elsewhere. Nothing was started.' }
     let assignedId = /\[task:([\w.-]+)\]/.exec(e.description)?.[1]
     let reservedId: string | undefined
     // what this spawn's Agent call was launched with, taken once
@@ -3543,6 +3750,7 @@ export const register: Register = (on, options) => {
   })
 
   on('config.set', async ($, e, next) => {
+    if (isGuardRow(e) && !isMenuChange(e)) return { deny: GUARD_ROW_REFUSED }
     // A config row that chooses a model (the session's, the advisor's, a
     // fallback's) is not set to Fable. The rows that deny models are left alone.
     if (config.isStrict && /advisor/i.test(e.key) && e.value) return { deny: 'COBALT STRICT / external advisor disabled.' }
@@ -3558,6 +3766,7 @@ export const register: Register = (on, options) => {
     // The row this handler was given is judged by the rule this hook holds, so
     // an ordinary row is written and only the rows it would have refused are not.
     if (next.called) return next(e)
+    if (isGuardRow(e) && !isMenuChange(e)) return { deny: GUARD_ROW_REFUSED }
     const names = typeof e.value === 'string' ? [e.value] : Array.isArray(e.value) ? e.value : []
     if (config.blocksFable && /model|advisor/i.test(e.key) && !/denied|blocked/i.test(e.key) && names.some(isFable)) return { deny: 'COBALT / the model-configuration guard failed, so the row was left as it was.' }
     if (config.isStrict && /advisor/i.test(e.key) && e.value) return { deny: 'COBALT STRICT / the advisor guard failed, so the row was left as it was.' }
@@ -3735,7 +3944,7 @@ export const register: Register = (on, options) => {
       case 'reset':
         // Clearing the task also clears a held mandatory review, so it is the person's alone: a command another plugin ran,
         // a trigger, a peer or an origin this build does not know is refused, and nothing is changed.
-        if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: the task is cleared only by a command you type; nothing was changed.' }
+        if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: the task is cleared only by a command you type; nothing was changed.' }
         const abandoned = await read($, taskAtom)
         await hush(() => carryObligation($, abandoned, '/cockpit reset'))
         await update($, taskAtom, () => null)
@@ -3756,7 +3965,7 @@ export const register: Register = (on, options) => {
       }
       case 'discovery': {
         const pinned = value === '' ? undefined : value === 'auto' ? null : (['light', 'standard', 'deep'].includes(value) ? value.toUpperCase() as DiscoveryLevel : undefined)
-        const isPerson = isPersonOrigin(e.origin)
+        const isPerson = isHumanAuthority(e.origin)
         if (value !== '' && pinned === undefined) return { text: `Cockpit: "${value}" is not a level. Use /cockpit discovery light | standard | deep | auto.` }
         // Only the person pins a level; a command another plugin ran may look.
         if (pinned !== undefined && !isPerson) return { text: 'Cockpit: the discovery level is pinned only by a command you type; nothing was changed.' }
@@ -3774,7 +3983,7 @@ export const register: Register = (on, options) => {
         const held = await read($, routerAtom)
         let target = value === '' ? null : routerModeOf(value)
         // Only the person switches a router: a command another plugin or a trigger ran may look, not choose.
-        const isPerson = isPersonOrigin(e.origin)
+        const isPerson = isHumanAuthority(e.origin)
         if (target !== null && target !== held.mode && !isPerson) return { text: `ROUTER / ${routerLine(held)}\nCockpit: the router is switched only by a command you type; nothing was changed.` }
         if (value !== '' && target === null) return { text: `Cockpit: "${value}" is not a router. Use /cockpit router off | nobodywho | jev.\nROUTER / ${routerLine(held)}` }
         // no word given: the engine's own dialog, where there is someone to ask
@@ -3810,7 +4019,7 @@ export const register: Register = (on, options) => {
         const arg = words[1] ?? ''
         if (arg === 'trust' || arg === 'untrust') {
           // enrolling a verifier is the person's alone: a plugin, a model-triggered command or an unknown origin changes nothing
-          if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: a verification script is trusted only by a command you type; nothing was changed.' }
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: a verification script is trusted only by a command you type; nothing was changed.' }
           const c = await loadStopCfg($)
           if (c.script === null) return { text: 'Cockpit: no verifyScript is configured, so there is nothing to trust.' }
           const scope = await trustScope($, c.script)
@@ -3836,7 +4045,7 @@ export const register: Register = (on, options) => {
         }
         if (arg === 'release') {
           // lifting a hold is the person's alone, and it passes nothing: TEST goes back to pending and the budget starts over
-          if (!isPersonOrigin(e.origin)) return { text: 'Cockpit: a Stop guard hold is released only by a command you type; nothing was changed.' }
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: a Stop guard hold is released only by a command you type; nothing was changed.' }
           const before = await read($, taskAtom)
           if (before === null || !isGuardHeld(before)) return { text: 'Cockpit: the task is not held by the Stop guard; nothing was changed.' }
           await change($, (t, now) => releaseHold(t, now))
@@ -3847,7 +4056,7 @@ export const register: Register = (on, options) => {
 
           return { text: 'Cockpit: the Stop guard hold was released. Nothing was verified: TEST is pending and the check will run at the next stop. The refusal budget starts over.' }
         }
-        if ((arg === 'ack' || arg === 'silence') && !isPersonOrigin(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
+        if ((arg === 'ack' || arg === 'silence') && !isHumanAuthority(e.origin)) return { text: 'Cockpit: alerts are acknowledged or silenced only by a command you type; nothing was changed.' }
         if (arg === 'ack' || arg === 'silence') {
           await update($, ledgerAtom, old => ({ ...old, alerts: (old.alerts ?? []).map(a => (a.acked === true ? a : { ...a, acked: true as const })) }))
           if (arg === 'silence') await update($, guardAtom, old => ({ ...old, all: true }))

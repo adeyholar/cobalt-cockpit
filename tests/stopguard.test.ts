@@ -38,7 +38,7 @@ describe('configuration and policy', () => {
     expect(scriptPathOf('/a/../b.sh', null)).toBeNull()
     expect(scriptPathOf('~/c.sh', '/home/u')).toBe('/home/u/c.sh')
     const c = configOf({ stopGuard: 'ENFORCE', verifyScript: SCRIPT, verifyTimeoutSec: 99999, stopMaxContinuations: 99 }, null)
-    expect([c.timeoutMs, c.maxAttempts]).toEqual([900_000, 10])
+    expect([c.timeoutMs, c.maxAttempts]).toEqual([600_000, 10])   // v0.5.3 L4: the host's process.run allows ten minutes at most
   })
   test('a summary is required only when the host gave a closing message', () => {
     expect(hasChangeSummary(undefined)).toBe(true)

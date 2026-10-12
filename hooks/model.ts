@@ -97,9 +97,17 @@ export const isGuardHeld = (task: Task): boolean => task.stopHold !== undefined
 /** The task's identity across plans. Task numbers start again at 1 after a reset; this does not repeat. */
 export const uidOf = (task: Task): string => task.lineage ?? `${task.id}@${task.startedAt}`
 
+export const MAX_REFUSALS = 10
+/** An unreadable existing counter is exhausted, never a renewed allowance. */
+export const refusalCount = (value: unknown): number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? Math.min(value, MAX_REFUSALS) : MAX_REFUSALS
+
+export const heldRefusals = (task: Task): number => task.stopHold === undefined ? 0 : refusalCount(task.stopHold.refusals)
+
+/** Only a verified completion or a person's release clears the counter; recovery can only raise it. */
 export const holdTask = (task: Task, reason: string, refusals: number, now: number): Task => ({
   ...task,
-  stopHold: { reason: oneLine(reason, 200), at: now, refusals },
+  stopHold: { reason: oneLine(reason, 200), at: now, refusals: Math.max(heldRefusals(task), refusalCount(refusals)) },
   updatedAt: now,
 })
 

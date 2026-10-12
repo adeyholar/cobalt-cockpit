@@ -189,6 +189,26 @@ describe('a release review through the host', () => {
     expect(task(held).review).toMatchObject({ grounds: ['release'], consult: null, state: 'required' })
     expect(task(held).percent).toBeLessThan(100)
   })
+  test('v0.5.3: a file hidden with assume-unchanged or skip-worktree makes the candidate unknown, an ordinary index does not', LED, async ($, on) => {
+    const w = world(on); const held = hostState(on, {}); await releaseTask($)
+    for (const flagged of ['h src/a.ts\0', 'S src/a.ts\0', 's src/a.ts\0', 'H src/ok.ts\0h src/hidden.ts\0']) {
+      w.indexFlags = flagged
+      expect(String((await call($, releasePacket)).result)).toContain('CANDIDATE UNKNOWN')
+    }
+    expect(ledger(held).consults ?? []).toHaveLength(0)
+    expect(w.spawns).toHaveLength(0)
+    w.indexFlags = 'H src/a.ts\0H src/b.ts\0'
+    expect(String((await call($, releasePacket)).result)).toContain('OPUS ADMITTED')
+  })
+  test('v0.5.3: a repository that hides its changes from a plain status (fsmonitor, replace refs) is not a clean candidate', LED, async ($, on) => {
+    const w = world(on); const held = hostState(on, {}); await releaseTask($)
+    w.uncommitted = true; w.statusHidden = true
+    expect(String((await call($, releasePacket)).result)).toContain('CANDIDATE UNKNOWN')
+    expect(ledger(held).consults ?? []).toHaveLength(0)
+    expect(w.spawns).toHaveLength(0)
+    w.uncommitted = false
+    expect(String((await call($, releasePacket)).result)).toContain('OPUS ADMITTED')
+  })
   test('a restart (a new world on the same store) still sees the review of that commit', LED, async ($, on) => {
     world(on, {}, { 'release-reviews': [{ candidate: A, id: 'opus-1-aaaaaa', at: 1, returned: true }] }); hostState(on, {}); await releaseTask($)
     expect(String((await call($, releasePacket)).result)).toContain('DUPLICATE')
@@ -229,14 +249,14 @@ describe('a release review through the host', () => {
 
       return state
     }
-    for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }, { kind: 'sdk' }]) {
+    for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }]) {
       test(`${origin.kind} clears the task`, LED, async ($, on) => {
         const state = await held($, on)
         expect(String((await run($, 'reset', origin)).text)).toContain('cleared')
         expect(state.get('task')?.value ?? null).toBeNull()
       })
     }
-    for (const origin of [{ kind: 'plugin', name: 'other-plugin' }, { kind: 'plugin', name: 'composer' }, { kind: 'scheduled-trigger' }, { kind: 'peer' }, { kind: 'task-notification' }, { kind: 'channel', server: 's' }, { kind: 'some-future-kind' }, { kind: 'composer ' }, { kind: 'COMPOSER' }, {}, null, undefined, 'composer']) {
+    for (const origin of [{ kind: 'plugin', name: 'other-plugin' }, { kind: 'plugin', name: 'composer' }, { kind: 'scheduled-trigger' }, { kind: 'peer' }, { kind: 'task-notification' }, { kind: 'channel', server: 's' }, { kind: 'sdk' }, { kind: 'some-future-kind' }, { kind: 'composer ' }, { kind: 'COMPOSER' }, {}, null, undefined, 'composer']) {
       test(`${JSON.stringify(origin)} is refused and the held review stays`, LED, async ($, on) => {
         const state = await held($, on)
         const before = task(state)
@@ -298,7 +318,7 @@ describe('a release review through the host', () => {
     expect(task(held).review?.candidate).toBeUndefined()
     expect(task(held).review?.consult).not.toBe(id)
   })
-  test('uncommitted changes withdraw an approval, an unanswering git does not, and the same clean commit gives it back', LED, async ($, on) => {
+  test('unknown Git and uncommitted changes suspend approval; the same verified clean commit restores it', LED, async ($, on) => {
     const w = world(on); const held = hostState(on, {}); await releaseTask($)
     await call($, releasePacket)
     const id = await approve($, held)
@@ -306,7 +326,7 @@ describe('a release review through the host', () => {
     const saved = w.gitStatus
     w.gitStatus = null
     await progress($, { action: 'status' })
-    expect(task(held).review?.state).toBe('adjudicated')
+    expect(task(held).review?.state).toBe('required')
     w.gitStatus = saved
     w.uncommitted = true
     await progress($, { action: 'status' })

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased (0.5.3) — Authorization and identity hardening
+
+Remediation of the reproduced findings of the independent review of 0.5.2. Details and compatibility notes: [docs/implementation-v0.5.3.md](docs/implementation-v0.5.3.md).
+
+- **M1, SDK origin is not human authority.** The host stamps every `claude -p` / Agent SDK turn `sdk` and cannot tell a person from an agent-controlled nested `claude -p`. `/cockpit reset`, `guard trust`, `guard untrust`, `guard release`, `guard ack`, `guard silence`, `discovery <level>` and `router <mode>` now accept only the composer and the Remote Control bridge. A headless SDK session can still start and classify tasks and read every status.
+- **M2, project identity.** The working-tree fingerprint carries the project (the git work tree) it was taken in. The project is a 128-bit SHA-256 of the work tree path (no path is stored). Another checkout, worktree or repository, a fingerprint saved by 0.5.2 and the earlier 32-bit form compare UNKNOWN, never unchanged, and UNKNOWN runs the check (once for a saved task). Stored fingerprints are bounded at 160 characters.
+- **M3, consultation identity.** Only the exact agent type `cobalt-cockpit:architect`, from a definition the host attributes to this plugin, is the architect. Another plugin's or a project's agent that ends in `:architect` cannot take an admitted consultation.
+- **L1.** The Stop guard's and the alerts' settings (`stopGuard`, `verifyScript`, `verifyScriptSha256`, `verifyTimeoutSec`, `stopMaxContinuations`, `stopVolatile`, `stopWatch`, `guardAlerts`, `guardCooldownSec`, `guardMaxAlerts`) change only by the person in the config menu; a plugin's `$.config.set` and the bridge are refused.
+- **L2.** The refusal budget is kept on the held task (`stopHold.refusals`) and is the larger of that and the check log, so a lost, corrupted or flooded log cannot restore a held task's attempts. The log is also bounded per task (16) and in total (128). No cross-process atomicity is claimed.
+- **L3.** A release candidate is not established while the index hides a path with assume-unchanged or skip-worktree, and the check runs git with the hardened invocation (no fsmonitor, replace refs or untracked cache).
+- **L4.** `verifyTimeoutSec` is capped at 600, the host's `process.run` limit; a larger value is lowered instead of making the check fail.
+
+- Final recovery: candidate identity and fingerprints measure every intended commit path independently of the index; unreliable roots, active external filters and incomplete reads fail closed. Native EOL normalization, supported symlinks and executable-mode policy remain compatible. UNKNOWN suspends current release clearance.
+- Refusal recovery preserves the maximum held/log budget, reserves attempts before verification, and fails closed on damaged counters and discarded legacy guard records. Failed state-write regressions preserve the disclosed cross-process persistence limitation.
+- Submission preparation: exact-archive inventory and entrypoint checks, updated disclosures and separate local/external evidence. Anthropic external validation remains unverified; Persistent Alerts are excluded.
+
 ## 0.5.2 — Observability and state integrity
 
 - `/cockpit reset` is refused from any origin that is not the person's (composer, bridge, SDK); an unknown origin fails closed.

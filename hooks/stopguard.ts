@@ -27,12 +27,13 @@
 // reason, never DONE.
 
 import type { Task } from '../types'
-import { holdTask, oneLine, uidOf } from './model'
+import { heldRefusals, holdTask, MAX_REFUSALS, oneLine, uidOf } from './model'
 export { uidOf }
 
 export type Policy = 'OBSERVE' | 'ENFORCE'
-export const MAX_ATTEMPTS_CEILING = 10
-export const TIMEOUT_CEILING_MS = 900_000
+export const MAX_ATTEMPTS_CEILING = MAX_REFUSALS
+/** The host's `process.run` allows ten minutes at most (Claude Code 2.1.296): a longer timeout would make the call fail instead of timing out. */
+export const TIMEOUT_CEILING_MS = 600_000
 export const MIN_SUMMARY_CHARS = 60
 
 export type StopConfig = {
@@ -161,10 +162,10 @@ export const isCheckRecord = (x: unknown): x is CheckRecord => {
 
   return Number.isSafeInteger(r['taskId']) && isText(r['uid'], 64) && isText(r['verifier'], 32) && typeof r['complete'] === 'boolean' && isText(r['name'], 160)
     && (r['sha'] === null || isText(r['sha'], 16)) && typeof r['at'] === 'number' && OUTCOMES.includes(r['outcome'] as Outcome)
-    && (r['exit'] === null || Number.isSafeInteger(r['exit'])) && (r['ms'] === null || typeof r['ms'] === 'number') && (r['tree'] === null || isText(r['tree'], 96))
+    && (r['exit'] === null || Number.isSafeInteger(r['exit'])) && (r['ms'] === null || typeof r['ms'] === 'number') && (r['tree'] === null || isText(r['tree'], STAMP_MAX))
     && isText(r['summary'], 700) && typeof r['hasSummary'] === 'boolean'
 }
-export const validChecks = (x: unknown): CheckRecord[] => (Array.isArray(x) ? x.filter(isCheckRecord).slice(-24) : [])
+export const validChecks = (x: unknown): CheckRecord[] => (Array.isArray(x) ? retainChecks(x.filter(isCheckRecord)) : [])
 
 /** The tail of a check's output, one line, bounded; the caller redacts secrets first. */
 export const outputTail = (output: string): string => {
@@ -225,7 +226,41 @@ export const verdictOf = (v: VerdictInput): Verdict => {
   }
 }
 
-export const boundedChecks = (checks: readonly CheckRecord[], add: CheckRecord, cap = 24): CheckRecord[] => [...checks, add].slice(-cap)
+/**
+ * The attempts spent on this task: the larger of the run of unfinished checks in the log and the hold's own refusal counter.
+ * The counter lives in the task state, written in the same step as the hold, so a log that was evicted, flooded by other tasks,
+ * lost with a restart, corrupted or never written cannot hand a held task its attempts back. An unreadable existing
+ * counter exhausts the allowance. A person's release removes the hold, and with it the counter.
+ */
+export const spentOf = (checks: readonly CheckRecord[], task: Task): number => {
+  return Math.max(attemptsOf(checks, uidOf(task)), heldRefusals(task))
+}
+
+export const CHECKS_PER_TASK = 16
+export const CHECKS_TOTAL = 128
+const NEWEST_TASKS = 4
+
+/**
+ * The bound on kept check records, per task and then in total, never one pool shared first-come: a task keeps its own
+ * newest CHECKS_PER_TASK records (the refusal budget is at most MAX_ATTEMPTS_CEILING, so its whole run of attempts fits),
+ * and when the total is over CHECKS_TOTAL the oldest records of the older tasks go first. The newest few tasks, the one
+ * being held among them, are never evicted by records of others. Order is kept.
+ */
+export const retainChecks = (list: readonly CheckRecord[]): CheckRecord[] => {
+  const seen = new Map<string, number>()
+  const perTask = [...list].reverse().filter(c => { const n = (seen.get(c.uid) ?? 0) + 1; seen.set(c.uid, n); return n <= CHECKS_PER_TASK }).reverse()
+  const newest = new Set<string>()
+  for (let i = perTask.length - 1; i >= 0 && newest.size < NEWEST_TASKS; i--) newest.add(perTask[i]!.uid)
+  const out = [...perTask]
+  for (let i = 0; out.length > CHECKS_TOTAL && i < out.length;) {
+    if (newest.has(out[i]!.uid)) i++
+    else out.splice(i, 1)
+  }
+
+  return out.length > CHECKS_TOTAL ? out.slice(-CHECKS_TOTAL) : out
+}
+
+export const boundedChecks = (checks: readonly CheckRecord[], add: CheckRecord): CheckRecord[] => retainChecks([...checks, add])
 
 const PREFIX = /^STOP GUARD: /
 
@@ -235,8 +270,8 @@ const PREFIX = /^STOP GUARD: /
  *
  * Evidence is the guard's own check records in the Run Ledger, which the model cannot write, never the blocker text, which it can:
  *  - a non-complete record for this task AND the guard's blocker, or the budget spent, or a check that could not run: HELD;
- *  - a guard blocker whose records all completed, or whose records were unreadable: HELD as ambiguous (needs a fresh check or
- *    a person's release; nothing is granted);
+ *  - a guard blocker whose records all completed: HELD as ambiguous; unreadable records exhaust the allowance until a person's
+ *    release, since no remaining attempts can be established;
  *  - a guard-looking blocker with no record at all is an ordinary blocker and stays one;
  *  - everything else (OBSERVE, completed, other blockers, failed gates) is unchanged.
  * No script trust is invented: trust lives in its own store and is not read from here.
@@ -253,7 +288,7 @@ export const migrateStopHold = (task: Task, checks: readonly CheckRecord[], drop
   const spent = attemptsOf(checks, uid)
   if (last === undefined) {
     // no record: a forged or foreign blocker is ordinary, unless records were lost, when it cannot be told apart
-    return looksHeld && dropped > 0 ? holdTask(settled, 'legacy Stop guard state could not be read; run the check again or release it', 0, now) : settled
+    return looksHeld && dropped > 0 ? holdTask(settled, 'legacy Stop guard state could not be read; a person must release it before checking again', MAX_ATTEMPTS_CEILING, now) : settled
   }
   if (last.complete) return looksHeld ? holdTask(settled, `legacy state is ambiguous (${reason}); run the check again or release it`, spent, now) : settled
   if (looksHeld || spent >= maxAttempts || last.outcome === 'error' || last.outcome === 'untrusted') {
@@ -266,5 +301,30 @@ export const migrateStopHold = (task: Task, checks: readonly CheckRecord[], drop
 /** What a fingerprint comparison proves. UNKNOWN is never read as UNCHANGED, and it is not read as CHANGED either. */
 export type TreeVerdict = 'UNCHANGED' | 'CHANGED' | 'UNKNOWN'
 
-export const compareTree = (start: string | null | undefined, now: string | null): TreeVerdict =>
-  typeof start !== 'string' || now === null ? 'UNKNOWN' : start === now ? 'UNCHANGED' : 'CHANGED'
+/**
+ * The longest fingerprint this build writes and stores: a SHA-256 repository (64 hex), a nine-digit entry count, two 32-bit
+ * content hashes and the 128-bit project identity come to 124 characters. Schema validation and storage use this one bound.
+ */
+export const STAMP_MAX = 160
+const PROJECT_ID = /^[0-9a-f]{32}$/
+
+/** The project identity a fingerprint was taken in (`@` and 32 lowercase hex): absent from v0.5.2 fingerprints and from the earlier 32-bit form. */
+const projectOf = (stamp: string): string | null => {
+  const id = stamp.slice(stamp.lastIndexOf('@') + 1)
+
+  return stamp.includes('@') && PROJECT_ID.test(id) ? id : null
+}
+
+/**
+ * A fingerprint is only comparable with one taken in the same project, and only when both name it: another checkout, worktree or
+ * repository, a fingerprint without a valid project identity (v0.5.2, the earlier 32-bit form, a malformed or oversized one) is
+ * UNKNOWN (the check runs), never UNCHANGED.
+ */
+export const compareTree = (start: string | null | undefined, now: string | null): TreeVerdict => {
+  if (typeof start !== 'string' || now === null || start.length > STAMP_MAX || now.length > STAMP_MAX) return 'UNKNOWN'
+  const a = projectOf(start)
+  const b = projectOf(now)
+  if (a === null || b === null || a !== b) return 'UNKNOWN'
+
+  return start === now ? 'UNCHANGED' : 'CHANGED'
+}

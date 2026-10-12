@@ -7,6 +7,7 @@
 import { describe, expect, test as engineTest } from 'claude-code/testing'
 
 import { roleOf } from '../hooks/orchestra'
+import { parseShell } from '../hooks/shell'
 import { BLOCK_LINE } from '../hooks/policy'
 import { FIVE, bash, command, hostState, mountHud, mountPane, passAllGates, planAndComplete, progress, prompt, rowsOf, start, TOOL, world } from './world'
 import type { World } from './world'
@@ -151,8 +152,8 @@ describe('no network or provider call is made for a refused request', () => {
     expect(w.requests).toEqual([])
     expect(w.spawns).toEqual([])
     expect(w.ran).toEqual([])
-    // and no process was started to do it some other way: only git and the auth-free startup ran
-    expect(w.runs.every(argv => argv[0] === 'git')).toBe(true)
+    // Only read-only Git and canonical directory identity probes ran.
+    expect(w.runs.every(argv => argv[0] === 'git' || (argv[0] === 'realpath' && argv[1] === '-e' && argv[2] === '--'))).toBe(true)
   })
 
   test('ordinary work makes no extra call either: one request in, one request out', async ($, on) => {
@@ -668,13 +669,50 @@ describe('orchestration telemetry', () => {
   })
 
   test('a reviewer, once admitted, is drawn as one', async ($, on) => {
-    world(on)
+    const w = world(on)
     await start($)
     await prompt($, 'Please review the limiter change')
     await $.turn.start({ text: 'review', turnId: 't1' })
     expect((await spawn($, { subagentType: 'cobalt-cockpit:reviewer' })).agentId).toBe('spawned-1')
     expect((await call($, 'Bash', { command: 'git diff', agentId: 'spawned-1' }) as { deny?: string }).deny).toBeUndefined()
+    const sent = parseShell(String(w.ran.at(-1)?.['command'])).pipelines[0]!.commands[0]!.argv
+    expect(sent).toContain('--no-replace-objects')
+    expect(sent).toContain('core.fsmonitor=false')
+    expect(sent).toContain('--no-ext-diff')
     expect(await hudText($)).toMatch(/01 REVIEWER\s+SONNET\s+(GIT|BASH)/)
+  })
+  test('a read-only helper cannot inspect Git through active external filters', async ($, on) => {
+    const w = world(on)
+    await start($); await prompt($, 'Please review the limiter change')
+    await $.turn.start({ text: 'review', turnId: 't1' })
+    expect((await spawn($, { subagentType: 'cobalt-cockpit:reviewer' })).agentId).toBe('spawned-1')
+    w.indexFlags = 'H a\0'; w.gitFilterConfig = 'filter.hide.clean\nexternal command\0'; w.gitFilterAttributes = 'a\0filter\0hide\0'
+    const out = await call($, 'Bash', { command: 'git status', agentId: 'spawned-1' }) as { deny?: string }
+    expect(out.deny).toContain('safe repository identity')
+    expect(w.ran.filter(e => e['tool'] === 'Bash')).toHaveLength(0)
+  })
+  test('hardening a read-only helper preserves quoted Git search arguments', async ($, on) => {
+    const w = world(on)
+    await start($); await prompt($, 'Please review the limiter change')
+    await $.turn.start({ text: 'review', turnId: 't1' })
+    await spawn($, { subagentType: 'cobalt-cockpit:reviewer' })
+    expect((await call($, 'Bash', { command: "git grep 'git diff'", agentId: 'spawned-1' }) as { deny?: string }).deny).toBeUndefined()
+    const args = parseShell(String(w.ran.at(-1)?.['command'])).pipelines[0]!.commands[0]!.argv
+    expect(args.at(-1)).toBe('git diff')
+    expect(args).toContain('core.untrackedCache=false')
+  })
+
+  test('a read-only helper refuses Git signature verification requests', async ($, on) => {
+    const w = world(on)
+    await start($); await prompt($, 'Please review the limiter change')
+    await $.turn.start({ text: 'review', turnId: 't1' })
+    await spawn($, { subagentType: 'cobalt-cockpit:reviewer' })
+    for (const command of ['git log --show-signature', 'git show --show-sig', 'git log --format=%G?', 'git log --pretty=custom', 'git show --format=custom']) {
+      expect((await call($, 'Bash', { command, agentId: 'spawned-1' }) as { deny?: string }).deny).toBeDefined()
+    }
+    expect(w.ran.filter(e => e['tool'] === 'Bash')).toHaveLength(0)
+    expect((await call($, 'Bash', { command: 'git log --oneline -5', agentId: 'spawned-1' }) as { deny?: string }).deny).toBeUndefined()
+    expect(parseShell(String(w.ran.at(-1)?.['command'])).pipelines[0]!.commands[0]!.argv).toContain('log.showSignature=false')
   })
 
   test('another agent type is shown as an agent, on the model the engine resolved', async ($, on) => {

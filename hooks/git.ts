@@ -70,3 +70,29 @@ export const branchLabel = (git: GitState | null): string => {
 
   return git.branch ?? 'no branch'
 }
+
+/** NUL config records are key + newline + value. Git emits repeated values in precedence order. */
+export const filterCommands = (stdout: string): Set<string> | null => {
+  if (stdout !== '' && !stdout.endsWith('\0')) return null
+  const effective = new Map<string, string>()
+  for (const entry of stdout.split('\0').filter(Boolean)) {
+    const split = entry.indexOf('\n')
+    if (split < 0) return null
+    const key = entry.slice(0, split)
+    if (!/^filter\..+\.(clean|process)$/.test(key)) return null
+    effective.set(key, entry.slice(split + 1))
+  }
+  return new Set([...effective].filter(([, command]) => command.trim() !== '').map(([key]) => key.slice(7, key.lastIndexOf('.'))))
+}
+/** A malformed/incomplete attributes response is no proof; true means an active external clean/process filter. */
+export const activeFilter = (stdout: string, drivers: Set<string>, paths: string): boolean | null => {
+  if (stdout !== '' && !stdout.endsWith('\0')) return null
+  const fields = stdout.split('\0'); fields.pop()
+  const expected = paths.split('\0'); expected.pop()
+  if (fields.length !== expected.length * 3) return null
+  for (let i = 0; i < fields.length; i += 3) {
+    if (fields[i] !== expected[i / 3] || fields[i + 1] !== 'filter' || !fields[i + 2]) return null
+    if (drivers.has(fields[i + 2]!)) return true
+  }
+  return false
+}
