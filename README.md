@@ -1,10 +1,4 @@
-<h1 align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero/cockpit-hero-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero/cockpit-hero-light.svg">
-    <img src="docs/assets/hero/cockpit-hero-dark.png" width="100%" alt="Cobalt Cockpit: Mission Control for Claude Code. Orchestrate bounded agents. Track real progress. Verify before declaring done.">
-  </picture>
-</h1>
+<h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero/cockpit-hero-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/hero/cockpit-hero-light.svg"><img src="docs/assets/hero/cockpit-hero-dark.png" width="100%" alt="Cobalt Cockpit: Mission Control for Claude Code. Orchestrate bounded agents. Track real progress. Verify before declaring done."></picture><br><sub>Cobalt Cockpit v0.6.0 — Mission Control Operations</sub></h1>
 
 <p align="center">
   <a href="#system-overview">Overview</a> ·
@@ -23,7 +17,7 @@
   <a href="https://github.com/echelong/cobalt-cockpit/actions/workflows/secret-scan.yml"><img src="https://github.com/echelong/cobalt-cockpit/actions/workflows/secret-scan.yml/badge.svg?branch=main" alt="Secret scan status on main"></a>
 </p>
 
-<p align="center"><sub>v0.6.0 · Mission Control Operations · <a href="LICENSE">MIT</a> · <a href="PRIVACY.md">Privacy</a> · <a href="SECURITY.md">Security</a> · <a href="CHANGELOG.md">Changelog</a></sub></p>
+<p align="center"><sub><a href="LICENSE">MIT</a> · <a href="PRIVACY.md">Privacy</a> · <a href="SECURITY.md">Security</a> · <a href="CHANGELOG.md">Changelog</a></sub></p>
 
 **Mission control for Claude Code.** Follow real task progress, coordinate bounded subagents, review verification gates, and replay what happened, without replacing Claude Code's native model and permission controls.
 
