@@ -300,7 +300,7 @@ const hero = (t, animated) => {
     `<path d="M20 74V38L38 20H74M1206 20H1242L1260 38V74M1260 526V562L1242 580H1206M74 580H38L20 562V526" fill="none" stroke="${t.cobalt}" stroke-width="2"/>` +
     Array.from({ length: 25 }, (_, i) => `<path d="M${496 + i * 12} 580v${i % 6 === 0 ? -8 : -4}" stroke="${t.edge}" stroke-width="1"/>`).join('') +
     `<path d="M56 458.5H1224" stroke="${t.rule}" stroke-width="1"/>` +
-    text(1224, 566, 'ILLUSTRATION', 10.5, t.steel, { anchor: 'end', track: 2 })
+    text(1224, 567, 'ILLUSTRATION', 12.5, t.silver, { anchor: 'end', track: 2.2 })
 
   const style = `
 text{font-family:${FONT};font-kerning:none}

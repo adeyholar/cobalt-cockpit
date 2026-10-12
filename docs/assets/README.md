@@ -20,7 +20,7 @@ Everything the root README shows is in this folder and is generated from files i
 
 - the HUD band and the panes, as the tree the plugin's own render hooks hand the host (`ui.mount` of `AbovePrompt` and `Pane` on a terminal surface), flattened to rows with each cell's colours;
 - the text each `/cockpit` command printed at 100 columns;
-- each reply of the plugin's tools, each spawn result, and the text of the one notification.
+- each reply of the plugin's `progress` and `swarm` tools, each spawn result, the text of the one notification, and the Bash results the test host returned.
 
 `src/build-demo.mjs` refuses a log whose run did not pass or that shows an outbound call.
 
@@ -32,7 +32,7 @@ Everything the root README shows is in this folder and is generated from files i
 - the notification outcome `SENT`: the host answered that it wrote the notification, and nothing reached a terminal;
 - agent ids (`spawned-`), the context meter (fixed at 39%), the clock (it starts near the Unix epoch, so an alert's date reads 1970), and the session id and effort the Run Ledger shows as `unknown`.
 
-**What the builder adds is presentation:** the window frame, the caption bar and its text, the `SYNTHETIC DEMO` tag, the contents list on the first screen, the typed command line, the order and the timing. It changes no captured character. To fit the screen it does three things, each visible:
+**What the builder adds is presentation:** the window frame, the caption bar and its text, the `SYNTHETIC DEMO` tag, the contents list on the first screen, the `▸` line that names each scripted call above its reply, the dashed rules labelled TOOL REPLIES, COMMAND OUTPUT, PANE and HUD BAND, the typed command line, the order and the timing. It changes no captured character. To fit the screen it does three things, each visible:
 
 - a tool reply is reflowed to the 100-column grid and, where it is longer than its space in the log, cut at a wrapped line and marked `[...]` in the caption colour, a mark the plugin never prints;
 - a pane is shown from its first row down to the height of the window, and its label says `FIRST 27 ROWS`;
@@ -60,7 +60,9 @@ docs/assets/src/regenerate.sh
 
 It needs `claude`, `node`, Google Chrome or Chromium (set `CHROME_BIN` for another binary) and `ffmpeg`. It archives `HEAD` into a temporary directory, runs the capture there as that snapshot's only test, builds the loop, the poster and `demo/frames.json` from the log, and writes the artwork. The capture calls no model and sends nothing. Each browser process gets a profile directory of its own inside the temporary directory, so your browser profile is not touched.
 
-The capture is not part of the plugin's test suite: it is named `demo-capture.ts`, not `*.test.ts`, so `claude plugin test .` does not run it, and it is not under a directory the TypeScript gate includes.
+The capture is not part of the plugin's test suite: it is named `demo-capture.ts`, not `*.test.ts`, so `claude plugin test .` does not run it, and the host-generated `tsconfig` that the TypeScript gate uses includes `hooks/`, `types/` and `tests/`, not `docs/`.
+
+In `demo/frames.json`, `source_commit` is the commit that last changed what the capture runs (the plugin's code, its manifests and the test host file it imports), and each frame's `source` says whose output it is.
 
 Rendering uses the fonts of the machine that builds. The committed loop was built with DejaVu Sans Mono.
 

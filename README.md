@@ -53,6 +53,8 @@ Cobalt Cockpit adds a cyberpunk HUD, orchestration controls, and a local Run Led
 - Optional per-session router (`/cockpit router`): OFF by default, NobodyWho (local) or JEV (TypeSafe API) for advisory routing recommendations. Cockpit's deterministic rules stay authoritative.
 - Read-only helpers can deliver their reports: a bound helper may use the host's tool discovery and report hand-back without gaining any write, shell or delegation right, and each task records how its report arrived.
 
+The fail-closed rule has one structural exception, `turn.step`: see [SECURITY.md](SECURITY.md#hooks-that-refuse).
+
 </details>
 
 ## Live interface
@@ -60,15 +62,15 @@ Cobalt Cockpit adds a cyberpunk HUD, orchestration controls, and a local Run Led
 <p align="center">
   <picture>
     <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/demo/cockpit-demo-poster.png">
-    <img src="docs/assets/demo/cockpit-demo.gif" width="100%" alt="Animated terminal capture labelled SYNTHETIC DEMO, about 44 seconds: a scripted task goes from a plan, through a swarm of agents, a failing test and a blocked run, to PERMITS DONE. The panels below give the same frames as text.">
+    <img src="docs/assets/demo/cockpit-demo.gif" width="100%" alt="Animated terminal capture labelled SYNTHETIC DEMO, about 44 seconds: a scripted task goes from a plan, through a swarm of agents, a failing test and a blocked run, to PERMITS DONE. The panels below give the main frames as text.">
   </picture>
 </p>
 
-**Synthetic demo, genuine output.** Every frame is output of Cockpit v0.6.0's own render hooks, commands and tools, run in Claude Code's offline plugin test host (`claude plugin test`) against a scripted task. No model ran and no live session was recorded. The frame, the captions, the typed command line and the timing are presentation.
+**Synthetic demo, genuine output.** The HUD band, the panes, the command output and the tool replies in this loop are output of Cockpit v0.6.0's own render hooks, commands and tools, run in Claude Code's offline plugin test host (`claude plugin test`) against a scripted task; the Bash results are the test host's scripted answers. No model ran and no live session was recorded. The frame, the captions, the call labels, the typed command line and the timing are presentation.
 
 [Static frame](docs/assets/demo/cockpit-demo-poster.png) · [How it was captured, and how to regenerate it](docs/assets/README.md) · [The captured frames as data](docs/assets/demo/frames.json)
 
-On a narrow screen the loop is small: open the static frame, or read the frames as text below.
+On a narrow screen the loop is small: open the static frame, or read the main frames as text in the panels below.
 
 <details>
 <summary><b>What is scripted, and what is the test host's</b></summary>
@@ -98,7 +100,7 @@ OPUS / MAIN · IMPLEMENT   HAIKU+SONNET / SUBAGENTS 3/16
                        03 worker      EDIT        9s · 1 tools       ⡬   ⡫    ⢗ ⡔   ⢱  ⠑⠞⣊⠹
 ```
 
-Mission Control (`/cockpit`) once the task is verified:
+The top of Mission Control (`/cockpit`) once the task is verified (its first 27 rows):
 
 ```text
 ━ VECTOR  CONSOLE / MISSION
@@ -664,11 +666,11 @@ The complete reference. The `/cockpit guard` and `/cockpit alerts` commands that
 
 **What Cockpit observes.** Tool calls, paths, agent events, token/context telemetry, Git state and verification. Hidden reasoning is never stored.
 
-**What it can refuse.** The tool guard (destructive commands asked or refused), agent-offer/spawn guards, `/config` rows of the guard and alert settings (person-only), `/model`/`/advisor` under the Fable policy, and Stop-hook holds under `stopGuard: ENFORCE`. Every hook that can answer or refuse carries a handler that answers in its place if the hook fails, so a failure refuses what the hook would have refused; `turn.step` is the one structural exception ([SECURITY.md](SECURITY.md#hooks-that-refuse)).
+**What it can refuse.** The tool guard (destructive commands asked or refused), agent-offer/spawn guards, `/config` rows of the Stop guard's and the alerts' settings (person-only), `/model`/`/advisor` under the Fable policy, and Stop-hook holds under `stopGuard: ENFORCE`. Every hook that can answer or refuse carries a handler that answers in its place if the hook fails, so a failure refuses what the hook would have refused; `turn.step` is the one structural exception ([SECURITY.md](SECURITY.md#hooks-that-refuse)).
 
 **What it never approves.** Cockpit does not take part in Claude Code's permission check. It registers no hook on it and makes no permission query; its guards run before it and can only refuse a call or ask you about it, never approve one. `/cockpit ready` is an explanation, not an approval, and an alert never changes a gate, a hold, a review, a release approval or a verdict.
 
-**What is configurable.** Model and orchestration enforcement, the Stop guard and owner alerts are opt-in. The blast-radius guard, the attribution guard and local telemetry are on by default and can be turned off:
+**What is configurable.** Model and orchestration enforcement, the Stop guard and owner alerts are opt-in. The blast-radius guard, the attribution guard, local telemetry and the read-only local-control detection are on by default and can be turned off:
 
 | Switch | Public default | What it controls |
 | --- | --- | --- |

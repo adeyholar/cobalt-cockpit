@@ -12,5 +12,6 @@ git -C "$root" archive --format=tar HEAD | tar -x -C "$snap"
 find "$snap/tests" -name '*.test.ts' -delete
 cp "$root/docs/assets/src/demo-capture.ts" "$snap/tests/demo-capture.test.ts"
 (cd "$snap" && claude plugin test .) > "$snap/run.log" 2>&1 || { tail -20 "$snap/run.log" >&2; exit 1; }
-node "$root/docs/assets/src/build-demo.mjs" "$snap/run.log" --sha "$(git -C "$root" rev-parse HEAD)"
+# the commit that last changed what the capture runs: the plugin's code, its manifests and the test host file
+node "$root/docs/assets/src/build-demo.mjs" "$snap/run.log" --sha "$(git -C "$root" log -1 --format=%H -- hooks agents types .claude-plugin tests/world.ts)"
 node "$root/docs/assets/src/build-art.mjs" --png

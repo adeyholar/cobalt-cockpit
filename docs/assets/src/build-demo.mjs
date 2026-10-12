@@ -50,7 +50,7 @@ const fromLog = async log => {
   return {
     meta: {
       synthetic: true,
-      label: 'SYNTHETIC DEMO: the scenario input is synthetic; every row is output of the plugin code, run in the claude plugin test host. No model was called.',
+      label: 'SYNTHETIC DEMO: the scenario input is scripted. Rows are output of the plugin code run in the claude plugin test host, except Bash results, which are the test host\'s scripted answers (each frame\'s source field says which). No model was called.',
       plugin: plugin.name, plugin_version: plugin.version, source_commit: opt['--sha'] ?? 'unknown', host,
     },
     frames,
@@ -166,7 +166,7 @@ const SCENES = [
     typed: '/cockpit ready', out: { label: 'COMMAND OUTPUT', command: 's5-ready' }, hud: ['s5-hud-100'], hold: 3600 },
   { title: 'BLOCKED', text: 'The run needs a person. Cobalt Guard asks the host to notify and pins the alert on the HUD.',
     out: { label: 'TOOL REPLIES', tools: ['t22', 't23'] }, hud: ['s55-hud-100'], hold: 3200 },
-  { title: 'GATES AND GOAL CHECK', text: 'Commands pass, results are verified, each criterion has evidence.',
+  { title: 'GATES AND GOAL CHECK', text: 'Scripted passing results are recorded, agent results verified, each criterion has evidence.',
     out: { label: 'TOOL REPLIES', tools: ['t38', 't39', 't40'] }, hud: ['s6-hud-100'], hold: 2800 },
   { title: 'PERMITS DONE', text: 'DONE only when every milestone is complete and every required gate holds.',
     typed: '/cockpit ready', out: { label: 'COMMAND OUTPUT', command: 's7-ready' }, hud: ['s7-hud-100'], hold: 3400 },

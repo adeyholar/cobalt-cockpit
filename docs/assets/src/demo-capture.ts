@@ -114,17 +114,17 @@ test('SYNTHETIC DEMO capture', { options: { orchestration: true, guardAlerts: tr
   const swarm = (input: Record<string, unknown>) => $.tool.call({ tool: SWARM, ...input } as never)
   let seq = 0
   let at = 0
-  /** One tool or host reply, exactly as it came back; `call` is the synthetic input that caused it. */
-  const said = (call: string, reply: unknown): void => { emit({ id: `t${String(++seq).padStart(2, '0')}`, step: at, kind: 'tool', command: null, columns: 0, call, source: 'reply of the plugin to a tool call, an agent spawn or a notification, unedited', rows: textRows(typeof reply === 'string' ? reply : JSON.stringify(reply)) }) }
+  /** One reply, exactly as it came back; `call` is the synthetic input that caused it, `source` says whose reply it is. */
+  const said = (call: string, reply: unknown, source = 'reply of the plugin\'s own tool to a scripted call, unedited'): void => { emit({ id: `t${String(++seq).padStart(2, '0')}`, step: at, kind: 'tool', command: null, columns: 0, call, source, rows: textRows(typeof reply === 'string' ? reply : JSON.stringify(reply)) }) }
   const P = async (call: string, input: Record<string, unknown>) => { const r = await progress($, input as never); said(`progress ${call}`, r); return r }
   const S = async (call: string, input: Record<string, unknown>) => { const r = await swarm(input); said(`swarm ${call}`, (r as { result?: unknown }).result ?? r); return r }
-  const B = async (command: string, id: string) => { const r = await $.tool.call({ tool: 'Bash', command, tool_use_id: id } as never); said(`Bash ${command}`, (r as { result?: unknown }).result ?? r); return r }
+  const B = async (command: string, id: string) => { const r = await $.tool.call({ tool: 'Bash', command, tool_use_id: id } as never); said(`Bash ${command}`, (r as { result?: unknown }).result ?? r, 'the test host\'s scripted answer to a Bash call (no command ran), as it came back through the plugin\'s hooks'); return r }
   const assign = async (id: string, tier: string, role: string, objective: string, extra: Record<string, unknown> = {}) => {
     await S(`assign ${id} (${tier} ${role})`, { action: 'assign', task_id: id, tier, role, objective, scope: `Scope of ${id}`, spawn_reason: 'Independent bounded assignment (synthetic demo)', ...extra })
   }
   const spawn = async (id: string, type: string) => {
     const r = await $.agent.spawn({ prompt: `Perform task ${id} within its declared scope`, description: `[task:${id}] ${id}`, subagentType: `cobalt-cockpit:${type}`, tool_use_id: `spawn-${id}`, parentModel: 'claude-opus-5-5', provider: { plugin: 'cobalt-cockpit', tier: 'user' }, background: true, fork: false } as never)
-    said(`Agent [task:${id}] cobalt-cockpit:${type}`, r)
+    said(`Agent [task:${id}] cobalt-cockpit:${type}`, r, 'result of an agent spawn after the plugin\'s hooks: the model and a refusal are the plugin\'s, the agent id is the test host\'s')
     return (r as { agentId?: string }).agentId
   }
   const finishAgent = async (agentId: string, taskId: string, conclusion: string, evidence: string[]) => {
@@ -209,7 +209,7 @@ test('SYNTHETIC DEMO capture', { options: { orchestration: true, guardAlerts: tr
   at = 55
   await P('block m4', { action: 'block', milestone: 'm4', note: 'Owner decision needed: burst size for unauthenticated clients' })
   await advance(1000)
-  for (const n of w.notified) said(`ui.notify (${String(n.title)})`, n.text)
+  for (const n of w.notified) said(`ui.notify (${String(n.title)})`, n.text, 'text of the notification the plugin asked the host to write; the test host records it and writes nothing')
   await huds(55, true)
   await slash('s55-ready', 55, 'cockpit', 'ready', 'command')
   await slash('s55-alerts', 55, 'cockpit', 'alerts', 'command')

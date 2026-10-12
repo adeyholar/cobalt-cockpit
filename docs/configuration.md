@@ -11,7 +11,7 @@ printf '%s\n' '{"cobaltStrict":"true"}' | claude plugin configure cobalt-cockpit
 
 Restart Claude Code after changing configuration. To enable just Fable blocking alongside orchestration, configure `blockFable: true` separately. No external router is required.
 
-Guard and alert settings are the person's alone: they can be changed only by you in the config menu (`/config`), as [cobalt-guard.md](cobalt-guard.md) and [SECURITY.md](../SECURITY.md#hooks-that-refuse) describe.
+The Stop guard's and the alerts' settings (`stopGuard`, `verify*`, `stop*` and every `guard*` option) are the person's alone: they are accepted only from you in the config menu (`/config`), never from a plugin or a model, as [cobalt-guard.md](cobalt-guard.md) and [SECURITY.md](../SECURITY.md#hooks-that-refuse) describe. The blast-radius guard and the attribution guard are ordinary options.
 
 ## Every option and its default
 
