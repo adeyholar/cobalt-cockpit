@@ -34,7 +34,8 @@ import { isHeld, isQuiet, machineZone, quietConfigOf, quietLines } from './quiet
 import type { QuietConfig } from './quiet'
 
 export type AlertKind = 'verification-exhausted' | 'security-failure' | 'release-no-go' | 'review-hold' | 'run-blocked'
-export type AlertOutcome = 'sent' | 'failed' | 'refused' | 'throttled' | 'silenced' | 'resolved' | 'deferred'
+/** `recorded` (v0.5.9): the incident was written down on purpose and nothing was sent (record-only mode). It is never a notification outcome. */
+export type AlertOutcome = 'sent' | 'failed' | 'refused' | 'throttled' | 'silenced' | 'resolved' | 'deferred' | 'recorded'
 export const KINDS: readonly AlertKind[] = ['verification-exhausted', 'security-failure', 'release-no-go', 'review-hold', 'run-blocked']
 
 /** One fixed level per kind. CRITICAL is the class quiet hours treat apart; the levels order the HUD, not the sending. */
@@ -54,7 +55,14 @@ export type GuardConfig = {
   quiet: QuietConfig
   /** `guardDigest` (v0.5.8): one line about unacknowledged recorded alerts, once, at the start of a session. Independent of `guardAlerts`. */
   digest: boolean
+  /**
+   * `guardRecordOnly` (v0.5.9): incidents are recorded and never notified. With `guardAlerts` also on, the alerts behave exactly
+   * as they do without it (it is not a way to mute them) and the incidents are recorded as they always were.
+   */
+  recordOnly: boolean
 }
+/** Whether new incidents are written down: alerts on, or record-only on. Notifying is `enabled` alone. */
+export const isRecording = (cfg: GuardConfig): boolean => cfg.enabled || cfg.recordOnly
 export const COOLDOWN_DEFAULT_SEC = 300
 export const MAX_DEFAULT = 5
 export const MAX_CEILING = 20
@@ -94,6 +102,7 @@ export const guardConfigOf = (options: Readonly<Record<string, unknown>>, zone: 
   kindProblems: options['guardAlerts'] === true ? kindsOf(options['guardNotifyKinds']).problems : [],
   quiet: quietConfigOf(options, zone),
   digest: options['guardDigest'] === true,
+  recordOnly: options['guardRecordOnly'] === true,
 })
 
 /** One alert as the Run Ledger keeps it: closed vocabulary and numbers only. */
@@ -148,7 +157,7 @@ export const dueOf = (f: Facts): { kind: AlertKind; key: string }[] => {
   return out
 }
 
-export type Decision = { send: true; attempts: number } | { send: false; why: 'off' | 'duplicate' | 'silenced' | 'throttled' | 'budget' | 'gave-up' }
+export type Decision = { send: true; attempts: number } | { send: false; why: 'off' | 'duplicate' | 'silenced' | 'throttled' | 'budget' | 'gave-up' | 'recorded' }
 
 const isNotice = (a: AlertRecord): boolean => a.outcome === 'sent' || a.outcome === 'failed' || a.outcome === 'refused'
 
@@ -168,6 +177,8 @@ export const decide = (cfg: GuardConfig, state: GuardState, kept: readonly Alert
   const run = episodeOf(kept, key)
   // only a notification the host wrote ends the matter; a failed or refused one may be tried again, a bounded number of times
   if (run.some(a => a.outcome === 'sent')) return { send: false, why: 'duplicate' }
+  // recorded without notifying, on purpose: turning alerts on later does not send what was already written down
+  if (run.some(a => a.outcome === 'recorded')) return { send: false, why: 'recorded' }
   const failed = run.filter(a => a.outcome === 'failed' || a.outcome === 'refused').length
   if (failed >= RETRY_CAP) return { send: false, why: 'gave-up' }
   if (state.count >= cfg.maxPerSession) return { send: false, why: 'budget' }
@@ -258,7 +269,7 @@ export const hasWorkLeft = (cfg: GuardConfig, state: GuardState, kept: readonly 
 export const noticedOf = (kept: readonly AlertRecord[]): AlertRecord[] => {
   const out: AlertRecord[] = []
   for (const key of new Set(kept.map(a => a.key))) {
-    const first = episodeOf(kept, key).find(isNotice)
+    const first = episodeOf(kept, key).find(a => isNotice(a) || a.outcome === 'recorded')
     if (first !== undefined) out.push(first)
   }
 
@@ -291,8 +302,8 @@ export const digestOf = (kinds: readonly AlertKind[], taskId: number): string =>
 export const reminderOf = (kind: AlertKind, taskId: number, nth: number, max: number): string =>
   `Cobalt Guard · task ${taskId}, still open (reminder ${nth} of ${max}): ${HEAD[kind]}. Nothing was approved or released. /cockpit guard ack stops reminders`
 
-export const labelOf = (cfg: GuardConfig, state: GuardState, kept: readonly AlertRecord[]): 'OFF' | 'ARMED' | 'ALERT PENDING' | 'SENT' | 'FAILED' => {
-  if (!cfg.enabled) return 'OFF'
+export const labelOf = (cfg: GuardConfig, state: GuardState, kept: readonly AlertRecord[]): 'OFF' | 'RECORDING' | 'ARMED' | 'ALERT PENDING' | 'SENT' | 'FAILED' => {
+  if (!cfg.enabled) return cfg.recordOnly ? 'RECORDING' : 'OFF'
   if (state.pending) return 'ALERT PENDING'
   const last = [...kept].reverse().find(isNotice)
   if (last === undefined || last.acked === true) return 'ARMED'
@@ -438,6 +449,66 @@ export const ackOccurrence = (kept: readonly AlertRecord[], open: readonly Open[
   return { alerts: kept.map(a => (pending.includes(a) ? { ...a, acked: true as const } : a)), result: 'acked', ...(occurrence === undefined ? {} : { occurrence: { ...occurrence, acked: true } }) }
 }
 
+// --- v0.5.9: a project's records as one key per occurrence ---
+
+export const OCC_PREFIX = 'alert-occ:'
+export const OCC_PER_PROJECT = 32
+export const OCC_PROJECTS_MAX = 4
+/** The store key of one occurrence's records. Two sessions that record different occurrences write different keys, so neither can lose the other's. */
+export const occKeyOf = (project: string, id: string): string => `${OCC_PREFIX}${project}:${id}`
+const parseOccKey = (key: unknown): { project: string; id: string } | null => {
+  if (typeof key !== 'string' || !key.startsWith(OCC_PREFIX)) return null
+  const [project, id, ...rest] = key.slice(OCC_PREFIX.length).split(':')
+
+  return rest.length === 0 && project !== undefined && id !== undefined && PROJECT_RE.test(project) && ID_RE.test(id) ? { project, id } : null
+}
+/** The occurrences of a project the store holds, in the order it lists the keys (the order they were first written). */
+export const occIdsOf = (keys: readonly unknown[], project: string): string[] => keys.flatMap(k => { const o = parseOccKey(k); return o !== null && o.project === project ? [o.id] : [] })
+/**
+ * The occurrence keys to forget: every key of a project beyond the four kept, and the oldest beyond 32 in a project, those not
+ * in `protect` (the session's own) first. The four kept are `keep` (the writing session's project, which is never given up at
+ * project level) and the others whose newest key sits latest. Oldest means first written, as the store lists them: no clock is read.
+ */
+export const excessOccKeys = (keys: readonly unknown[], protect: ReadonlySet<string> = new Set(), keep?: string): string[] => {
+  const items = keys.flatMap((k, i) => { const o = parseOccKey(k); return o === null ? [] : [{ key: k as string, i, project: o.project }] })
+  const byProject = new Map<string, typeof items>()
+  for (const it of items) byProject.set(it.project, [...(byProject.get(it.project) ?? []), it])
+  const others = [...byProject.keys()].filter(p => p !== keep).sort((a, b) => (byProject.get(a)!.at(-1)!.i) - (byProject.get(b)!.at(-1)!.i))
+  const room = Math.max(0, OCC_PROJECTS_MAX - (keep !== undefined ? 1 : 0))
+  const keptOthers = others.slice(others.length - Math.min(others.length, room))
+  const drop: string[] = others.filter(p => !keptOthers.includes(p)).flatMap(p => byProject.get(p)!.map(x => x.key))
+  for (const p of [...keptOthers, ...(keep !== undefined && byProject.has(keep) ? [keep] : [])]) {
+    const mine = byProject.get(p)!
+    const over = mine.length - OCC_PER_PROJECT
+    if (over > 0) drop.push(...[...mine.filter(x => !protect.has(x.key)), ...mine.filter(x => protect.has(x.key))].slice(0, over).map(x => x.key))
+  }
+
+  return drop
+}
+/**
+ * The records a session starts from: the earlier format's occurrences the new keys do not hold, then the occurrences in key
+ * order. An occurrence still open when a later one of the same condition begins (its task ended, or two sessions diverged) is
+ * closed in memory by a resolved mark, so grouping by condition cannot merge the two and lose the later one's id.
+ */
+export const historyFrom = (stored: readonly { id: string; records: readonly AlertRecord[] }[], legacy: readonly AlertRecord[]): AlertRecord[] => {
+  const have = new Set(stored.map(s => s.id))
+  const parts: { id: string; records: AlertRecord[] }[] = [
+    ...episodesOf(legacy).filter(e => !have.has(e.id)).map(e => ({ id: e.id, records: [...e.records] })),
+    ...stored.map(s => ({ id: s.id, records: [...s.records] })),
+  ]
+  const open = new Map<string, { id: string; records: AlertRecord[] }>()
+  for (const part of parts) {
+    const first = part.records[0]
+    if (first === undefined) continue
+    const earlier = open.get(first.key)
+    const last = earlier?.records.at(-1)
+    if (earlier !== undefined && last !== undefined && last.outcome !== 'resolved') earlier.records.push({ key: last.key, kind: last.kind, taskId: last.taskId, at: last.at, outcome: 'resolved', attempts: 0, channel: null, id: earlier.id })
+    open.set(first.key, part)
+  }
+
+  return parts.flatMap(p => p.records).slice(-ALERT_CAP)
+}
+
 // --- v0.5.8: acknowledgments as keys of their own, the history merge, and the return digest ---
 
 export const ACK_PREFIX = 'alert-ack:'
@@ -445,7 +516,6 @@ export const HISTORY_PREFIX = 'alert-history:'
 export const PROJECT_RE = /^[0-9a-f]{12}$/
 /** At most this many acknowledgment keys are kept in all: four projects of 32 occurrences each. */
 export const ACK_KEYS_MAX = 128
-export const HISTORY_PROJECTS_MAX = 4
 
 /** The store key of one acknowledged occurrence. The host sets a key in one step, so writing it is one atomic act that no other write can undo. */
 export const ackKeyOf = (project: string, id: string): string => `${ACK_PREFIX}${project}:${id}`
@@ -455,8 +525,8 @@ const parseAckKey = (key: unknown): { project: string; id: string } | null => {
 
   return rest.length === 0 && project !== undefined && id !== undefined && PROJECT_RE.test(project) && ID_RE.test(id) ? { project, id } : null
 }
+/** v0.5.8 kept a project's records in one key; it is still read, and no longer written. */
 export const historyKeyOf = (project: string): string => `${HISTORY_PREFIX}${project}`
-export const isHistoryKey = (key: unknown): key is string => typeof key === 'string' && key.startsWith(HISTORY_PREFIX) && PROJECT_RE.test(key.slice(HISTORY_PREFIX.length))
 /** The occurrences of this project acknowledged in the store, from the keys it lists. A key that is not exactly ours is ignored. */
 export const ackedIdsOf = (keys: readonly unknown[], project: string): Set<string> => new Set(keys.flatMap(k => { const a = parseAckKey(k); return a !== null && a.project === project ? [a.id] : [] }))
 /** The acknowledgment keys to forget so that at most `max` remain: the oldest, as the store lists them. */
@@ -464,12 +534,6 @@ export const excessAckKeys = (keys: readonly unknown[], max: number = ACK_KEYS_M
   const mine = keys.filter((k): k is string => parseAckKey(k) !== null)
 
   return mine.slice(0, Math.max(0, mine.length - max))
-}
-/** The history keys to forget so that at most `max` projects remain, never `keep`: the oldest, as the store lists them. */
-export const excessHistoryKeys = (keys: readonly unknown[], keep: string, max: number = HISTORY_PROJECTS_MAX): string[] => {
-  const mine = keys.filter(isHistoryKey)
-
-  return mine.filter(k => k !== keep).slice(0, Math.max(0, mine.length - max))
 }
 /** The occurrences with a record not yet acknowledged, resolved ones apart: what `guard ack` acknowledges. */
 export const pendingIdsOf = (kept: readonly AlertRecord[]): string[] =>
@@ -485,28 +549,11 @@ export const applyAcks = (kept: readonly AlertRecord[], ids: ReadonlySet<string>
 
   return kept.map(a => (pending.has(a) ? { ...a, acked: true as const } : a))
 }
-/**
- * What a session writes as its project's history: the occurrences the stored history has and this session never saw,
- * then this session's own records, capped. An occurrence both hold is this session's copy (its records are the live ones);
- * what they differ in is not decided by guessing. An acknowledgment is never lost to the merge: the ids acknowledged in
- * the store, or marked acknowledged in either copy, are applied to the result. Pure.
- */
-export const mergeHistory = (own: readonly AlertRecord[], stored: readonly AlertRecord[], acked: ReadonlySet<string> = new Set()): AlertRecord[] => {
-  const mine = new Set(episodesOf(own).map(e => e.id))
-  const ownKeys = new Set(own.map(a => a.key))
-  // an occurrence of a condition this session also holds records of is not added from the stored copy: grouped with the session's
-  // own, the two would become one run and the later occurrence would lose its id
-  const foreign = episodesOf(stored).filter(e => !mine.has(e.id) && !ownKeys.has(e.key)).flatMap(e => e.records)
-  const all = new Set([...acked, ...markedIdsOf(own), ...markedIdsOf(stored)])
-
-  return applyAcks([...foreign, ...own], all).slice(-ALERT_CAP)
-}
-
 export type Digest = {
   recorded: number; unacked: number
   levels: Record<Level, number>
   open: number; history: number
-  deferred: number; notSent: number; held: number
+  deferred: number; notSent: number; held: number; recordedOnly: number
   oldest: Occurrence | null
 }
 /** The unacknowledged occurrences counted: by level, open or historical, by what became of the notification, and the oldest. Deterministic, from the records. */
@@ -518,12 +565,73 @@ export const digestOf2 = (occ: readonly Occurrence[]): Digest => {
     recorded: occ.length, unacked: un.length,
     levels: { CRITICAL: un.filter(o => o.level === 'CRITICAL').length, HIGH: un.filter(o => o.level === 'HIGH').length, NORMAL: un.filter(o => o.level === 'NORMAL').length },
     open: un.filter(o => o.state === 'open').length, history: un.filter(o => o.state !== 'open').length,
-    deferred: un.filter(o => o.status === 'deferred').length, notSent: un.filter(o => o.status === 'not-sent').length, held: un.filter(o => o.status === 'held').length,
+    deferred: un.filter(o => o.status === 'deferred').length, notSent: un.filter(o => o.status === 'not-sent').length, held: un.filter(o => o.status === 'held').length, recordedOnly: un.filter(o => o.status === 'recorded').length,
     oldest,
   }
 }
 /** `/cockpit alerts digest`. Counts only: no id, key, path or text from a record beyond its moment. Says what was recorded, never what anyone saw. */
-export const digestText = (occ: readonly Occurrence[], now: number, enabled: boolean): string => {
+/**
+ * What the commands know beyond the records. `seen`: the occurrences shown at the last person-initiated look (null: none
+ * recorded; undefined: not asked). `recording`: record-only mode is on. `columns`: the width to keep the summary within.
+ */
+export type ViewContext = { seen?: ReadonlySet<string> | null; recording?: boolean; columns?: number }
+
+export const SEEN_PREFIX = 'alert-seen:'
+export const SEEN_IDS_MAX = 64
+export const SEEN_PROJECTS_MAX = 4
+export const seenKeyOf = (project: string): string => `${SEEN_PREFIX}${project}`
+const isSeenKey = (key: unknown): key is string => typeof key === 'string' && key.startsWith(SEEN_PREFIX) && PROJECT_RE.test(key.slice(SEEN_PREFIX.length))
+/** The ids a stored look marker holds, or null when there is none or it is not ours: then every occurrence is new. */
+export const seenIdsOf = (value: unknown): Set<string> | null => {
+  if (value === null || typeof value !== 'object') return null
+  const v = value as { v?: unknown; ids?: unknown }
+
+  return v.v === 1 && Array.isArray(v.ids) ? new Set(v.ids.filter((x): x is string => typeof x === 'string' && ID_RE.test(x)).slice(-SEEN_IDS_MAX)) : null
+}
+/** The marker after a look: what it held, then what was shown, capped at the newest. A union, so a look that knew less never forgets what another saw. */
+export const withSeen = (prev: ReadonlySet<string> | null, shown: readonly string[]): string[] => [...new Set([...(prev ?? []), ...shown])].slice(-SEEN_IDS_MAX)
+/** The look markers to forget so that at most four projects keep one: the oldest, as the store lists them, never `keep`. */
+export const excessSeenKeys = (keys: readonly unknown[], keep: string, max: number = SEEN_PROJECTS_MAX): string[] => {
+  const mine = keys.filter(isSeenKey)
+
+  return mine.filter(k => k !== keep).slice(0, Math.max(0, mine.length - max))
+}
+/** The occurrences not shown at the last look, by identity and not by time: all of them when no look is recorded. */
+export const sinceOf = (occ: readonly Occurrence[], seen: ReadonlySet<string> | null): Occurrence[] => occ.filter(o => seen === null || !seen.has(o.id))
+const joinFit = (parts: readonly string[], columns: number, head: string): string => {
+  for (let n = parts.length; n > 0; n--) {
+    const text = `${head}${parts.slice(0, n).join(' · ')}`
+    if (text.length <= columns) return text
+  }
+
+  return head.trimEnd().slice(0, Math.max(0, columns))
+}
+/**
+ * "Since your last look": the occurrences recorded since the last time a person displayed the inbox, by level, then how many
+ * hold now, how many are history, and what became of their notifications (recorded only, SENT, deferred, not sent, held back),
+ * and how many are already acknowledged. A count of records: it says nothing about what anyone saw, and an unacknowledged
+ * record is not an unseen one.
+ */
+export const sinceLines = (occ: readonly Occurrence[], seen: ReadonlySet<string> | null, columns = 100): string[] => {
+  const fresh = sinceOf(occ, seen)
+  const lv = (['CRITICAL', 'HIGH', 'NORMAL'] as const).map(l => [l, fresh.filter(o => o.level === l).length] as const).filter(([, n]) => n > 0).map(([l, n]) => `${n} ${l}`)
+  const head = joinFit(fresh.length === 0 ? ['nothing new'] : lv, columns - (seen === null ? 0 : 0), 'SINCE LAST LOOK: ')
+  const lines = [seen === null && fresh.length > 0 && head.length + 22 <= columns ? `${head} (no earlier look)` : head]
+  if (fresh.length === 0 || columns < 36) return lines
+  const n = (f: (o: Occurrence) => boolean): number => fresh.filter(f).length
+  const parts = [
+    [n(o => o.state === 'open'), 'active'], [n(o => o.state !== 'open'), 'history'], [n(o => o.status === 'recorded'), 'recorded only'], [n(o => o.status === 'sent'), 'SENT'],
+    [n(o => o.status === 'deferred'), 'DEFERRED'], [n(o => o.status === 'not-sent'), 'NOT SENT'], [n(o => o.status === 'held'), 'HELD BACK'], [n(o => o.status === 'kind-off' || o.status === 'silenced'), 'NOT NOTIFIED'],
+    [n(o => o.acked), 'acknowledged'],
+  ].filter(([c]) => (c as number) > 0).map(([c, l]) => `${l} ${c}`)
+  if (parts.length > 0) lines.push(joinFit(parts, columns, '  '))
+
+  return lines
+}
+const recordingNote = (enabled: boolean, ctx: ViewContext | undefined, what: string): string | null =>
+  enabled ? null : ctx?.recording === true ? `Record-only (guardRecordOnly): incidents are recorded here; nothing is notified. ${what}` : `Alerts are off (guardAlerts): ${what} nothing new is recorded or sent.`
+
+export const digestText = (occ: readonly Occurrence[], now: number, enabled: boolean, ctx?: ViewContext): string => {
   const d = digestOf2(occ)
   const lines: string[] = []
   if (d.recorded === 0) lines.push('ALERT DIGEST · nothing recorded.')
@@ -532,12 +640,15 @@ export const digestText = (occ: readonly Occurrence[], now: number, enabled: boo
     lines.push(`ALERT DIGEST · ${d.unacked} unacknowledged of ${d.recorded} recorded`)
     lines.push(`By level: CRITICAL ${d.levels.CRITICAL} · HIGH ${d.levels.HIGH} · NORMAL ${d.levels.NORMAL}`)
     lines.push(`Condition open now: ${d.open} · no longer open (history): ${d.history}`)
-    const notes = [d.deferred > 0 ? `${d.deferred} DEFERRED, quiet hours` : '', d.notSent > 0 ? `${d.notSent} NOT SENT` : '', d.held > 0 ? `${d.held} HELD BACK, cooldown or budget` : ''].filter(n => n !== '')
+    const notes = [d.recordedOnly > 0 ? `${d.recordedOnly} RECORDED only` : '', d.deferred > 0 ? `${d.deferred} DEFERRED, quiet hours` : '', d.notSent > 0 ? `${d.notSent} NOT SENT` : '', d.held > 0 ? `${d.held} HELD BACK, cooldown or budget` : ''].filter(n => n !== '')
     if (notes.length > 0) lines.push(`Notifications: ${notes.join(' · ')}`)
     if (d.oldest !== null) lines.push(`Oldest unacknowledged: recorded ${stamp(d.oldest.at)}${ageOf(now - d.oldest.at)}`)
     lines.push('These are records of what Cockpit wrote and what the host reported; they say nothing about what anyone saw.')
   }
-  if (!enabled) lines.push('Alerts are off (guardAlerts): this is what was recorded earlier; nothing new is recorded or sent.')
+  // read-only: the look marker is read to count what is new, and is never written by the digest
+  if (ctx?.seen !== undefined && d.recorded > 0) lines.push(...sinceLines(occ, ctx.seen, ctx.columns ?? 100))
+  const note = recordingNote(enabled, ctx, 'this is what was recorded earlier;')
+  if (note !== null) lines.push(note)
   lines.push('Details: /cockpit alerts · acknowledge one: /cockpit alerts ack <id>')
 
   return lines.join('\n')
@@ -555,24 +666,34 @@ const stamp = (at: number): string => {
   try { return `${new Date(at).toISOString().slice(0, 16).replace('T', ' ')}Z` } catch { return 'time unknown' }
 }
 const ageOf = (ms: number): string => (ms < 0 ? '' : ms < 60_000 ? ' (just now)' : ms < 3_600_000 ? ` (${Math.floor(ms / 60_000)}m ago)` : ms < 172_800_000 ? ` (${Math.floor(ms / 3_600_000)}h ago)` : ` (${Math.floor(ms / 86_400_000)}d ago)`)
-const OUTCOME: Record<PinStatus, string> = { sent: 'notification SENT', 'not-sent': 'notification NOT SENT', deferred: 'DEFERRED, quiet hours', held: 'HELD BACK, cooldown or budget', 'kind-off': 'NOT NOTIFIED, kind off', silenced: 'NOT NOTIFIED, silenced' }
+const OUTCOME: Record<PinStatus, string> = { sent: 'notification SENT', 'not-sent': 'notification NOT SENT', deferred: 'DEFERRED, quiet hours', held: 'HELD BACK, cooldown or budget', 'kind-off': 'NOT NOTIFIED, kind off', silenced: 'NOT NOTIFIED, silenced', recorded: 'RECORDED only, no notification' }
 const STATE: Record<Occurrence['state'], string> = { open: 'condition OPEN now', resolved: 'condition no longer open (recorded resolved)', ended: 'condition no longer open (task replaced or gone)' }
 export const INBOX_PAGE = 8
 
 export const inboxPages = (n: number): number => Math.max(1, Math.ceil(n / INBOX_PAGE))
+/** The ids `inboxText` shows on this page: what a look marks as shown. */
+export const pageIdsOf = (occ: readonly Occurrence[], page: number): string[] => {
+  const ordered = inboxOrder(occ)
+  const at = Math.min(Math.max(1, page), inboxPages(ordered.length))
+
+  return ordered.slice((at - 1) * INBOX_PAGE, at * INBOX_PAGE).map(o => o.id)
+}
 /**
  * The inbox, one page of it. Each line is one occurrence: its id, level, kind, task, the moment it was recorded, what became
  * of its notification, whether it was acknowledged, and whether the condition holds now. "Recorded" is when Cockpit wrote the
  * record; "open now" is read off the task as it is now; SENT is the host saying it wrote the notification. None of it says
  * a person saw anything, and no connection is claimed to have dropped or returned.
  */
-export const inboxText = (occ: readonly Occurrence[], page: number, now: number, enabled: boolean): string => {
+export const inboxText = (occ: readonly Occurrence[], page: number, now: number, enabled: boolean, ctx?: ViewContext): string => {
   const ordered = inboxOrder(occ)
   const pages = inboxPages(ordered.length)
   const at = Math.min(Math.max(1, page), pages)
   const lines = [`ALERT INBOX · ${ordered.length} recorded · ${ordered.filter(o => o.state === 'open').length} open now · ${ordered.filter(o => !o.acked).length} unacknowledged · page ${at} of ${pages}`]
-  if (!enabled) lines.push('Alerts are off (guardAlerts): what was recorded earlier is shown; nothing new is recorded or sent.')
-  if (ordered.length === 0) lines.push('Nothing recorded. An alert is recorded when a run needs a person: a failed security check, a NO-GO, exhausted verification, an open review or a blocked run.')
+  // counted before this look is recorded, from the identities shown at the last one
+  if (ctx?.seen !== undefined && ordered.length > 0) lines.push(...sinceLines(ordered, ctx.seen, ctx.columns ?? 100))
+  const note = recordingNote(enabled, ctx, 'what was recorded earlier is shown;')
+  if (note !== null) lines.push(note)
+  if (ordered.length === 0) lines.push('Nothing recorded. An incident is recorded when a run needs a person: a failed security check, a NO-GO, exhausted verification, an open review or a blocked run.')
   let group = ''
   for (const o of ordered.slice((at - 1) * INBOX_PAGE, at * INBOX_PAGE)) {
     const g = o.state === 'open' ? 'OPEN NOW (read from the current task)' : 'HISTORY (recorded earlier; the condition no longer holds)'
@@ -586,12 +707,13 @@ export const inboxText = (occ: readonly Occurrence[], page: number, now: number,
 }
 
 /** What the HUD pins and the status lists: a condition that holds now, was raised, and what became of its notification. */
-export type PinStatus = 'sent' | 'not-sent' | 'deferred' | 'held' | 'kind-off' | 'silenced'
+export type PinStatus = 'sent' | 'not-sent' | 'deferred' | 'held' | 'kind-off' | 'silenced' | 'recorded'
 export type Pin = { key: string; kind: AlertKind; taskId: number; level: Level; status: PinStatus; acked: boolean }
 export type Open = { kind: AlertKind; key: string }
 
 const statusOfRun = (run: readonly AlertRecord[]): PinStatus => {
   if (wasSent(run)) return 'sent'
+  if (run.some(a => a.outcome === 'recorded')) return 'recorded'
   const last = run.at(-1)
 
   return last === undefined || last.outcome === 'failed' || last.outcome === 'refused' ? 'not-sent' : last.outcome === 'deferred' ? 'deferred' : last.outcome === 'silenced' ? (last.why === 'kind-off' ? 'kind-off' : 'silenced') : 'held'
@@ -614,8 +736,8 @@ export const pinsOf = (kept: readonly AlertRecord[], open: readonly Open[]): Pin
 
 const PIN_NAME: Record<AlertKind, string> = { 'security-failure': 'security check failed', 'release-no-go': 'release NO-GO', 'verification-exhausted': 'verification exhausted', 'review-hold': 'review hold open', 'run-blocked': 'run blocked' }
 /** What became of the notification. SENT is the host having written it; nothing here says it was seen. */
-const PIN_STATUS: Record<PinStatus, string> = { sent: 'notification SENT, not acknowledged', 'not-sent': 'notification NOT SENT', deferred: 'DEFERRED, quiet hours', held: 'HELD BACK, cooldown or budget', 'kind-off': 'NOT NOTIFIED, kind off', silenced: 'NOT NOTIFIED, silenced' }
-const PIN_SHORT: Record<PinStatus, string> = { sent: 'SENT', 'not-sent': 'NOT SENT', deferred: 'DEFERRED', held: 'HELD', 'kind-off': 'OFF', silenced: 'SILENCED' }
+const PIN_STATUS: Record<PinStatus, string> = { sent: 'notification SENT, not acknowledged', 'not-sent': 'notification NOT SENT', deferred: 'DEFERRED, quiet hours', held: 'HELD BACK, cooldown or budget', 'kind-off': 'NOT NOTIFIED, kind off', silenced: 'NOT NOTIFIED, silenced', recorded: 'RECORDED, no notification' }
+const PIN_SHORT: Record<PinStatus, string> = { sent: 'SENT', 'not-sent': 'NOT SENT', deferred: 'DEFERRED', held: 'HELD', 'kind-off': 'OFF', silenced: 'SILENCED', recorded: 'RECORDED' }
 
 export type PinLine = { text: string; level: Level | 'INFO' }
 /**
@@ -657,9 +779,18 @@ export const pinLine = (pins: readonly Pin[], unconfirmed: boolean, label: strin
 /** What the status needs beyond the records: the moment, what holds now, the channel last written to, and the connection. */
 export type GuardView = { now: number; open: readonly Open[]; channel: string | null; isSsh: boolean }
 
+const activeLines = (kept: readonly AlertRecord[], view: GuardView): string[] => {
+  const active = conditionsOf(kept, view.open)
+  const lines = active.length === 0 ? ['Active conditions: none raised and still open.'] : []
+  for (const p of active) lines.push(`  ACTIVE ${p.level} ${p.kind} · task ${p.taskId} · ${p.status === 'sent' ? 'notification SENT' : PIN_STATUS[p.status]} · ${p.acked ? 'acknowledged' : 'not acknowledged'}`)
+
+  return lines
+}
+
 /** The priority, kind and quiet-hours status and the active conditions, for `/cockpit guard` and `/cockpit doctor`. */
 export const policyLines = (cfg: GuardConfig, kept: readonly AlertRecord[], view: GuardView): string[] => {
-  if (!cfg.enabled) return []
+  if (!cfg.enabled && !cfg.recordOnly) return []
+  if (!cfg.enabled) return activeLines(kept, view)
   const off = KINDS.filter(k => !cfg.kinds.includes(k))
   const lines = [
     `Priority: ${(['CRITICAL', 'HIGH', 'NORMAL'] as const).map(l => `${l} ${PRIORITY.filter(k => LEVEL[k] === l).join(', ')}`).join(' · ')}. Fixed; it orders the HUD and sets what quiet hours treat as critical.`,
@@ -667,9 +798,7 @@ export const policyLines = (cfg: GuardConfig, kept: readonly AlertRecord[], view
     ...cfg.kindProblems.map(p => `  WARN ${p}`),
     ...quietLines(cfg.quiet, view.now, view.channel, view.isSsh),
   ]
-  const active = conditionsOf(kept, view.open)
-  if (active.length === 0) lines.push('Active conditions: none raised and still open.')
-  for (const p of active) lines.push(`  ACTIVE ${p.level} ${p.kind} · task ${p.taskId} · ${p.status === 'sent' ? 'notification SENT' : PIN_STATUS[p.status]} · ${p.acked ? 'acknowledged' : 'not acknowledged'}`)
+  lines.push(...activeLines(kept, view))
   const owed = deferredOf(kept).filter(d => view.open.some(o => o.key === d.key)).length
   if (owed > 0) lines.push(`  ${owed} deferred alert${owed === 1 ? ' is' : 's are'} owed a notification: ${isQuiet(cfg.quiet, view.now) ? 'after quiet hours end' : 'at the next look, inside the cooldown and the budget'}, ${owed === 1 ? 'if still open then' : 'as one notification, for those still open then'}.`)
 
@@ -678,10 +807,15 @@ export const policyLines = (cfg: GuardConfig, kept: readonly AlertRecord[], view
 
 export const guardText = (cfg: GuardConfig, state: GuardState, kept: readonly AlertRecord[], view?: GuardView): string => {
   const lines = [`GUARD: ${labelOf(cfg, state, kept)}`]
-  if (!cfg.enabled) lines.push('Off. Set guardAlerts to true to be told when a run needs you. No alert is sent while off.')
+  if (!cfg.enabled && cfg.recordOnly) {
+    lines.push('Recording only (guardRecordOnly) · alerts are off: incidents are written down for /cockpit alerts and /cockpit alerts digest. No notification, sound or bell is sent for them; nothing is told to you.')
+    lines.push('Set guardAlerts to true as well to be notified: then notifications behave as they always do and incidents are recorded the same way. A condition already recorded here when you turn alerts on is not announced.')
+    if (view !== undefined) lines.push(...policyLines(cfg, kept, view))
+  } else if (!cfg.enabled) lines.push('Off. Set guardAlerts to true to be told when a run needs you, or guardRecordOnly to record incidents without being told. No alert is sent and nothing new is recorded while both are off.')
   else {
     lines.push(`Armed · ${state.count} of ${cfg.maxPerSession} alerts used this session · at most one every ${Math.round(cfg.cooldownMs / 1000)}s · the same occurrence never twice.`)
     lines.push('Delivery: your terminal notification channel, through the host. SENT means the host wrote it to your terminal; it cannot confirm that you saw it. No webhook, email or push exists in this version.')
+    if (cfg.recordOnly) lines.push('guardRecordOnly is also on: it changes nothing while alerts are on. Notifications are sent as above, and every incident is recorded either way.')
   }
   if (cfg.enabled && state.all) lines.push('Silenced for this session: nothing is sent or repeated. /cockpit guard unsilence resumes.')
   if (cfg.enabled) {
@@ -695,7 +829,7 @@ export const guardText = (cfg: GuardConfig, state: GuardState, kept: readonly Al
     for (const a of noticedOf(kept)) {
       const run = episodeOf(kept, a.key)
       const made = run.filter(r => r.nth !== undefined).length
-      const state1 = run.some(r => r.acked === true) ? 'acknowledged, no more reminders' : state.all || state.silenced.includes(a.key) ? 'silenced' : made >= cfg.maxReminders ? 'reminders spent' : state.count >= cfg.maxPerSession - 1 ? 'session budget spent' : 'reminding'
+      const state1 = !run.some(r => r.outcome === 'sent') ? 'recorded only, no reminders' : run.some(r => r.acked === true) ? 'acknowledged, no more reminders' : state.all || state.silenced.includes(a.key) ? 'silenced' : made >= cfg.maxReminders ? 'reminders spent' : state.count >= cfg.maxPerSession - 1 ? 'session budget spent' : 'reminding'
       lines.push(`  OPEN ${a.kind} · task ${a.taskId} · reminders ${made} of ${cfg.maxReminders} · ${state1}`)
     }
   }
@@ -705,7 +839,7 @@ export const guardText = (cfg: GuardConfig, state: GuardState, kept: readonly Al
   return lines.join('\n')
 }
 
-const OUTCOME_SET: readonly string[] = ['sent', 'failed', 'refused', 'throttled', 'silenced', 'resolved', 'deferred']
+const OUTCOME_SET: readonly string[] = ['sent', 'failed', 'refused', 'throttled', 'silenced', 'resolved', 'deferred', 'recorded']
 const WHY_SET: readonly string[] = ['disabled', 'no-channel', 'no-surface', 'refused', 'error', 'cooldown', 'budget', 'quiet', 'kind-off']
 /** Whether a stored alert has exactly the shape this build writes. A malformed one is dropped, never believed. */
 export const isAlertRecord = (x: unknown): x is AlertRecord => {

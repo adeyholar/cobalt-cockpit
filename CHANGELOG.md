@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (0.5.9) — Record-only mode and the since-last-look summary
+
+Details, the mode table, what the store does and does not guarantee, and the acceptance procedure: [docs/implementation-v0.5.9.md](docs/implementation-v0.5.9.md).
+
+- `guardRecordOnly` (off by default, person-only): with `guardAlerts` off, the conditions Cobalt Guard alerts about are written down with their level and shown by `/cockpit alerts` and `/cockpit alerts digest`; nothing is ever sent, played or rung. With `guardAlerts` also on nothing changes (it is not a way to mute alerts). A new outcome, `recorded`, says so: it is never SENT, FAILED or DEFERRED. No cooldown or budget is used. Turning alerts on later does not announce what was recorded.
+- `SINCE LAST LOOK: 1 CRITICAL · 2 HIGH · 3 NORMAL` at the top of `/cockpit alerts` and in `/cockpit alerts digest`: the occurrences not shown at the last look a person made, counted by identity and not by time, split into active and history and by what became of the notification. A person's display of the inbox marks the occurrences it showed; the digest, the session-start line and any other origin mark nothing. Looking acknowledges nothing. Best effort across sessions (a read and a write of one key); it can over-report and never marks an occurrence seen that was not shown.
+- The HUD row says `RECORDING`, pins the most important unresolved recorded incident (`RECORDED, no notification`) or counts the unacknowledged history, and is absent when there is nothing to show.
+- Each occurrence's records are a key of their own (`alert-occ:<project>:<id>`), so two sessions recording different occurrences can no longer lose each other's records. The v0.5.8 and v0.5.7 history keys are still read and no longer written.
+- An acknowledgment key can outlive its record: `/cockpit alerts ack` of such an id says so instead of "unknown". `/cockpit doctor` and `/cockpit guard` describe the mode.
+
 ## Unreleased (0.5.8) — Inbox consistency and return digest
 
 Details, what the host's store does and does not guarantee, and the acceptance procedure for two concurrent sessions: [docs/implementation-v0.5.8.md](docs/implementation-v0.5.8.md).
