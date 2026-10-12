@@ -509,6 +509,119 @@ export const historyFrom = (stored: readonly { id: string; records: readonly Ale
   return parts.flatMap(p => p.records).slice(-ALERT_CAP)
 }
 
+// --- v0.6.0: a bounded export, and the earlier formats' cleanup plan ---
+
+export const EXPORT_SCHEMA = 'cobalt-cockpit/alerts-export'
+export const EXPORT_VERSION = 1
+export const EXPORT_MAX = 64
+const NOTIFICATION: Record<PinStatus, string> = { sent: 'SENT', recorded: 'RECORDED', deferred: 'DEFERRED', 'not-sent': 'NOT_SENT', held: 'HELD_BACK', 'kind-off': 'NOT_NOTIFIED_KIND_OFF', silenced: 'NOT_NOTIFIED_SILENCED' }
+/** The host's own notification channels: anything else in a stored record is reported as `other`, never echoed. */
+const CHANNELS: readonly string[] = ['iterm2', 'iterm2_with_bell', 'kitty', 'ghostty', 'terminal_bell']
+const channelOf = (c: string | null): string | null => (c === null ? null : CHANNELS.includes(c) ? c : 'other')
+const iso = (at: number): string | null => { try { return new Date(at).toISOString() } catch { return null } }
+/**
+ * `/cockpit alerts export`: the project's occurrences as JSON in a closed vocabulary. Each field is an enumerated word, a number,
+ * an 8-hex id, a 12-hex project hash, an ISO time or the host's channel name; no prompt, path, command, key or free text. What
+ * became of the notification and whether the person acknowledged it are separate fields, so SENT, RECORDED and DEFERRED never
+ * stand in for ACKNOWLEDGED. Bounded, and nothing is written anywhere.
+ */
+export const exportOf = (occ: readonly Occurrence[], project: string | null, now: number): string => {
+  const ordered = [...occ].sort((a, b) => a.seq - b.seq)
+  const shown = ordered.slice(-EXPORT_MAX)
+
+  return JSON.stringify({
+    schema: EXPORT_SCHEMA, version: EXPORT_VERSION, project: project !== null && PROJECT_RE.test(project) ? project : null, exportedAt: iso(now),
+    occurrences: shown.map(o => ({ id: o.id, level: o.level, kind: o.kind, task: o.taskId, recordedAt: iso(o.at), lastRecordedAt: iso(o.lastAt), condition: o.state === 'open' ? 'OPEN' : o.state === 'resolved' ? 'RESOLVED' : 'ENDED', notification: NOTIFICATION[o.status], channel: o.status === 'sent' ? channelOf(o.channel) : null, reminders: o.reminders, acknowledged: o.acked })),
+    count: shown.length, truncated: ordered.length > shown.length,
+    note: 'Records of what Cockpit wrote and what the host reported; not evidence that anyone saw a notification.',
+  }, null, 2)
+}
+
+// every field but the acknowledgment (counted apart), the cue (it may be set after a write) and the id (derived, and checked as the
+// occurrence's own): the content of the record, not its address
+const recordSig = (r: AlertRecord): string => JSON.stringify([r.key, r.kind, r.taskId, r.at, r.outcome, r.attempts, r.channel, r.why ?? null, r.nth ?? 0])
+/**
+ * Whether an occurrence an earlier format holds is held, in full, by its own key: the stored value is of the current shape,
+ * every record in it is understood, it is that occurrence, and every earlier record (with its acknowledgment) is among its
+ * records. A key that merely exists, or holds less, does not count: deleting the earlier copy would then lose something.
+ */
+export const isMigratedEpisode = (earlier: readonly AlertRecord[], id: string, stored: unknown): boolean => {
+  if (stored === null || typeof stored !== 'object') return false
+  const v = stored as { v?: unknown; records?: unknown }
+  if (v.v !== 1 || !Array.isArray(v.records)) return false
+  const records = validAlerts(v.records)
+  if (records.length !== v.records.length || episodesOf(records)[0]?.id !== id) return false
+  // counted with multiplicity: two equal earlier records need two in the key, and an acknowledged one an acknowledged one
+  const have = new Map<string, { all: number; acked: number }>()
+  for (const r of records) { const c = have.get(recordSig(r)) ?? { all: 0, acked: 0 }; have.set(recordSig(r), { all: c.all + 1, acked: c.acked + (r.acked === true ? 1 : 0) }) }
+  const need = new Map<string, { all: number; acked: number }>()
+  for (const r of earlier) { const c = need.get(recordSig(r)) ?? { all: 0, acked: 0 }; need.set(recordSig(r), { all: c.all + 1, acked: c.acked + (r.acked === true ? 1 : 0) }) }
+
+  return [...need].every(([sig, n]) => { const h = have.get(sig); return h !== undefined && h.all >= n.all && h.acked >= n.acked })
+}
+/** One earlier-format key and what it holds per project: how many occurrences, and how many already have keys of their own. */
+export type LegacyEntry = { key: string; projects: { project: string; occurrences: number; migrated: number }[]; unreadable: boolean }
+export type LegacyPlan = { entries: LegacyEntry[]; deletable: string[]; kept: string[]; token: string }
+const legacyProjectsOf = (value: unknown, single: boolean, keyProject: string | null): { project: string; records: AlertRecord[] }[] | null => {
+  if (value === null || typeof value !== 'object') return null
+  const v = value as { v?: unknown; projects?: unknown; alerts?: unknown }
+  if (v.v !== 1) return null
+  if (!single) return keyProject !== null && Array.isArray(v.alerts) ? [{ project: keyProject, records: validAlerts(v.alerts) }] : null
+  if (v.projects === null || typeof v.projects !== 'object') return null
+
+  return Object.entries(v.projects as Record<string, unknown>).filter(([p]) => PROJECT_RE.test(p)).map(([project, records]) => ({ project, records: validAlerts(records) }))
+}
+/**
+ * The cleanup plan for the earlier formats (the v0.5.7 key `alert-history` and v0.5.8 keys `alert-history:<project>`), from the
+ * values and the store's key list. A key may be deleted only when it was read in full and every occurrence it holds has a key of
+ * its own (`alert-occ:<project>:<id>`): deleting it then loses nothing. Anything unreadable, partly understood or not yet migrated
+ * is kept. `token` names exactly this plan, so a deletion confirms the plan a person read and not a later one.
+ */
+export const legacyPlanOf = (values: readonly { key: string; value: unknown }[], keys: readonly unknown[], occ: ReadonlyMap<string, unknown> = new Map()): LegacyPlan => {
+  const entries: LegacyEntry[] = []
+  const deletable: string[] = []
+  const kept: string[] = []
+  for (const { key, value } of values) {
+    const single = key === 'alert-history'
+    const keyProject = single ? null : key.startsWith(HISTORY_PREFIX) && PROJECT_RE.test(key.slice(HISTORY_PREFIX.length)) ? key.slice(HISTORY_PREFIX.length) : null
+    if (!single && keyProject === null) continue
+    const projects = legacyProjectsOf(value, single, keyProject)
+    // a value this build does not understand in full is never deleted
+    const raw = value as { projects?: Record<string, unknown>; alerts?: unknown[] } | null
+    const whole = projects !== null && (single
+      ? Object.keys(raw?.projects ?? {}).every(p => PROJECT_RE.test(p)) && Object.values(raw?.projects ?? {}).every(r => Array.isArray(r) && validAlerts(r).length === r.length)
+      : Array.isArray(raw?.alerts) && validAlerts(raw?.alerts).length === (raw?.alerts ?? []).length)
+    const rows = (projects ?? []).map(({ project, records }) => {
+      const have = new Set(occIdsOf(keys, project))
+      const eps = episodesOf(records)
+
+      return { project, occurrences: eps.length, migrated: eps.filter(e => have.has(e.id) && isMigratedEpisode(e.records, e.id, occ.get(occKeyOf(project, e.id)))).length }
+    })
+    entries.push({ key, projects: rows, unreadable: projects === null || !whole })
+    if (projects !== null && whole && rows.every(r => r.migrated === r.occurrences)) deletable.push(key)
+    else kept.push(key)
+  }
+
+  // the code names the values read, not only the counts: a changed record in a counted occurrence changes it too
+  const read = values.map(v => [v.key, JSON.stringify(v.value)])
+  const held = [...occ.entries()].sort(([x], [y]) => (x < y ? -1 : 1)).map(([k, v]) => [k, JSON.stringify(v)])
+
+  return { entries, deletable, kept, token: hashOf(JSON.stringify([entries, deletable, read, held])) }
+}
+export const legacyPlanText = (plan: LegacyPlan): string => {
+  if (plan.entries.length === 0) return 'LEGACY ALERT HISTORY · none in the store. Nothing to clean up.'
+  const lines = ['LEGACY ALERT HISTORY · DRY RUN · nothing was changed']
+  for (const e of plan.entries) {
+    lines.push(`  ${e.key}${e.unreadable ? ' · not fully understood by this build: KEPT' : ''}`)
+    for (const r of e.projects) lines.push(`    project ${r.project} · ${r.occurrences} occurrence${r.occurrences === 1 ? '' : 's'} · ${r.migrated} held in full by keys of their own${r.migrated < r.occurrences ? ` · ${r.occurrences - r.migrated} NOT (or not in full): KEPT` : ''}`)
+  }
+  lines.push(plan.deletable.length === 0 ? 'Nothing can be deleted safely: every key above still holds something that exists nowhere else, or was not understood.' : `Safe to delete (every occurrence is already held in full by a key of its own): ${plan.deletable.join(', ')}`)
+  if (plan.kept.length > 0) lines.push(`Kept: ${plan.kept.join(', ')}. A project's records are migrated when a session with alerts or record-only on starts in that project.`)
+  if (plan.deletable.length > 0) lines.push(`To delete exactly what is listed as safe, type: /cockpit alerts legacy delete ${plan.token}  (the code changes if the store changes)`)
+
+  return lines.join('\n')
+}
+
 // --- v0.5.8: acknowledgments as keys of their own, the history merge, and the return digest ---
 
 export const ACK_PREFIX = 'alert-ack:'

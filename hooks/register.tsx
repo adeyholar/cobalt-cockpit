@@ -10,6 +10,8 @@
 
 import { emptySwarm, configureSwarm, submitTask, admitTask, bindAgent, finishTask, resolveEscalation, setWave, escalateTask, verifyTask, reportResult, acknowledgeHandback, requestCancel, releaseReservation, summarizeSwarm, markStalled, heartbeat, normalizeOwned, overlaps, ownershipAllows, setAppliedEffort, setLaunchEffort, SONNET_LED_SWARM } from './swarm'
 import type { Swarm, SwarmTask, ModelTier, Wave, Verification } from './swarm'
+import { agentsText, taskText } from './inspector'
+import { readyText } from './readiness'
 import { textOf } from './ledger'
 import { atom, read, update } from 'claude-code'
 import { desiredRequest, policyMismatch, AGENT_MODEL, HAIKU_MODEL, MAIN_MODEL, OPUS_MODEL, isProfile, DEFAULT_PROFILE } from './model-policy'
@@ -61,7 +63,7 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import { exportOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
@@ -499,7 +501,8 @@ const reconcileRelease = async ($: EngineInterface): Promise<void> => {
   const history = await releaseHistorySoft($)
   // nothing held and nothing stored that could stand for a commit: git need not be asked
   if (review.cleared?.some(x => x.ground === 'release') !== true && review.state !== 'adjudicated' && !history.some(entry => entry.returned && entry.verified === 'pass' && entry.outcome === 'go')) return
-  const revalidated = revalidateRelease(review, await candidateOf($), history)
+  const candidate = await candidateOf($)
+  const revalidated = revalidateRelease(review, candidate, history)
   if (revalidated === review) return
   const was = JSON.stringify(review)
   await update($, taskAtom, t => (t?.review !== undefined && JSON.stringify(t.review) === was ? settle({ ...t, review: revalidated }).task : t))
@@ -779,7 +782,8 @@ const guardSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
     // A pattern reaches only below that path: one that is absolute, home-relative or climbs out is refused.
     const pattern = tool === 'Glob' ? e['pattern'] : tool === 'Grep' ? e['glob'] : undefined
     if (typeof pattern === 'string' && !task.owned.includes('*') && /(?:^|[{,])\s*[\/~]|(?:^|[\/\\{,])\.\.(?:[\/\\},]|$)/.test(pattern.trim())) return 'SWARM / read outside owned resources: give the directory as path and a pattern relative to it'
-    if (!ownershipAllows(s,task.id,await canonicalResource($,path),'read')) return 'SWARM / read outside owned resources'
+    const resource = await canonicalResource($, path)
+    if (!ownershipAllows(s, task.id, resource, 'read')) return 'SWARM / read outside owned resources'
   }
   if (task && tool === 'Bash' && !task.owned.includes('*')) return 'SWARM / shell inspection requires declared wildcard read scope'
   if (write) {
@@ -878,6 +882,8 @@ const HELP =
   '/cockpit discovery  show the discovery level, unknowns, decisions and goal check; pin light | standard | deep, or auto\n' +
   '/cockpit router     show this session\'s router, or switch it: off, nobodywho, jev (this session only)\n' +
   '/cockpit stats     observed model use, routing and consultations: 7d | 30d | all, with --json or --csv\n' +
+  '/cockpit agents    the agent inspector: tasks, agents, waves, ownership, requested versus applied effort, and why a task is waiting (read-only); agents <task> explains one\n' +
+  '/cockpit ready     which recorded conditions stand between the task and DONE: gates, review, goal check, guard, escalations (read-only; approves nothing)\n' +
   '/cockpit flow      the Neural Flow in words: which of input, discovery, routing, workers, verify and done are verified\n' +
   '/cockpit guard     Cobalt Guard owner alerts: status, priorities, quiet hours and active conditions; ack, silence or unsilence; test and seen check that a notification reaches you (none changes a verdict)\n' +
   '/cockpit alerts   the alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; alerts digest summarises the unacknowledged and what is new since your last look; alerts ack <id> acknowledges one (changes no verdict)\n' +
@@ -1200,6 +1206,21 @@ const stopFacts = async ($: EngineInterface): Promise<StopFacts> => {
   }
 }
 
+/** The owner-alert facts the doctor shows: the mode, the counts, the transport and the active conditions. */
+const guardFacts = async ($: EngineInterface): Promise<DoctorFacts['guard']> => {
+  const v = await guardView($)
+  const transport = await transportText($)
+  const view = isRecording(guardCfg) ? await guardSeen($, v.kept) : undefined
+  const policy = view === undefined ? [] : policyLines(guardCfg, v.kept, view)
+
+  return { enabled: guardCfg.enabled, recordOnly: guardCfg.recordOnly, label: guardLabel(guardCfg, v.state, v.kept), used: v.state.count, max: guardCfg.maxPerSession, cooldownSec: Math.round(guardCfg.cooldownMs / 1000), repeat: guardCfg.repeat, sound: guardCfg.sound, transport, policy }
+}
+/** Refreshes the git state and the meter together, as the pane's button asks. */
+const refreshAll = async ($: EngineInterface): Promise<void> => {
+  const git = refreshGit($)
+  const meter = refreshMeter($)
+  await Promise.all([git, meter])
+}
 const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
   const home = (await $.env.get('HOME').catch(() => undefined)) ?? null
   const version = await $.session.version().catch(() => null)
@@ -1244,7 +1265,7 @@ const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
     cache: await cacheFacts($),
     agents: agentsOf(ledger.agents.map(a => (typeof a.start === 'number' && typeof a.end === 'number' ? a.end - a.start : null))),
     stop: await stopFacts($),
-    guard: await (async () => { const v = await guardView($); return { enabled: guardCfg.enabled, recordOnly: guardCfg.recordOnly, label: guardLabel(guardCfg, v.state, v.kept), used: v.state.count, max: guardCfg.maxPerSession, cooldownSec: Math.round(guardCfg.cooldownMs / 1000), repeat: guardCfg.repeat, sound: guardCfg.sound, transport: await transportText($), policy: isRecording(guardCfg) ? policyLines(guardCfg, v.kept, await guardSeen($, v.kept)) : [] } })(),
+    guard: await guardFacts($),
   }
 }
 
@@ -2611,7 +2632,6 @@ const storedOccurrences = async ($: EngineInterface, project: string): Promise<{
   return out
 }
 const alertProject = async ($: EngineInterface): Promise<string> => (await sha256Text(`cobalt-cockpit/alerts/v1\0${(await $.session.cwd().catch(() => '')) || ''}`)).slice(0, 12)
-const historyOf = async ($: EngineInterface, project: string): Promise<AlertRecord[]> => historyFrom(await storedOccurrences($, project), await legacyHistory($, project))
 /** The occurrences of a project that the store holds an acknowledgment for. Unreadable: none, so nothing is marked on a guess. */
 const storedAcks = async ($: EngineInterface, project: string): Promise<Set<string>> => ackedIdsOf(await $.store.keys().catch(() => [] as string[]), project)
 /** Writes one key per acknowledged occurrence (one atomic set each) and forgets the oldest beyond the bound. False if any set failed. */
@@ -2700,7 +2720,9 @@ const seedAlerts = async ($: EngineInterface): Promise<void> => {
   }
   const project = await alertProject($)
   const parts = await storedOccurrences($, project)
-  const past = applyAcks(historyFrom(parts, await legacyHistory($, project)), await storedAcks($, project))
+  const legacy = await legacyHistory($, project)
+  const acked = await storedAcks($, project)
+  const past = applyAcks(historyFrom(parts, legacy), acked)
   const mine = (held.alerts ?? []).length === 0 ? past : validAlerts(held.alerts)
   // with both settings off nothing is written, so what an earlier format held is not copied into keys of its own
   primeSigs(project, mine, isRecording(guardCfg) ? new Set(parts.map(x => x.id)) : new Set(episodesOf(mine).map(e => e.id)))
@@ -2713,10 +2735,17 @@ const seedAlerts = async ($: EngineInterface): Promise<void> => {
     await hush(async () => {
       const old = (await $.store.get(historyKeyOf(project)).catch(() => undefined)) as { v?: unknown; alerts?: unknown } | undefined
       if (old?.v !== 1) return
-      const have = new Set(occIdsOf(await $.store.keys(), project))
-      // only a key every record of which this build understands, and every occurrence of which has a key of its own, is given up
+      // only a key every record of which this build understands, and every occurrence of which its own key holds in full (read back,
+      // not merely named), is given up
       const understood = Array.isArray(old.alerts) && validAlerts(old.alerts).length === old.alerts.length
-      if (understood && episodesOf(validAlerts(old.alerts)).every(e => have.has(e.id))) await $.store.delete(historyKeyOf(project))
+      // the key is read again first, then every occurrence key, so the last reads before the delete are of the copies it depends on
+      const again = await $.store.get(historyKeyOf(project)).catch(() => undefined)
+      let held = understood && JSON.stringify(again) === JSON.stringify(old)
+      for (const e of held ? episodesOf(validAlerts(old.alerts)) : []) {
+        const value = await $.store.get(occKeyOf(project, e.id)).catch(() => undefined)
+        if (!isMigratedEpisode(e.records, e.id, value)) { held = false; break }
+      }
+      if (held) await $.store.delete(historyKeyOf(project))
     })
   }
   await syncAcks($, false)
@@ -2982,7 +3011,9 @@ const openAlerts = async ($: EngineInterface, kept: readonly AlertRecord[]): Pro
     if (task === null || kept.length === 0) return []
 
     // the release history is read only when a NO-GO was raised: without a record it could not be listed anyway
-    return dueOf(await alertFacts($, task, true, kept.some(a => a.kind === 'release-no-go')))
+    const facts = await alertFacts($, task, true, kept.some(a => a.kind === 'release-no-go'))
+
+    return dueOf(facts)
   } catch { return [] }
 }
 
@@ -3163,7 +3194,8 @@ const showDigest = async ($: EngineInterface): Promise<void> => {
   await $.store.set(DIGEST_KEY, { v: 1, shown: [...shown.filter(x => x.id !== id), { id, at: now }] })
   await hush(() => syncAcks($, false))
   const kept = (await read($, ledgerAtom)).alerts ?? []
-  const line = digestToast(occurrencesOf(kept, await openAlerts($, kept)))
+  const open = await openAlerts($, kept)
+  const line = digestToast(occurrencesOf(kept, open))
   if (line !== null) await $.ui.toast(line, { timeoutMs: 12_000 })
 }
 const guardView = async ($: EngineInterface) => ({ state: await read($, guardAtom), kept: (await read($, ledgerAtom)).alerts ?? [] })
@@ -3632,7 +3664,7 @@ export const register: Register = (on, options) => {
       $.command.register({
         name: 'cockpit',
         description: 'Mission Control: task progress, milestones, verification gates, git and context',
-        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|flow|guard|alerts|doctor|sound]',
+        argumentHint: '[status|reset|mute|unmute|hud on|hud off|auth|version|stats 7d|30d|all|flow|guard|alerts|agents|ready|doctor|sound]',
         immediate: true,
       }),
     )
@@ -4204,7 +4236,8 @@ export const register: Register = (on, options) => {
     // The main loop's level is the host's, with what can be seen of where it
     // came from. A request moved to another model is resolved again by the
     // engine for that model, so the level it arrived with says nothing certain.
-    const host = isMain ? hostEffort(e.effort, await hostSignals($, e.turnId, e.model)) : null
+    const signals = isMain ? await hostSignals($, e.turnId, e.model) : null
+    const host = signals === null ? null : hostEffort(e.effort, signals)
     const isMoved = isMain && constrained.model !== e.model
     const mainReason = host === null ? undefined : isMoved ? `host-resolved ${e.effort === undefined ? 'no effort' : String(e.effort)} for ${e.model}; moved to ${constrained.model}, which the engine resolves again` : host.reason
     if (host !== null && host.selected !== null && host.selected !== e.effort) {
@@ -4487,6 +4520,25 @@ export const register: Register = (on, options) => {
 
         return { text: [statsText(stats), note, healthLine()].filter(Boolean).join('\n') }
       }
+      case 'agents': {
+        // read-only: the swarm and the Ledger as recorded, explained; nothing is changed, admitted or cancelled from here
+        const words = e.args.trim().split(/\s+/)
+        const columns = (e as { presentation?: { columns?: number } }).presentation?.columns ?? 100
+        const held = await read($, ledgerAtom)
+        const at = await $.clock.now()
+        const view = { swarm: swarmState(held), agents: held.agents, now: at, columns }
+        if (words.length > 2) return { text: 'Usage: /cockpit agents | /cockpit agents <task>' }
+
+        return { text: words[1] === undefined ? agentsText(view) : taskText(view, words[1]) }
+      }
+      case 'ready': {
+        // read-only: which recorded conditions stand between the task and DONE; it approves and clears nothing
+        const columns = (e as { presentation?: { columns?: number } }).presentation?.columns ?? 100
+        const task = await read($, taskAtom)
+        const held = await read($, ledgerAtom)
+
+        return { text: readyText(task, swarmState(held), columns) }
+      }
       case 'flow': {
         const task = await read($, taskAtom)
         const session = await read($, visualAtom)
@@ -4564,7 +4616,11 @@ export const register: Register = (on, options) => {
         if (arg !== '') await armReminders($)
         const view = await guardView($)
 
-        return { text: `${guardText(guardCfg, view.state, view.kept, isRecording(guardCfg) ? await guardSeen($, view.kept) : undefined)}\n${(await transportText($)).join('\n')}${arg === 'ack' || arg === 'silence' || arg === 'unsilence' ? '\nThe verification verdict was not changed.' : ''}` }
+        const seenView = isRecording(guardCfg) ? await guardSeen($, view.kept) : undefined
+        const status = guardText(guardCfg, view.state, view.kept, seenView)
+        const transport = await transportText($)
+
+        return { text: `${status}\n${transport.join('\n')}${arg === 'ack' || arg === 'silence' || arg === 'unsilence' ? '\nThe verification verdict was not changed.' : ''}` }
       }
       case 'alerts': {
         const words = e.args.trim().toLowerCase().split(/\s+/)
@@ -4604,6 +4660,64 @@ export const register: Register = (on, options) => {
 
           return { text: `Cockpit: alert ${named} was acknowledged${holds ? '; its condition is still open, and no more reminders will be sent for it' : '; its condition no longer holds, so this only marks the record'}.${where} Other alerts, gates, reviews, approvals and the verification verdict were not changed.` }
         }
+        if (arg === 'export') {
+          // printed for the person who typed it, never written or sent anywhere; acknowledgments in the store are applied in memory only
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: the alert export is printed only for a command you type; nothing was printed.' }
+          if (words.length > 2) return { text: 'Usage: /cockpit alerts export' }
+          const ledgerNow = await read($, ledgerAtom)
+          const kept = ledgerNow.alerts ?? []
+          const project = ledgerNow.alertsProject ?? null
+          const acked = project === null ? new Set<string>() : await storedAcks($, project)
+          const records = applyAcks(kept, acked)
+          const openNow = await openAlerts($, records)
+          const at = await $.clock.now()
+
+          return { text: exportOf(occurrencesOf(records, openNow), project, at) }
+        }
+        if (arg === 'legacy') {
+          const keys = await $.store.keys().catch(() => [] as string[])
+          const names = keys.filter(k => k === LEGACY_HISTORY_KEY || k.startsWith(`${LEGACY_HISTORY_KEY}:`))
+          const values: { key: string; value: unknown }[] = []
+          for (const key of names) {
+            const value = await $.store.get(key).catch(() => undefined)
+            values.push({ key, value })
+          }
+          // an occurrence counts as migrated only when its own key holds it in full: the values are read, not only the names
+          const occ = new Map<string, unknown>()
+          for (const key of keys.filter(k => k.startsWith('alert-occ:'))) {
+            const value = await $.store.get(key).catch(() => undefined)
+            occ.set(key, value)
+          }
+          const plan = legacyPlanOf(values, keys, occ)
+          if (words[2] === undefined) return { text: legacyPlanText(plan) }
+          if (words[2] !== 'delete' || words.length !== 4) return { text: 'Usage: /cockpit alerts legacy (a dry run) | /cockpit alerts legacy delete <code from the dry run>' }
+          // deleting is the person's alone, and only what the plan the person read calls safe
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: legacy alert history is deleted only by a command you type; nothing was changed.' }
+          if (words[3] !== plan.token) return { text: 'Cockpit: that code does not match the store as it is now (it changed since the dry run, or the code was mistyped). Nothing was deleted. Run /cockpit alerts legacy again.' }
+          if (plan.deletable.length === 0) return { text: 'Cockpit: nothing can be deleted safely. Nothing was changed.' }
+          const removed: string[] = []
+          for (const key of plan.deletable) {
+            // read again just before the delete: the key itself, and every occurrence key it depends on, must be as the plan saw them
+            const now = await $.store.get(key).catch(() => undefined)
+            const was = values.find(v => v.key === key)?.value
+            if (JSON.stringify(now) !== JSON.stringify(was)) continue
+            const occNow = new Map<string, unknown>()
+            for (const k of [...occ.keys()]) {
+              const value = await $.store.get(k).catch(() => undefined)
+              occNow.set(k, value)
+            }
+            const keysNow = await $.store.keys().catch(() => [] as string[])
+            const again = legacyPlanOf(values.filter(v => v.key === key), keysNow, occNow)
+            if (!again.deletable.includes(key)) continue
+            try {
+              await $.store.delete(key)
+              removed.push(key)
+            } catch { /* left in place: reported below */ }
+          }
+          const left = plan.deletable.filter(k => !removed.includes(k))
+
+          return { text: `Cockpit: deleted ${removed.length === 0 ? 'nothing' : removed.join(', ')}; every occurrence they held was already held in full by a key of its own.${left.length > 0 ? ` Could not delete: ${left.join(', ')}.` : ''}${plan.kept.length > 0 ? ` Kept: ${plan.kept.join(', ')}.` : ''} No alert record, acknowledgment, gate or verdict was changed.` }
+        }
         await hush(() => syncAcks($))
         if (arg === 'digest') {
           if (words.length > 2) return { text: 'Usage: /cockpit alerts digest' }
@@ -4612,13 +4726,17 @@ export const register: Register = (on, options) => {
           // read-only: the look marker is read to say what is new and is never written here
           const seen = await readSeen($, ledgerNow.alertsProject)
 
-          return { text: digestText(occurrencesOf(recorded, await openAlerts($, recorded)), await $.clock.now(), guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns }) }
+          const openNow = await openAlerts($, recorded)
+          const at = await $.clock.now()
+
+          return { text: digestText(occurrencesOf(recorded, openNow), at, guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns }) }
         }
         const page = arg === '' ? 1 : /^\d{1,3}$/.test(arg) ? Number(arg) : -1
-        if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | /cockpit alerts digest | /cockpit alerts ack <id>' }
+        if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | digest | ack <id> | export | legacy [delete <code>]' }
         const ledgerNow = await read($, ledgerAtom)
         const kept = ledgerNow.alerts ?? []
-        const occ = occurrencesOf(kept, await openAlerts($, kept))
+        const openNow = await openAlerts($, kept)
+        const occ = occurrencesOf(kept, openNow)
         const shownPage = Math.min(page, inboxPages(occ.length))
         const seen = await readSeen($, ledgerNow.alertsProject)
         const text = inboxText(occ, shownPage, await $.clock.now(), guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns })
@@ -4629,7 +4747,9 @@ export const register: Register = (on, options) => {
         return { text }
       }
       case 'doctor':
-        return { text: doctorText(await doctorFacts($)) }
+        const facts = await doctorFacts($)
+
+        return { text: doctorText(facts) }
       case 'version':
       case 'source': {
         // What is really loaded, and where from: the manifest on disk, not a
@@ -5005,7 +5125,7 @@ export const register: Register = (on, options) => {
         {Svg ? <Svg source={mascotSvg(state, config.isAnimated && !reducedMotion)} alt={mascotAlt(state)} width={PANEL_W} height={PANEL_H} /> : null}
         {rows.map(line)}
         <Box marginTop={1} gap={1}>
-          <Button key="refresh" label="Refresh" hotkey="r" onPress={() => Promise.all([refreshGit($), refreshMeter($)]).then(() => undefined)} />
+          <Button key="refresh" label="Refresh" hotkey="r" onPress={() => refreshAll($)} />
           <Button key="close" label="Close" hotkey="q" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
         </Box>
       </Box>

@@ -10,9 +10,13 @@ With `telemetry` on (the default) Cockpit also writes outside the store: a local
 
 Replay omits known sensitive filenames, obvious credential patterns, unavailable files and content exceeding its size limits. It is a heuristic, not a universal secret detector. Hidden reasoning is never stored by Cockpit. Raw tool commands are not ledger fields. NobodyWho ledger access is read-only: prompt/state/details fields are discarded, caller filtering is applied and historical receipts do not count as current activity. NobodyWho is optional; missing files fail silently.
 
+The alert history (v0.5.7 to v0.6.0) is kept in plugin-store keys too: one per alert occurrence (`alert-occ:<project hash>:<id>`), one per acknowledgment (`alert-ack:…`), a look marker per project (`alert-seen:…`) and the digest marker (`alert-digest`), all bounded and holding a closed vocabulary, numbers, hashes and ids. `/cockpit alerts legacy delete <code>` is the only command that deletes alert keys on request: it is typed by a person, confirms a dry run's code, and deletes only a v0.5.7/v0.5.8 history key every occurrence of which already has a key of its own.
+
+`/cockpit agents` and `/cockpit ready` (v0.6.0) read the swarm and the task and change nothing; they cannot admit, cancel or verify a task, lift a hold or clear a review.
+
 ## Export and sharing
 
-`/ledger export json` removes replay bodies, agent descriptions and checkpoint prose, then strips control sequences and detected secrets from string values. Paths, branch names, identifiers and repository metadata may remain sensitive. Review every export and screenshot before sharing. Secrets should never be exported. Do not put credentials in milestone labels, file names or configuration prose.
+`/cockpit alerts export` (typed by a person) prints this project's alert occurrences as schema-versioned JSON in a closed vocabulary: ids, levels, kinds, task numbers, times, the host's channel name, and separate notification and acknowledgment fields; no key, path or free text. `/ledger export json` removes replay bodies, agent descriptions and checkpoint prose, then strips control sequences and detected secrets from string values. Paths, branch names, identifiers and repository metadata may remain sensitive. Review every export and screenshot before sharing. Secrets should never be exported. Do not put credentials in milestone labels, file names or configuration prose.
 
 The plugin declares no MCP server, downloads no runtime code and changes no authentication environment variables. Authentication diagnostics retain only credential kind and known configuration source names, never credential values.
 

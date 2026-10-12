@@ -61,22 +61,35 @@ export const submitTask = (s: Swarm, raw: TaskInput, at: number): { swarm: Swarm
   const swarm = event({ ...s, tasks: [...s.tasks, task], requested: s.requested + 1 }, 'assignment', task.id, at, `${task.tier} ${task.role}: ${task.spawnReason}`)
   return { swarm, task, duplicate: false }
 }
+/** The limits admission applies, with AUTO resolved: the one place the numbers live, read by admission and by the agent inspector. */
+export const limitsOf = (s: Swarm): { total: number; sonnet: number; haiku: number; opus: number } => ({
+  total: s.config.total === 'AUTO' ? 16 : s.config.total,
+  sonnet: s.config.sonnet === 'AUTO' ? 8 : s.config.sonnet,
+  haiku: s.config.haiku === 'AUTO' ? 16 : s.config.haiku,
+  opus: s.config.opus ?? 0,
+})
+/** How many tasks hold a slot now, in all and by tier: what admission counts, for display. */
+export const occupancyOf = (s: Swarm): { total: number; counted: number; sonnet: number; haiku: number; opus: number } => {
+  const live = active(s)
+  const opus = s.config.opus ?? 0
+
+  // `counted` is what admission holds against the total for a Sonnet or Haiku task: commander work in the main loop is not a slot
+  return { total: live.length, counted: live.filter(t => opus > 0 || t.tier !== 'OPUS').length, sonnet: live.filter(t => t.tier === 'SONNET').length, haiku: live.filter(t => t.tier === 'HAIKU').length, opus: live.filter(t => t.tier === 'OPUS').length }
+}
 export const admissionReason = (s: Swarm, id: string): string | null => {
   const task = s.tasks.find(t => t.id === id)
   if (!task) return 'unknown task'
   if (task.state !== 'queued' && task.state !== 'blocked') return `task ${task.state}`
   const dep = dependencyReason(s, task); if (dep) return dep
   const live = active(s)
-  const opus = s.config.opus ?? 0
-  const total = s.config.total === 'AUTO' ? 16 : s.config.total
+  const { opus, total, sonnet, haiku } = limitsOf(s)
   if (task.tier === 'OPUS' && opus === 0) { if (live.some(t => t.tier === 'OPUS')) return 'commander occupied' }
   else if (task.tier === 'OPUS') {
     // An Opus specialist is a real subagent here: one pool, inside the total.
     if (live.filter(t => t.tier === 'OPUS').length >= opus) return 'architect occupied'
     if (live.length >= total) return 'resource budget'
   } else {
-    const pool = task.tier === 'SONNET' ? s.config.sonnet : s.config.haiku
-    const limit = pool === 'AUTO' ? (task.tier === 'SONNET' ? 8 : 16) : pool
+    const limit = task.tier === 'SONNET' ? sonnet : haiku
     if (live.filter(t => opus > 0 || t.tier !== 'OPUS').length >= total || live.filter(t => t.tier === task.tier).length >= limit) return 'resource budget'
   }
   const collision = live.find(t => (task.mode === 'write' || t.mode === 'write') && task.owned.some(a => t.owned.some(b => overlaps(a, b))))
