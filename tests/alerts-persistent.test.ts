@@ -2,7 +2,7 @@
 // or a resolution ends it; one timer owns it; and none of it changes a verdict or carries anything but a closed sentence.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { ALERT_CAP, EMPTY_GUARD, bounded, closedOf, decide, isAckedAt, episodeOf, guardConfigOf, guardText, hasReminderLeft, labelOf, noticedOf, remind, reminderOf } from '../hooks/alerts'
+import { ALERT_CAP, EMPTY_GUARD, bounded, closedOf, decide, isAckedSince, withAck, episodeOf, guardConfigOf, guardText, hasReminderLeft, labelOf, noticedOf, remind, reminderOf } from '../hooks/alerts'
 import type { AlertRecord } from '../hooks/alerts'
 import { emptyLedger, migrateLedger } from '../hooks/ledger'
 import { applyAction, newTask, setGate, settle } from '../hooks/model'
@@ -115,11 +115,24 @@ describe('reminder policy', () => {
     // a resolved mark never outlives what it closed in a way that reopens it: no flapped condition reads as open
     expect(noticedOf(kept).map(a => a.key)).toEqual([k])
   })
-  test('a notice decided before the last acknowledgment is born acknowledged', () => {
-    expect(isAckedAt(EMPTY_GUARD, 5)).toBe(false)
-    expect(isAckedAt({ ...EMPTY_GUARD, ackAt: 10 }, 10)).toBe(true)
-    expect(isAckedAt({ ...EMPTY_GUARD, ackAt: 10 }, 11)).toBe(false)
-    expect(isAckedAt({ ...EMPTY_GUARD, ackAt: 'x' as never }, 1)).toBe(false)
+  test('a notice decided before the last acknowledgment is born acknowledged, by count and never by the clock', () => {
+    const k = 'u:run-blocked:task'
+    expect(isAckedSince(EMPTY_GUARD, k, 0)).toBe(false)
+    // a pass that began deciding at count 0 is covered by an acknowledgment of everything made after it began
+    const all = withAck(EMPTY_GUARD, null)
+    expect(isAckedSince(all, k, 0)).toBe(true)
+    // one that began after it is not
+    expect(isAckedSince(all, k, all.seq ?? 0)).toBe(false)
+    // a single acknowledgment covers its own condition only
+    const one = withAck(EMPTY_GUARD, k)
+    expect(isAckedSince(one, k, 0)).toBe(true)
+    expect(isAckedSince(one, 'u:security-failure:SECURITY', 0)).toBe(false)
+    // the record of single acknowledgments is bounded
+    let many = EMPTY_GUARD
+    for (let i = 0; i < 20; i++) many = withAck(many, `k${i}`)
+    expect(many.ackedKeys?.length).toBeLessThanOrEqual(8)
+    // malformed state is no acknowledgment
+    expect(isAckedSince({ ...EMPTY_GUARD, ackSeq: 'x' as never, ackedKeys: 'y' as never }, k, 0)).toBe(false)
   })
   test('malformed persisted reminder fields are dropped, well-formed ones are kept', () => {
     const good = [rec(k, { nth: 1, cue: 'sound' }), rec(k, { outcome: 'resolved', attempts: 0, channel: null }), rec(k, { nth: 10, cue: 'bell' })]

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (0.5.7) — Alert inbox and recovery
+
+A bounded, persistent and actionable inbox over the alert records Cobalt Guard already keeps. Notifications, quiet hours, priorities, budgets and the single timer are unchanged, with the two corrections listed below. Details and the acceptance procedure: [docs/implementation-v0.5.7.md](docs/implementation-v0.5.7.md).
+
+- `/cockpit alerts [page]`: every recorded occurrence, open and unacknowledged first and the gravest first, then open and acknowledged, then history (newest first), eight to a page. Each line: id, level, kind, task, the time it was recorded, what the host reported about its notification, whether it was acknowledged, and whether its condition holds now (read off the task, not inferred).
+- `/cockpit alerts ack <id>`: acknowledges exactly one occurrence and ends its reminders. Person-only. An unknown, expired or malformed id changes nothing and says why; acknowledging a condition that has already cleared says it only marks the record. `/cockpit guard ack` still acknowledges everything.
+- Each record carries an 8-hex occurrence id (derived the same way for records from v0.5.6). A new `alert-history` plugin-store key keeps each project's records (four projects, 32 records each) so a new session in the same project shows what was recorded earlier; a damaged value is ignored. Nothing is replayed after a restart: what was told stays told.
+- The HUD's `GUARD` row shows `N unacknowledged in history` when recorded alerts no longer hold and were never acknowledged; open conditions are pinned as before, and the widest pin ends `/cockpit alerts`. Nothing says a person saw anything or that a connection dropped.
+- Corrected: a condition that clears and holds again is now a new occurrence with `guardRepeat` off as well (v0.5.6 recorded `resolved` only with it on, so the recurrence was never told and the pin described the earlier notification). It is bounded by the cooldown, the session budget and the retry cap. An acknowledgment typed while a notification is being written is now matched by a count rather than a clock reading, so a clock stepped back no longer makes a later record read as acknowledged. 
+- The v0.5.6 shortened long-window timer test keeps its host run at one hour; the five-hour-forty-five-minute case is now a pure test of the same rule.
+
 ## Unreleased (0.5.6) — Alert priorities, quiet hours and the pinned alert row
 
 Alerts that are less intrusive and harder to miss. What is sent, and when, does not change unless a new option is set; with alerts on, the HUD's `GUARD` row does change by default (see below). Details and the acceptance procedure: [docs/implementation-v0.5.6.md](docs/implementation-v0.5.6.md).
