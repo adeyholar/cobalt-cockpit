@@ -63,7 +63,7 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import { exportOf, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
@@ -4653,6 +4653,46 @@ export const register: Register = (on, options) => {
 
           return { text: `Cockpit: alert ${named} was acknowledged${holds ? '; its condition is still open, and no more reminders will be sent for it' : '; its condition no longer holds, so this only marks the record'}.${where} Other alerts, gates, reviews, approvals and the verification verdict were not changed.` }
         }
+        if (arg === 'export') {
+          // printed for the person who typed it, never written or sent anywhere; acknowledgments in the store are applied in memory only
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: the alert export is printed only for a command you type; nothing was printed.' }
+          if (words.length > 2) return { text: 'Usage: /cockpit alerts export' }
+          const ledgerNow = await read($, ledgerAtom)
+          const kept = ledgerNow.alerts ?? []
+          const project = ledgerNow.alertsProject ?? null
+          const acked = project === null ? new Set<string>() : await storedAcks($, project)
+          const records = applyAcks(kept, acked)
+          const openNow = await openAlerts($, records)
+          const at = await $.clock.now()
+
+          return { text: exportOf(occurrencesOf(records, openNow), project, at) }
+        }
+        if (arg === 'legacy') {
+          const keys = await $.store.keys().catch(() => [] as string[])
+          const names = keys.filter(k => k === LEGACY_HISTORY_KEY || k.startsWith(`${LEGACY_HISTORY_KEY}:`))
+          const values: { key: string; value: unknown }[] = []
+          for (const key of names) {
+            const value = await $.store.get(key).catch(() => undefined)
+            values.push({ key, value })
+          }
+          const plan = legacyPlanOf(values, keys)
+          if (words[2] === undefined) return { text: legacyPlanText(plan) }
+          if (words[2] !== 'delete' || words.length !== 4) return { text: 'Usage: /cockpit alerts legacy (a dry run) | /cockpit alerts legacy delete <code from the dry run>' }
+          // deleting is the person's alone, and only what the plan the person read calls safe
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: legacy alert history is deleted only by a command you type; nothing was changed.' }
+          if (words[3] !== plan.token) return { text: 'Cockpit: that code does not match the store as it is now (it changed since the dry run, or the code was mistyped). Nothing was deleted. Run /cockpit alerts legacy again.' }
+          if (plan.deletable.length === 0) return { text: 'Cockpit: nothing can be deleted safely. Nothing was changed.' }
+          const removed: string[] = []
+          for (const key of plan.deletable) {
+            try {
+              await $.store.delete(key)
+              removed.push(key)
+            } catch { /* left in place: reported below */ }
+          }
+          const left = plan.deletable.filter(k => !removed.includes(k))
+
+          return { text: `Cockpit: deleted ${removed.length === 0 ? 'nothing' : removed.join(', ')}; every occurrence they held already had a key of its own.${left.length > 0 ? ` Could not delete: ${left.join(', ')}.` : ''}${plan.kept.length > 0 ? ` Kept: ${plan.kept.join(', ')}.` : ''} No alert record, acknowledgment, gate or verdict was changed.` }
+        }
         await hush(() => syncAcks($))
         if (arg === 'digest') {
           if (words.length > 2) return { text: 'Usage: /cockpit alerts digest' }
@@ -4667,7 +4707,7 @@ export const register: Register = (on, options) => {
           return { text: digestText(occurrencesOf(recorded, openNow), at, guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns }) }
         }
         const page = arg === '' ? 1 : /^\d{1,3}$/.test(arg) ? Number(arg) : -1
-        if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | /cockpit alerts digest | /cockpit alerts ack <id>' }
+        if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | digest | ack <id> | export | legacy [delete <code>]' }
         const ledgerNow = await read($, ledgerAtom)
         const kept = ledgerNow.alerts ?? []
         const openNow = await openAlerts($, kept)
