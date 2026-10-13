@@ -9,7 +9,6 @@ import {
   findAttribution,
   instructionFilesWritten,
   isInstructionFile,
-  namesInstructionFile,
 } from '../hooks/hygiene'
 
 describe('attribution is recognized', () => {
@@ -116,13 +115,6 @@ describe('instruction files', () => {
     expect(isInstructionFile('packages/api/AGENTS.md')).toBe(true)
     expect(isInstructionFile('README.md')).toBe(false)
     expect(isInstructionFile('docs/claude.md.bak')).toBe(false)
-  })
-
-  test('a prompt that names one, or /init, is the person asking', () => {
-    expect(namesInstructionFile('please write a CLAUDE.md for this repo')).toBe(true)
-    expect(namesInstructionFile('add an agents.md')).toBe(true)
-    expect(namesInstructionFile('/init')).toBe(true)
-    expect(namesInstructionFile('fix the failing tests')).toBe(false)
   })
 
   test('are found when a shell command would write them', () => {

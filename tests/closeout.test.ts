@@ -78,55 +78,101 @@ for (const [label, options] of CONFIGS) {
       expect(w.asked).toEqual([])
     })
 
-    test('/init is the person asking: the file is created without a question', { options }, async ($, on) => {
-      const w = world(on, { answer: 'Block' })
-      await start($)
-      // /init marks the task in progress; with no task yet it marks nothing, and the file is asked about (the cautious side)
-      await prompt($, 'Add rate limiting to the bids API')
-      await slash($, 'init')
-      expect(denial(await $.tool.call({ tool: 'Edit', file_path: '/work/example/CLAUDE.md', old_string: '', new_string: 'hello' } as never))).toBe('')
-      expect(w.asked).toEqual([])
-    })
+    const CREATE = { tool: 'Edit', file_path: '/work/example/CLAUDE.md', old_string: '', new_string: 'hello' }
+    const submit = ($: Engine, kind: string, text: string) => $.prompt.submit({ text, wait: false, origin: { kind } } as never)
+    const init = ($: Engine, kind: string) => $.command.run({ command: 'init', args: '', origin: { kind }, presentation: { isFullscreen: true, columns: 120 } } as never)
 
-    test('a prompt that names the file is the person asking', { options }, async ($, on) => {
+    test('a prompt that mentions a file never grants it, from any origin, whatever it says', { options }, async ($, on) => {
       const w = world(on, { answer: 'Block' })
       await start($)
-      await prompt($, 'Please write a CLAUDE.md for this project')
-      expect(denial(await $.tool.call({ tool: 'Edit', file_path: '/work/example/CLAUDE.md', old_string: '', new_string: 'hello' } as never))).toBe('')
-      expect(w.asked).toEqual([])
-    })
-
-    test('only a human gesture asks for the file: other origins that name it, or run /init, do not', { options }, async ($, on) => {
-      const w = world(on, { answer: 'Block' })
-      await start($)
-      const create = { tool: 'Edit', file_path: '/work/example/CLAUDE.md', old_string: '', new_string: 'hello' }
-      const submit = (kind: string, text: string) => $.prompt.submit({ text, wait: false, origin: { kind } } as never)
-      const init = (kind: string) => $.command.run({ command: 'init', args: '', origin: { kind }, presentation: { isFullscreen: true, columns: 120 } } as never)
-      // a first human prompt starts the task, so that a later origin has a task to mark
-      await submit('composer', 'Add rate limiting to the bids API')
-      for (const kind of ['sdk', 'plugin', 'peer', 'task-notification', 'scheduled-trigger', 'channel', 'future']) {
-        await submit(kind, 'Please write a CLAUDE.md for this project')
-        await init(kind)
-        expect([kind, denial(await $.tool.call(create as never)).includes('only created when the user asks')]).toEqual([kind, true])
+      // a human prompt starts the task, so that a later origin has a task to mark
+      await submit($, 'composer', 'Add rate limiting to the bids API')
+      let asked = 0
+      for (const text of ['Do NOT create CLAUDE.md', 'Explain what AGENTS.md does', 'Create CLAUDE.md', 'Please write a CLAUDE.md for this project', '/init', 'agents.md claude.md CLAUDE.MD']) {
+        for (const kind of ['composer', 'bridge', 'sdk', 'plugin', 'peer', 'task-notification', 'scheduled-trigger', 'channel', 'future']) {
+          await submit($, kind, text)
+          const answer = denial(await $.tool.call(CREATE as never))
+          asked += 1
+          expect([text, kind, answer.includes('only created when the user asks'), w.asked.length]).toEqual([text, kind, true, asked])
+        }
       }
       expect(written(w)).toEqual([])
     })
 
-    test('the terminal Enter and the bridge naming the file, or /init from them, authorize it', { options }, async ($, on) => {
+    test('after "Create CLAUDE.md" the operator is still asked, and Create is what lets it through', { options }, async ($, on) => {
+      const w = world(on, { answer: 'Create' })
+      await start($)
+      await submit($, 'composer', 'Create CLAUDE.md')
+      expect(denial(await $.tool.call(CREATE as never))).toBe('')
+      expect(w.asked).toHaveLength(1)
+      expect(written(w)).toHaveLength(1)
+    })
+
+    test('an unavailable confirmation after a prompt that names the file is a refusal', { options }, async ($, on) => {
+      const w = world(on, { answer: null })
+      await start($)
+      await submit($, 'composer', 'Create CLAUDE.md')
+      expect(denial(await $.tool.call(CREATE as never))).toContain('only created when the user asks')
+      expect(written(w)).toEqual([])
+    })
+
+    for (const kind of ['composer', 'bridge']) {
+      test(`a human /init (${kind}) stands in for the question, for every tool`, { options }, async ($, on) => {
+        const w = world(on, { answer: 'Block' })
+        await start($)
+        await submit($, 'composer', 'Add rate limiting to the bids API')
+        await init($, kind)
+        for (const [name, input] of CREATORS) expect([name, denial(await $.tool.call(input as never))]).toEqual([name, ''])
+        expect(denial(await bash($, 'echo x > AGENTS.md'))).toBe('')
+        expect(w.asked).toEqual([])
+      })
+    }
+
+    for (const kind of ['sdk', 'plugin', 'peer', 'task-notification', 'scheduled-trigger', 'channel', 'future']) {
+      test(`/init from the ${kind} origin asks for nothing`, { options }, async ($, on) => {
+        const w = world(on, { answer: 'Block' })
+        await start($)
+        await submit($, 'composer', 'Add rate limiting to the bids API')
+        await init($, kind)
+        expect([denial(await $.tool.call(CREATE as never)).includes('only created when the user asks'), w.asked.length]).toEqual([true, 1])
+        expect(written(w)).toEqual([])
+      })
+    }
+
+    test('with no task yet, /init marks nothing and the question is asked', { options }, async ($, on) => {
       const w = world(on, { answer: 'Block' })
       await start($)
-      await $.prompt.submit({ text: 'Add rate limiting to the bids API', wait: false, origin: { kind: 'composer' } } as never)
-      await $.prompt.submit({ text: 'and create the CLAUDE.md', wait: false, origin: { kind: 'bridge' } } as never)
-      expect(denial(await $.tool.call({ tool: 'Edit', file_path: '/work/example/CLAUDE.md', old_string: '', new_string: 'hello' } as never))).toBe('')
+      await init($, 'composer')
+      expect(denial(await $.tool.call(CREATE as never))).toContain('only created when the user asks')
+      expect(w.asked).toHaveLength(1)
+    })
+
+    test('every spelling of the path is asked about, and files that are not instruction files are not', { options }, async ($, on) => {
+      const w = world(on, { answer: 'Block' })
+      await start($)
+      for (const path of ['CLAUDE.md', './CLAUDE.md', 'sub/../CLAUDE.md', '/work/example/Claude.MD', '/work/example/sub/agents.md', '../elsewhere/AGENTS.md']) {
+        for (const input of [{ tool: 'Edit', file_path: path, old_string: '', new_string: 'x' }, { tool: 'Write', file_path: path, content: 'x' }, { tool: 'MultiEdit', file_path: path, edits: [{ old_string: '', new_string: 'x' }] }, { tool: 'NotebookEdit', notebook_path: path, new_source: 'x' }]) {
+          expect([path, input.tool, denial(await $.tool.call(input as never)).includes('only created when the user asks')]).toEqual([path, input.tool, true])
+        }
+      }
+      expect(written(w)).toEqual([])
+      w.asked.length = 0
+      for (const path of ['', 'README.md', '/work/example/CLAUDE.md.txt', '/work/example/MYCLAUDE.md', '/work/example/CLAUDE.mdx']) {
+        expect([path, denial(await $.tool.call({ tool: 'Edit', file_path: path, old_string: '', new_string: 'x' } as never))]).toEqual([path, ''])
+      }
+      for (const path of [5, null, {}, ['CLAUDE.md'].length]) {
+        expect(denial(await $.tool.call({ tool: 'Edit', file_path: path, old_string: '', new_string: 'x' } as never))).not.toContain('only created when the user asks')
+      }
       expect(w.asked).toEqual([])
     })
 
-    test('/init from the bridge authorizes it', { options }, async ($, on) => {
-      world(on, { answer: 'Block' })
+    test('a MultiEdit is judged on the call\'s path, whatever path an edit names', { options }, async ($, on) => {
+      const w = world(on, { answer: 'Block', files: { '/work/example/CLAUDE.md': '# notes\n' } })
       await start($)
-      await $.prompt.submit({ text: 'Add rate limiting to the bids API', wait: false, origin: { kind: 'composer' } } as never)
-      await $.command.run({ command: 'init', args: '', origin: { kind: 'bridge' }, presentation: { isFullscreen: true, columns: 120 } } as never)
-      expect(denial(await $.tool.call({ tool: 'Edit', file_path: '/work/example/CLAUDE.md', old_string: '', new_string: 'hello' } as never))).toBe('')
+      // an edit that names another file does not turn the call\'s own, existing file into a new one, nor hide a new one
+      expect(denial(await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/CLAUDE.md', edits: [{ file_path: '/work/example/AGENTS.md', old_string: 'notes', new_string: 'rules' }] } as never))).toBe('')
+      expect(denial(await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/AGENTS.md', edits: [{ file_path: '/work/example/CLAUDE.md', old_string: '', new_string: 'x' }] } as never))).toContain('only created when the user asks')
+      expect(denial(await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/AGENTS.md', edits: [{ file_path: '', old_string: '', new_string: 'x' }, null] } as never))).toContain('failed')
     })
 
     test('a filesystem that cannot answer refuses the edit', { options }, async ($, on) => {

@@ -683,7 +683,7 @@ The complete reference. The `/cockpit guard` and `/cockpit alerts` commands that
 | Switch | Public default | What it controls |
 | --- | --- | --- |
 | `blastRadiusGuard` | `true` | Ask before genuinely destructive commands (hard reset, clean, force push, broad recursive deletes, database drops, production teardown) |
-| `attributionGuard` | `true` | Keep AI attribution out of commits, pull requests and files, and ask before CLAUDE.md or AGENTS.md is created unasked |
+| `attributionGuard` | `true` | Keep AI attribution out of commits, pull requests and files, and ask before CLAUDE.md or AGENTS.md is created (a prompt that mentions the file is not permission; a `/init` you type is) |
 | `orchestration` | `false` (observe) | `true` enforces model/admission policy and task ownership |
 | `blockFable`, `subscriptionOnly`, `cobaltStrict` | `false` | Fable blocking; refusal of API-style authentication; the strict preset, which enforces orchestration, blocks Fable and external advisor selection, requires subscription-style authentication and overrides the individual switches while enabled |
 | `stopGuard` | `OBSERVE` | `ENFORCE` holds a stop until the verification script you enrolled exits 0 |

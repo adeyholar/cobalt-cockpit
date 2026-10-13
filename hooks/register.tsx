@@ -60,7 +60,6 @@ import {
   findAttribution,
   instructionFilesWritten,
   isInstructionFile,
-  namesInstructionFile,
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
@@ -2041,14 +2040,14 @@ const allowInstructionFile = async ($: EngineInterface, path: string, isMoved = 
   const name = basename(path)
   const answer = await ask(
     $,
-    `Claude is about to create ${name} at ${oneLine(absolute, 80)}, which you did not ask for. Create it?`,
+    `Claude is about to create ${name} at ${oneLine(absolute, 80)}. A prompt that mentions it is not permission; only this answer, or a /init you typed, is. Create it?`,
     'New file',
     ['Block', 'Create'],
   )
   if (answer === 'Create') return null
 
   return {
-    deny: `Cobalt Cockpit: ${name} is only created when the user asks for one in this repository, and the user has not. It was not written. Do not create it another way; say so if you think one would help.`,
+    deny: `Cobalt Cockpit: ${name} is only created when the user asks for one in this repository, and that was not confirmed. It was not written. Do not create it another way; say so if you think one would help.`,
   }
 }
 
@@ -3922,8 +3921,8 @@ export const register: Register = (on, options) => {
           ...base,
           lastPrompt: oneLine(e.text, 160),
           updatedAt: now,
-          // only a human gesture asks for the file: text from an `sdk` turn (a nested `claude -p` an agent can start), a plugin or a peer does not
-          hasInstructionFileRequest: base.hasInstructionFileRequest || (isHumanAuthority(e.origin) && namesInstructionFile(e.text)),
+          // a prompt that names a file asks for nothing: only a human's /init (below) stands in for the question
+          hasInstructionFileRequest: base.hasInstructionFileRequest,
         }
         if (!isSonnetLed()) return settle(discovered(prompted)).task
         // Grounds are read from the full prompt: the stored one is clipped.

@@ -519,14 +519,15 @@ describe('AI attribution guard', () => {
     expect(w.ran.filter(call => call['tool'] !== 'AskUserQuestion')).toEqual([])
   })
 
-  test('they are created when the person asked, and an existing one is edited freely', async ($, on) => {
-    const w = world(on, { answer: 'Block', files: { '/work/example/AGENTS.md': '# Agents\n' } })
+  test('a new one is confirmed even when the person asked in a prompt, and an existing one is edited freely', async ($, on) => {
+    const w = world(on, { answer: 'Create', files: { '/work/example/AGENTS.md': '# Agents\n' } })
     await start($)
     await prompt($, 'please write a CLAUDE.md for this repo')
     await $.tool.call({ tool: 'Write', file_path: '/work/example/CLAUDE.md', content: '# Project\n' } as never)
     await $.tool.call({ tool: 'Write', file_path: '/work/example/AGENTS.md', content: '# Agents\n\nMore.\n' } as never)
-    expect(w.asked).toEqual([])
-    expect(w.ran.map(call => call['tool'])).toEqual(['Write', 'Write'])
+    // the prompt named the file; the operator was still asked, once, about the new file only
+    expect(w.asked).toEqual(['Claude is about to create CLAUDE.md at /work/example/CLAUDE.md. A prompt that mentions it is not permission; only this answer, or a /init you typed, is. Create it?'])
+    expect(w.ran.filter(call => call['tool'] === 'Write')).toHaveLength(2)
   })
 
   test('the system prompt carries the discipline and the hygiene rules', async ($, on) => {

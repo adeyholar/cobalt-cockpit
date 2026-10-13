@@ -116,10 +116,6 @@ const INSTRUCTION_FILES = new Set(['claude.md', 'agents.md'])
 export const isInstructionFile = (path: string): boolean =>
   INSTRUCTION_FILES.has(basename(path.replace(/\\/g, '/')).toLowerCase())
 
-/** True when a prompt names an instruction file, or asks for one by `/init`. */
-export const namesInstructionFile = (prompt: string): boolean =>
-  /\b(claude|agents)\.md\b/i.test(prompt) || /^\s*\/init\b/.test(prompt)
-
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish'])
 
 /** The instruction files a shell command would write: redirects, tee, touch, truncate, cp, mv, install, ln, dd, and a script handed to a shell or eval. */
