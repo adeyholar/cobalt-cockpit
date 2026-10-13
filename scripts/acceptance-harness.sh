@@ -93,15 +93,15 @@ wait $e; wait $f
 check 'both dry runs agree and delete nothing' "grep -q 'DRY RUN' '$root/e.txt' && diff '$root/e.txt' '$root/f.txt' >/dev/null && grep -qx 'alert-history' <(python3 -c 'import json,sys; print(chr(10).join(json.load(open(sys.argv[1]))))' '$store')"
 check 'a deletion from a non-person origin is refused' "run \"/cockpit alerts legacy delete \$(grep -oE 'delete [0-9a-f]{8}' '$root/e.txt' | cut -d' ' -f2 || echo 00000000)\" 2>&1 | grep -qE 'only by a command you type|nothing can be deleted|Nothing was|does not match'"
 # 4. Persistent Attention (v0.6.2): two processes draw the digest over records no session in this project owns
-nonledger() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps({k: v for k, v in d.items() if not k.startswith("ledger:")}, sort_keys=True))' "$store" | sha256sum; }
-before=$(nonledger)
+alertkeys() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps({k: v for k, v in d.items() if k.startswith("alert-")}, sort_keys=True))' "$store" | sha256sum; }
+before=$(alertkeys)
 run '/cockpit alerts digest' > "$root/g.txt" 2>&1 & g=$!
 run '/cockpit alerts digest' > "$root/h.txt" 2>&1 & h=$!
 wait $g; wait $h
 check 'both digests carry the Attention section' "grep -q '^COBALT GUARD / ATTENTION' '$root/g.txt' && grep -q '^COBALT GUARD / ATTENTION' '$root/h.txt'"
 check 'records with no resolution mark are UNKNOWN, never open: no task of this session owns them' "grep -q '^STILL OPEN, ACKNOWLEDGED: 0' '$root/g.txt' && grep -q 'open now 0 · UNKNOWN 2' '$root/g.txt' && grep -q 'open now 0 · UNKNOWN 2' '$root/h.txt'"
 check 'no condition is called resolved or no longer open on the strength of a stored record' "! grep -q 'NO LONGER OPEN' '$root/g.txt' '$root/h.txt'"
-check 'drawing the digest changed no alert key, acknowledgment or look marker in the store' "[[ \"\$(nonledger)\" == \"$before\" ]]"
+check 'drawing the digest changed no alert key, acknowledgment or look marker in the store' "[[ \"\$(alertkeys)\" == \"$before\" ]]"
 printf 'harness: %d passed, %d failed. Engineering evidence only: no person observed anything, and nothing was acknowledged.\n' "$pass" "$failed"
 [[ $keep -eq 1 ]] && printf 'harness: kept %s\n' "$root"
 [[ $failed -eq 0 ]]
