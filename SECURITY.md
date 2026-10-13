@@ -34,6 +34,8 @@ A hook of Cockpit's that fails is not allowed to let an action through. The engi
 
 `turn.step` is the exception, and the reason is structural: for a streaming event the handler must itself be a generator. Its pre-decision readings are wrapped instead, so the hook reaches its Fable, subscription and strict-advisor decisions even when a reading beneath it does not answer. Hooks that only observe — `/init`, `/effort`, `/login`, `/logout`, post-tool readings — forward, because refusing a person's own action over a lost reading is not a guard.
 
+Inside the tool guard the same rule holds one level down: the attribution, instruction-file and destructive-command guards each run under `failClosed`, and a guard that throws refuses the call it guards, naming the guard, the tool and the kind of error and nothing of the command, a path or the error's message. Nothing is retried or approved on the caller's behalf, tools the guard does not cover keep working, and the next call is checked afresh; the operator's own options (`blastRadiusGuard`, `attributionGuard`) still decide which guards run. A check that cannot be made is not an answer: an unreadable filesystem does not mean "the instruction file exists", and an unreadable authentication state under `subscriptionOnly` refuses the request.
+
 Cockpit has no hook on Claude Code's permission check (`tool.check`) and asks no permission decision of its own. Its guards run earlier, in `tool.call`, and only ever refuse a call or put a question to you; nothing in the plugin approves one, so your permission rules, your permission mode and the engine's own dialog decide every call that Cockpit lets through.
 
 ## Helpers and their reports

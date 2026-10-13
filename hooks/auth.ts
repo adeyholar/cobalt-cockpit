@@ -92,6 +92,9 @@ export const authLines = (auth: AuthState | null, blocksFable = true): string[] 
 export const API_REFUSAL =
   'AUTH / API DETECTED. This workflow runs on the Claude subscription only, and API-style authentication is configured for this session, so nothing was sent. Remove API-style configuration from your session, sign in to your subscription, or set the plugin option "subscriptionOnly" to false to allow it.'
 
+export const AUTH_UNREADABLE_REFUSAL =
+  'AUTH / STATE UNREADABLE. This workflow runs on the Claude subscription only, and this session\'s authentication could not be read, so nothing was sent. Reload the plugin, or set the plugin option "subscriptionOnly" to false to stop checking.'
+
 const line = (name: string, value: string, color?: string, dim = false): Row => [
   { text: ` ${name.padEnd(13)}`, isDim: true },
   { text: value, ...(color === undefined ? {} : { color }), ...(dim ? { isDim: true } : {}) },
