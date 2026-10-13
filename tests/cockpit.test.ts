@@ -149,6 +149,16 @@ describe('subagents', () => {
     expect(await progress($, { action: 'status' })).toBe(status)
   })
 
+  test('a command that begins with an inherited name cannot make the guard fail open', async ($, on) => {
+    const w = world(on, { answer: 'Cancel' })
+    await start($)
+    for (const command of ['valueOf -x; git push --force', 'constructor --x && git reset --hard', 'toString -a; rm -rf /']) {
+      const answer = await $.tool.call({ tool: 'Bash', command } as never)
+      expect([command, (answer as { deny?: string }).deny?.includes('did not approve')]).toEqual([command, true])
+    }
+    expect(commandsRun(w)).toEqual([])
+  })
+
   test('the guards still stand over a subagent\'s commands', async ($, on) => {
     const w = world(on, { answer: 'Cancel' })
     await start($)

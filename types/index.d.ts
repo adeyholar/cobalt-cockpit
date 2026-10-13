@@ -574,11 +574,15 @@ export type SwarmTask = {
   /** The level last applied to this task's live agent requests, where observable; null before any request. */ appliedEffort: string | null
   /** The level set natively on this task's Agent call; null or absent when the call carried none and `turn.step` sets the level instead. */ launchEffort?: string | null
   /** One effort step upward within the tier, recorded when it happened. */ effortEscalation: EffortEscalation | null
+  /** The tier Cockpit's own route would suggest for this assignment, read from its structured fields. Advice: `tier` is the commander's and stands. Absent in ledgers written before v0.6.1. */ suggestedTier?: ModelTier
+  /** Why that tier was suggested. */ routeReason?: string
   createdAt: number; startedAt: number | null; endedAt: number | null; lastActivityAt: number; reason: string | null
 }
 export type SwarmEvent = { seq: number; at: number; kind: string; taskId: string | null; agentId: string | null; wave: Wave; detail: string }
 export type SwarmConfig = { sonnet: number | 'AUTO'; haiku: number | 'AUTO'; total: number | 'AUTO'; /** Opus specialist subagents allowed at once; 0 (and absent, in older ledgers) keeps OPUS tasks in the main loop. Counted in `total` when above 0. */ opus?: number; maxTasks: number; maxEvents: number; stallMs: number }
 export type Swarm = { version: 2; wave: Wave; config: SwarmConfig; tasks: SwarmTask[]; events: SwarmEvent[]; sequence: number; requested: number; actual: number; highWater: number; conflicts: number; droppedEvents: number }
+/** One tier's delegation funnel: what was suggested, what the commander requested, what admission reserved, what the host spawned, what completed and what the commander verified. */
+export type RouteCounts = { suggested: number; requested: number; admitted: number; spawned: number; completed: number; verified: number }
 export type TaskInput = Pick<SwarmTask, 'id' | 'tier' | 'role' | 'objective'> & Partial<Pick<SwarmTask, 'parentTask' | 'parentAgent' | 'scope' | 'dependencies' | 'owned' | 'mode' | 'wave' | 'spawnReason'>> & { /** Requested reasoning level, or AUTO to choose from the task. */ effort?: EffortRequest; /** Why the effort was chosen. */ effortReason?: string }
 
 export type Value<T> = T | typeof UNKNOWN

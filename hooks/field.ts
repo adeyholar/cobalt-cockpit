@@ -511,11 +511,11 @@ export const swarmGraph = (swarm: Swarm, runId?: string, commander = 'MAIN / MOD
     const escalated = tasks.filter(t => t.escalation !== null).length
     const review = tasks.filter(t => t.wave === 'REVIEW').length
     const verification = tasks.filter(t => t.wave === 'VERIFICATION').length
-    const label = `${tier} ${tasks.length} · active ${count(['reserved', 'running'])} · queue ${count(['queued'])} · blocked ${count(['blocked', 'stalled'])} · done ${count(['completed'])} · failed ${count(['failed'])}${escalated ? ` · ↑${escalated}` : ''}${review ? ` · review ${review}` : ''}${verification ? ` · verify ${verification}` : ''}`
+    const label = `${tier} ${tasks.length} · active ${count(['reserved', 'running'])} · queue ${count(['queued'])} · blocked ${count(['blocked'])}${count(['stalled']) ? ` · quiet ${count(['stalled'])}` : ''} · done ${count(['completed'])} · failed ${count(['failed'])}${escalated ? ` · ↑${escalated}` : ''}${review ? ` · review ${review}` : ''}${verification ? ` · verify ${verification}` : ''}`
     branches.push({ state: count(['failed']) === tasks.length ? 'dropped' : 'kept', label, at: 0, lit: count(['reserved', 'running']) ? 1 : 0.5 })
   }
   branches.forEach((b, i) => { b.at = (i + 1) / (branches.length + 1) })
-  return { kind: 'orchestration', runId, chosen: null, label: `${commander} · ${summary.wave} · parallel ${summary.parallelism} · queue ${summary.queue} · blocked ${summary.blocked}`, branches }
+  return { kind: 'orchestration', runId, chosen: null, label: `${commander} · ${summary.wave} · parallel ${summary.parallelism} · queue ${summary.queue} · blocked ${summary.blocked}${summary.stalled ? ` · quiet ${summary.stalled}` : ''}`, branches }
 }
 export const swarmTape = (swarm: Swarm, columns: number, commander = 'MAIN / MODEL unknown'): Tape | null => {
   const graph = swarmGraph(swarm,undefined,commander)
