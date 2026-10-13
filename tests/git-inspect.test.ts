@@ -165,6 +165,8 @@ describe('the commander\'s rule: read-only Git inspection as typed', () => {
   test('what only bash would expand is refused, because the command runs as typed', () => {
     // brace expansion writes the option the refusal list never saw; a pattern in an option could expand to one
     for (const command of ['git log --{output=/tmp/canary,}', 'git diff --o{utput=/tmp/canary,}', 'git log -{p,O/etc/passwd}', 'git log --since={1..2}', 'git log --outpu* x', 'git log --grep=fix*', 'git log -[pO]', "git grep 'a{2,3}' hooks"]) expect([command, readOnlyShell(command)]).toEqual([command, false])
+    // a pattern that begins a word matches a file whose name begins with a dash as readily as any other
+    for (const command of ['git diff *', 'git diff -- *', 'git log -- *.ts', 'git grep x ?', 'git diff [a-z]*', "git log -- '*.md'"]) expect([command, readOnlyShell(command)]).toEqual([command, false])
     // a brace with nothing to expand is a revision like any other
     for (const command of ['git diff HEAD@{1}', 'git log stash@{0}', 'git show HEAD^{tree}', 'git log -- hooks/*.ts']) expect([command, readOnlyShell(command)]).toEqual([command, true])
   })

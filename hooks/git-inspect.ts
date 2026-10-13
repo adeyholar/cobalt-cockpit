@@ -85,10 +85,12 @@ const isRefusedOption = (a: string): boolean => {
   return a === '-c' || a === '-h' || (a.startsWith('-') && a.includes('O'))
 }
 // What only bash would do to a word, and the reader in ./shell does not model: brace expansion (`--{output=x,}` is
-// `--output=x --`) and, for an option, a filename pattern that could expand to one. A command that runs as typed must
-// not contain either; a rebuilt one cannot, because every word of it is quoted again.
+// `--output=x --`), and a filename pattern that could become an option: one inside an option, or one that begins a word
+// (`*` matches a file called `--output=x` as readily as any other). A command that runs as typed must contain none of
+// them; a rebuilt one cannot, because every word of it is quoted again. A pattern after a directory (`hooks/*.ts`)
+// expands only to names that begin with that directory, and is left alone.
 const BRACE_EXPANSION = /\{[^{}]*(?:,|\.\.)[^{}]*\}/
-const expandsInBash = (word: string): boolean => BRACE_EXPANSION.test(word) || (word.startsWith('-') && /[*?[]/.test(word))
+const expandsInBash = (word: string): boolean => BRACE_EXPANSION.test(word) || /^[*?[]/.test(word) || (word.startsWith('-') && /[*?[]/.test(word))
 
 /** `git <subcommand> …` typed plainly: no wrapper, assignment, redirect or here-document. Its arguments, or null. */
 const plainGitArgs = (c: Simple): string[] | null => {
