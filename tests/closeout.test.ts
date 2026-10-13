@@ -160,7 +160,7 @@ for (const [label, options] of CONFIGS) {
       for (const path of ['', 'README.md', '/work/example/CLAUDE.md.txt', '/work/example/MYCLAUDE.md', '/work/example/CLAUDE.mdx']) {
         expect([path, denial(await $.tool.call({ tool: 'Edit', file_path: path, old_string: '', new_string: 'x' } as never))]).toEqual([path, ''])
       }
-      for (const path of [5, null, {}, ['CLAUDE.md'].length]) {
+      for (const path of [5, null, {}]) {
         expect(denial(await $.tool.call({ tool: 'Edit', file_path: path, old_string: '', new_string: 'x' } as never))).not.toContain('only created when the user asks')
       }
       expect(w.asked).toEqual([])
@@ -222,6 +222,18 @@ describe('the shell forms that name an instruction file', () => {
     ['eval "echo x > CLAUDE.md"', ['CLAUDE.md']],
     ["cat <<'EOF' | sh\necho x > CLAUDE.md\nEOF", ['CLAUDE.md']],
     ['cat build.sh | sh', []],
+    ['cp ~/.claude/CLAUDE.md .', ['./CLAUDE.md']],
+    ['cp /x/AGENTS.md sub/', ['sub/AGENTS.md']],
+    ['cp /x/CLAUDE.md sub', []],
+    ['mv x/AGENTS.md ./', ['./AGENTS.md']],
+    ['install a/CLAUDE.md .', ['./CLAUDE.md']],
+    ['cp -t . a/CLAUDE.md', ['./CLAUDE.md']],
+    ['cp --target-directory=out a/CLAUDE.md', ['out/CLAUDE.md']],
+    ['ln -s /x/CLAUDE.md', ['./CLAUDE.md']],
+    ['ln -s /x/CLAUDE.md link.md', []],
+    ['cp CLAUDE.md backup.md', []],
+    ['cp CLAUDE.md notes', []],
+    ['cp src/a.ts .', []],
     ['ls CLAUDE.md', []],
     ['cat CLAUDE.md', []],
     ['cp CLAUDE.md backup.md', []],

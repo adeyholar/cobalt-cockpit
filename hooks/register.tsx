@@ -3921,7 +3921,6 @@ export const register: Register = (on, options) => {
           ...base,
           lastPrompt: oneLine(e.text, 160),
           updatedAt: now,
-          // a prompt that names a file asks for nothing: only a human's /init (below) stands in for the question
           hasInstructionFileRequest: base.hasInstructionFileRequest,
         }
         if (!isSonnetLed()) return settle(discovered(prompted)).task
