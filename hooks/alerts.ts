@@ -749,15 +749,16 @@ const joinFit = (parts: readonly string[], columns: number, head: string): strin
  * and how many are already acknowledged. A count of records: it says nothing about what anyone saw, and an unacknowledged
  * record is not an unseen one.
  */
-export const sinceLines = (occ: readonly Occurrence[], seen: ReadonlySet<string> | null, columns = 100): string[] => {
+export const sinceLines = (occ: readonly Occurrence[], seen: ReadonlySet<string> | null, columns = 100, obs?: Observation): string[] => {
   const fresh = sinceOf(occ, seen)
   const lv = (['CRITICAL', 'HIGH', 'NORMAL'] as const).map(l => [l, fresh.filter(o => o.level === l).length] as const).filter(([, n]) => n > 0).map(([l, n]) => `${n} ${l}`)
   const head = joinFit(fresh.length === 0 ? ['nothing new'] : lv, columns - (seen === null ? 0 : 0), 'SINCE LAST LOOK: ')
   const lines = [seen === null && fresh.length > 0 && head.length + 22 <= columns ? `${head} (no earlier look)` : head]
   if (fresh.length === 0 || columns < 36) return lines
   const n = (f: (o: Occurrence) => boolean): number => fresh.filter(f).length
+  const isUnknown = (o: Occurrence): boolean => obs !== undefined && o.state !== 'open' && standingOf(o, obs) === 'UNKNOWN'
   const parts = [
-    [n(o => o.state === 'open'), 'active'], [n(o => o.state !== 'open'), 'history'], [n(o => o.status === 'recorded'), 'recorded only'], [n(o => o.status === 'sent'), 'SENT'],
+    [n(o => o.state === 'open'), 'active'], [n(o => o.state !== 'open' && !isUnknown(o)), 'history'], [n(isUnknown), 'state UNKNOWN'], [n(o => o.status === 'recorded'), 'recorded only'], [n(o => o.status === 'sent'), 'SENT'],
     [n(o => o.status === 'deferred'), 'DEFERRED'], [n(o => o.status === 'not-sent'), 'NOT SENT'], [n(o => o.status === 'held'), 'HELD BACK'], [n(o => o.status === 'kind-off' || o.status === 'silenced'), 'NOT NOTIFIED'],
     [n(o => o.acked), 'acknowledged'],
   ].filter(([c]) => (c as number) > 0).map(([c, l]) => `${l} ${c}`)
@@ -816,7 +817,11 @@ export const attentionLines = (occ: readonly Occurrence[], obs: Observation, see
   const g = attentionOf(occ, obs, seen)
   const clip = (s: string): string => (s.length <= columns ? s : columns > 1 ? `${s.slice(0, columns - 1)}…` : s.slice(0, Math.max(0, columns)))
   const lines = ['COBALT GUARD / ATTENTION']
-  lines.push(seen === undefined ? 'NEW SINCE LAST LOOK: not tracked here (no project record)' : `NEW SINCE LAST LOOK: ${g.fresh.length} (unacknowledged only)${seen === null && g.fresh.length > 0 ? ' (no earlier look)' : ''}`)
+  // the words that keep a line honest are kept whole: a narrow width picks a shorter form, it does not cut the qualifier
+  const pick = (forms: readonly string[]): string => forms.find(f => f.length <= columns) ?? (forms.at(-1) ?? '')
+  const earlier = seen === null && g.fresh.length > 0 ? ' (no earlier look)' : ''
+  const n = g.fresh.length
+  lines.push(seen === undefined ? pick(['NEW SINCE LAST LOOK: not tracked here (no project record)', 'NEW: not tracked here']) : pick([`NEW SINCE LAST LOOK: ${n} (unacknowledged only)${earlier}`, `NEW SINCE LAST LOOK: ${n} (unacknowledged only)`, `NEW SINCE LAST LOOK: ${n} (unacked)`, `NEW (unacked): ${n}`]))
   if (g.fresh.length > 0) lines.push(`  not acknowledged · ${standings(g.fresh, obs)}`)
   if (g.waiting.length > 0) lines.push(`NOT ACKNOWLEDGED, ALREADY SHOWN: ${g.waiting.length}`, `  ${standings(g.waiting, obs)}`)
   lines.push(`STILL OPEN, ACKNOWLEDGED: ${g.stillOpen.length}`)
@@ -828,10 +833,11 @@ export const attentionLines = (occ: readonly Occurrence[], obs: Observation, see
     lines.push(...byLevelLines(g.unverified))
     for (const o of g.unverified.slice(0, ATTENTION_DETAIL_MAX)) lines.push(detailLine(o, now))
     if (g.unverified.length > ATTENTION_DETAIL_MAX) lines.push(`  +${g.unverified.length - ATTENTION_DETAIL_MAX} more: /cockpit alerts`)
-    lines.push('  UNKNOWN is not resolved: raised elsewhere, not observable from here.')
+    lines.push(pick(['  UNKNOWN is not resolved: raised elsewhere, not observable from here.', '  UNKNOWN is not resolved: not observable here.', '  UNKNOWN is not resolved.', '  UNKNOWN ≠ resolved']))
   }
   if (g.closed.length > 0) lines.push(`ACKNOWLEDGED, NO LONGER OPEN: ${g.closed.length}`)
-  lines.push('Acknowledging does not resolve a condition; it stops reminders.', 'OPEN is read from this session\'s task now, never from a stored record. Each incident is counted once.')
+  lines.push(pick(['Acknowledging does not resolve a condition; it stops reminders.', 'Acknowledging does not resolve.', 'Ack ≠ resolved.']))
+  lines.push(pick(['OPEN is read from this session\'s task now, never from a stored record. Each incident is counted once.', 'OPEN is read from this task now, not from a record.', 'OPEN: read now, not stored.']))
 
   return lines.map(clip)
 }
@@ -861,7 +867,7 @@ export const digestText = (occ: readonly Occurrence[], now: number, enabled: boo
     lines.push('These are records of what Cockpit wrote and what the host reported; they say nothing about what anyone saw.')
   }
   // read-only: the look marker is read to count what is new, and is never written by the digest
-  if (ctx?.seen !== undefined && d.recorded > 0) lines.push(...sinceLines(occ, ctx.seen, ctx.columns ?? 100))
+  if (ctx?.seen !== undefined && d.recorded > 0) lines.push(...sinceLines(occ, ctx.seen, ctx.columns ?? 100, ctx.observation))
   if (ctx?.observation !== undefined && d.recorded > 0) lines.push(...attentionLines(occ, ctx.observation, ctx.seen, now, ctx.columns ?? 100))
   const note = recordingNote(enabled, ctx, 'this is what was recorded earlier;')
   if (note !== null) lines.push(note)
@@ -907,7 +913,7 @@ export const inboxText = (occ: readonly Occurrence[], page: number, now: number,
   const at = Math.min(Math.max(1, page), pages)
   const lines = [`ALERT INBOX · ${ordered.length} recorded · ${ordered.filter(o => o.state === 'open').length} open now · ${ordered.filter(o => !o.acked).length} unacknowledged · page ${at} of ${pages}`]
   // counted before this look is recorded, from the identities shown at the last one
-  if (ctx?.seen !== undefined && ordered.length > 0) lines.push(...sinceLines(ordered, ctx.seen, ctx.columns ?? 100))
+  if (ctx?.seen !== undefined && ordered.length > 0) lines.push(...sinceLines(ordered, ctx.seen, ctx.columns ?? 100, obs))
   const note = recordingNote(enabled, ctx, 'what was recorded earlier is shown;')
   if (note !== null) lines.push(note)
   if (ordered.length === 0) lines.push('Nothing recorded. An incident is recorded when a run needs a person: a failed security check, a NO-GO, exhausted verification, an open review or a blocked run.')

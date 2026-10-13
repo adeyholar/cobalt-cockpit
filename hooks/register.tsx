@@ -3063,7 +3063,9 @@ const armReminders = async ($: EngineInterface): Promise<void> => {
     // the current task's conditions are this session's own, whether or not a pass has run yet (a reload resumes them)
     const current = view === null ? null : await read($, taskAtom)
     if (current !== null) ownedUids.add(uidOf(current))
-    if (view === null || !hasWorkLeft(guardCfg, view.state, view.kept.filter(a => isOwned(a.key)))) { stopReminders(); return }
+    // a release NO-GO whose history cannot be read is neither open nor closed here, and no reminder can come of it
+    const releaseBlind = view !== null && view.kept.some(a => a.kind === 'release-no-go') && !(await releaseRead($)).readable
+    if (view === null || !hasWorkLeft(guardCfg, view.state, view.kept.filter(a => isOwned(a.key) && !(releaseBlind && a.kind === 'release-no-go')))) { stopReminders(); return }
     if (reminderTimer !== null) return
     reminderTimer = $.clock.every(REMINDER_POLL_MS, () => quiet(() => raiseAlerts($, false)))
   } catch { stopReminders() }
@@ -3157,7 +3159,9 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
       const held = (await read($, ledgerAtom)).alerts ?? []
       if (noticedOf(held).length === 0 && !held.some(a => a.outcome === 'deferred')) return
     }
-    const facts = task === null ? null : await alertFacts($, task, atStop)
+    // the release records are read once per pass, strictly: the facts and the decision to close a NO-GO use the same read
+    const release = await releaseRead($)
+    const facts = task === null ? null : await alertFacts($, task, atStop, true, release.history)
     // every condition that holds now, the ones only told at a stop included: what a reminder or a resolution is judged against
     const open = facts === null ? [] : dueOf({ ...facts, atStop: true })
     {
@@ -3168,7 +3172,7 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
       // only a condition of a task this session has itself held is judged here: another session's, or one from before this
       // session, cannot be observed from here, and recording it resolved would turn UNKNOWN into a stored resolution
       if (facts !== null) ownedUids.add(facts.taskUid)
-      const releaseBlind = before.some(a => a.kind === 'release-no-go') && !(await releaseRead($)).readable
+      const releaseBlind = !release.readable
       const closed = [...closedOf(before, keys), ...lapsedOf(before, keys)].filter(a => isOwned(a.key) && !(releaseBlind && a.kind === 'release-no-go'))
       if (closed.length > 0) {
         await update($, ledgerAtom, old => ({ ...old, alerts: closed.reduce((all, a) => boundedAlerts(all, { key: a.key, kind: a.kind, taskId: a.taskId, at: now, outcome: 'resolved', attempts: 0, channel: null }), old.alerts ?? []) }))
@@ -3841,6 +3845,7 @@ export const register: Register = (on, options) => {
     await quiet(() => startLedgerWatch($))
     // persistent alerts: a reload or a restart finds what is still open in the kept records and resumes, it does not start over
     isSessionOver = false
+    ownedUids.clear()
     await armReminders($)
     // How the session is authenticated, read once here and again after a
     // sign-in changes it. The reading is announced the first time and whenever
@@ -4771,7 +4776,7 @@ export const register: Register = (on, options) => {
           if (words.length !== 3) return { text: 'Usage: /cockpit alerts ack <id>  (the 8-character id listed by /cockpit alerts). Nothing was changed.' }
           const id = words[2] as string
           const before = (await read($, ledgerAtom)).alerts ?? []
-          const open = await openAlerts($, before)
+          const { open, observation } = await observeAlerts($, before)
           const result = ackOccurrence(before, open, id)
           if (result.result === 'malformed') return { text: 'Cockpit: an alert id is 8 characters, 0-9 and a-f, as /cockpit alerts lists it. Nothing was changed.' }
           if (result.result === 'unknown') {
@@ -4794,7 +4799,7 @@ export const register: Register = (on, options) => {
           await hush(() => persist($))
           // its reminders end now, not at the timer's next look
           await armReminders($)
-          const standing = o === undefined ? 'UNKNOWN' : standingOf(o, (await observeAlerts($, before)).observation)
+          const standing = o === undefined ? 'UNKNOWN' : standingOf(o, observation)
           const where = shared ? ' It is recorded for this project, so another session reads it too.' : ' It could not be recorded for the project: it holds in this session only.'
 
           return { text: `Cockpit: alert ${named} was acknowledged${standing === 'OPEN' ? '; its condition is still open, and no more reminders will be sent for it' : standing === 'UNKNOWN' ? '; its condition cannot be observed from this session, so it is not known whether it still holds, and this only marks the record' : '; its condition no longer holds, so this only marks the record'}.${where} Other alerts, gates, reviews, approvals and the verification verdict were not changed.` }

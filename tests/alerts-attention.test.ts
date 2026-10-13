@@ -167,6 +167,21 @@ describe('the Attention section', () => {
     for (const columns of [120, 80, 60, 40, 24]) for (const line of attentionLines(mixed(), OBS, null, at, columns)) expect(line.length).toBeLessThanOrEqual(columns)
     expect(attentionLines(mixed(), OBS, null, at).join('\n')).not.toMatch(NEVER_CLAIMED)
   })
+  test('narrow widths keep the words that keep a line honest', () => {
+    for (const columns of [24, 40, 60]) {
+      const text = attentionLines(mixed(), OBS, null, at, columns).join('\n')
+      expect(text).toMatch(/unacked|unacknowledged only/)
+      expect(text).toMatch(/UNKNOWN (is not resolved|≠ resolved)/)
+      expect(text).toMatch(/Ack|Acknowledging/)
+    }
+    for (const columns of [1, 2, 5]) for (const line of attentionLines(mixed(), OBS, null, at, columns)) expect(line.length).toBeLessThanOrEqual(columns)
+  })
+  test('the since-last-look summary does not call an unobservable condition history', () => {
+    const occ = occurrencesOf(written(rec(keyOf('2@200', 'run-blocked')), rec(keyOf('1@100', 'security-failure'), { kind: 'security-failure', at: 2 })), [])
+    const text = digestText(occ, at, true, { seen: null, observation: OBS })
+    expect(text).toMatch(/history 1 · state UNKNOWN 1/)
+    expect(digestText(occ, at, true, { seen: null })).toMatch(/history 2/)
+  })
   test('the digest carries the section, and without an observation it reads as it did', () => {
     const occ = mixed()
     expect(digestText(occ, at, true, { seen: null, observation: OBS })).toContain('COBALT GUARD / ATTENTION')
