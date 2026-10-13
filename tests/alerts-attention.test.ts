@@ -198,7 +198,7 @@ describe('the Attention section', () => {
   test('the history stays within its existing cap however it is read', () => {
     const next = lcg(5)
     let kept: AlertRecord[] = []
-    for (let i = 0; i < ALERT_CAP * 3; i++) kept = bounded(kept, rec(keyOf(`${Math.floor(next() * 50)}@1`, 'run-blocked'), { at: i, acked: next() < 0.5 }))
+    for (let i = 0; i < ALERT_CAP * 3; i++) kept = bounded(kept, rec(keyOf(`${Math.floor(next() * 50)}@1`, 'run-blocked'), { at: i, ...(next() < 0.5 ? { acked: true as const } : {}) }))
     expect(kept.length).toBeLessThanOrEqual(ALERT_CAP)
     expect(() => attentionLines(occurrencesOf(kept, []), OBS, null, 1)).not.toThrow()
   })
