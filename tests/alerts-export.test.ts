@@ -2,14 +2,15 @@
 // history formats that deletes a key only when everything in it exists elsewhere. Synthetic: nothing here shows what anyone saw.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { EXPORT_MAX, EXPORT_SCHEMA, ackKeyOf, bounded, episodesOf, exportOf, legacyPlanOf, legacyPlanText, occKeyOf, occurrencesOf } from '../hooks/alerts'
-import type { AlertRecord, Open } from '../hooks/alerts'
+import { EXPORT_CONDITIONS, EXPORT_MAX, EXPORT_SCHEMA, ackKeyOf, bounded, episodesOf, exportOf, legacyPlanOf, legacyPlanText, occKeyOf, occurrencesOf } from '../hooks/alerts'
+import type { AlertKind, AlertRecord, Open } from '../hooks/alerts'
 import type { Ledger } from '../types'
 import { hostState, planAndComplete, progress, start, world } from './world'
 
 const P1 = 'a'.repeat(12)
 const P2 = 'b'.repeat(12)
 const rec = (key: string, over: Partial<AlertRecord> = {}): AlertRecord => ({ key, kind: 'run-blocked', taskId: 1, at: 1000, outcome: 'sent', attempts: 1, channel: 'kitty', ...over })
+const resolved = (key: string, over: Partial<AlertRecord> = {}): AlertRecord => rec(key, { outcome: 'resolved', attempts: 0, channel: null, ...over })
 const written = (...rs: AlertRecord[]): AlertRecord[] => rs.reduce<AlertRecord[]>((all, r) => bounded(all, r), [])
 const idsOf = (kept: readonly AlertRecord[]): string[] => episodesOf(kept).map(e => e.id)
 const ledger = (held: ReturnType<typeof hostState>) => held.get('run-ledger')!.value as Ledger
@@ -26,10 +27,12 @@ describe('the export', () => {
     { ...rec('u3:run-blocked:task', { at: 8000 }), acked: true },
   )
   const open: Open[] = [{ key: sec, kind: 'security-failure' }]
-  const parsed = JSON.parse(exportOf(occurrencesOf(kept, open), P1, 9000))
+  // this session holds task u1: its security failure holds, its deferred review hold does not; u2 and u3 belong to others
+  const OBS = { uid: 'u1', blind: [] as AlertKind[] }
+  const parsed = JSON.parse(exportOf(occurrencesOf(kept, open), P1, 9000, OBS))
   test('a versioned schema, the project hash, a time, and a count', () => {
     expect(parsed.schema).toBe(EXPORT_SCHEMA)
-    expect(parsed.version).toBe(1)
+    expect(parsed.version).toBe(2)
     expect(parsed.project).toBe(P1)
     expect(parsed.exportedAt).toBe('1970-01-01T00:00:09.000Z')
     expect(parsed.count).toBe(4)
@@ -39,11 +42,28 @@ describe('the export', () => {
     expect(parsed.occurrences.map((o: any) => [o.kind, o.notification, o.acknowledged, o.condition])).toEqual([
       ['security-failure', 'SENT', false, 'OPEN'],
       ['review-hold', 'DEFERRED', false, 'ENDED'],
-      ['run-blocked', 'RECORDED', false, 'ENDED'],
-      ['run-blocked', 'SENT', true, 'ENDED'],
+      ['run-blocked', 'RECORDED', false, 'UNKNOWN'],
+      ['run-blocked', 'SENT', true, 'UNKNOWN'],
     ])
     expect(parsed.occurrences[0].channel).toBe('kitty')
     expect(parsed.occurrences[2].channel).toBeNull()
+  })
+  test('condition: OPEN where observed holding, ENDED only where the owning task was observed not holding, RESOLVED where recorded, otherwise UNKNOWN', () => {
+    const k = 'u1:run-blocked:task'
+    const recs = written(rec(k, { at: 1 }), rec('u1:review-hold:review', { kind: 'review-hold', at: 1 }), resolved('u1:review-hold:review', { kind: 'review-hold', at: 2 }), rec('u2:security-failure:SECURITY', { kind: 'security-failure', at: 3 }), rec('u1:release-no-go:release', { kind: 'release-no-go', at: 4 }))
+    const out = JSON.parse(exportOf(occurrencesOf(recs, [{ key: k, kind: 'run-blocked' }]), P1, 9000, OBS))
+    const by = Object.fromEntries(out.occurrences.map((o: any) => [o.kind, o.condition]))
+    expect(by).toEqual({ 'run-blocked': 'OPEN', 'review-hold': 'RESOLVED', 'security-failure': 'UNKNOWN', 'release-no-go': 'ENDED' })
+    // the same NO-GO when the release history could not be read is UNKNOWN, not ENDED
+    const blind = JSON.parse(exportOf(occurrencesOf(recs, [{ key: k, kind: 'run-blocked' }]), P1, 9000, { uid: 'u1', blind: ['release-no-go'] }))
+    expect(blind.occurrences.find((o: any) => o.kind === 'release-no-go').condition).toBe('UNKNOWN')
+    for (const o of out.occurrences.concat(blind.occurrences)) expect(EXPORT_CONDITIONS.includes(o.condition)).toBe(true)
+  })
+  test('with no observation nothing is called ENDED or OPEN: only RESOLVED and UNKNOWN can be said', () => {
+    const k = 'u1:run-blocked:task'
+    const recs = written(rec(k, { at: 1 }), rec('u2:run-blocked:task', { at: 2 }), rec('u3:run-blocked:task', { at: 2 }), resolved('u3:run-blocked:task', { at: 3 }))
+    const out = JSON.parse(exportOf(occurrencesOf(recs, [{ key: k, kind: 'run-blocked' }]), P1, 9000))
+    expect(out.occurrences.map((o: any) => o.condition).sort()).toEqual(['RESOLVED', 'UNKNOWN', 'UNKNOWN'])
   })
   test('every field is a closed word, a number, an id, a hash or a time: no key, task identity, path or free text', () => {
     const text = exportOf(occurrencesOf(kept, open), P1, 9000)

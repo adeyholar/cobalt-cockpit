@@ -1,4 +1,4 @@
-<h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero/cockpit-hero-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/hero/cockpit-hero-light.svg"><img src="docs/assets/hero/cockpit-hero-dark.png" width="100%" alt="Cobalt Cockpit: Mission Control for Claude Code. Orchestrate bounded agents. Track real progress. Verify before declaring done."></picture><br><sub>Cobalt Cockpit v0.6.1 — Smarter Swarm Operations</sub></h1>
+<h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero/cockpit-hero-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/assets/hero/cockpit-hero-light.svg"><img src="docs/assets/hero/cockpit-hero-dark.png" width="100%" alt="Cobalt Cockpit: Mission Control for Claude Code. Orchestrate bounded agents. Track real progress. Verify before declaring done."></picture><br><sub>Cobalt Cockpit — Mission Control for Claude Code</sub></h1>
 
 <p align="center">
   <a href="#system-overview">Overview</a> ·
@@ -66,7 +66,7 @@ The fail-closed rule has one structural exception, `turn.step`: see [SECURITY.md
   </picture>
 </p>
 
-**Synthetic demo, genuine output.** The HUD band, the panes, the command output and the tool replies in this loop are output of Cockpit v0.6.1's own render hooks, commands and tools, run in Claude Code's offline plugin test host (`claude plugin test`) against a scripted task; the Bash results are the test host's scripted answers. No model ran and no live session was recorded. The frame, the captions, the call labels, the typed command line and the timing are presentation.
+**Synthetic demo, genuine output.** The HUD band, the panes, the command output and the tool replies in this loop were captured from Cockpit v0.6.1's own render hooks, commands and tools (the plugin code at the commit named in `docs/assets/demo/frames.json`; the loop is regenerated on request, not for each release, so its on-screen version is the version it was captured from), run in Claude Code's offline plugin test host (`claude plugin test`) against a scripted task; the Bash results are the test host's scripted answers. No model ran and no live session was recorded. The frame, the captions, the call labels, the typed command line and the timing are presentation.
 
 [Static frame](docs/assets/demo/cockpit-demo-poster.png) · [How it was captured, and how to regenerate it](docs/assets/README.md) · [The captured frames as data](docs/assets/demo/frames.json)
 

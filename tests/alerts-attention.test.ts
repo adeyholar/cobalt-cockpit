@@ -430,4 +430,62 @@ describe('in a run', () => {
     for (const d of [...dueOf(f), ...dueOf({ ...f, stopBlocker: null })]) expect(d.key).toBe(`4@9:${d.kind}:${DETAIL_OF[d.kind]}`)
     expect(new Set([...dueOf(f), ...dueOf({ ...f, stopBlocker: null })].map(d => d.kind)).size).toBe(KINDS.length)
   })
+  describe('a release NO-GO that cannot be observed', () => {
+    const REPEAT = ALERTS({ guardRepeat: true, guardRepeatSec: 60, guardMaxReminders: 5 })
+    /**
+     * Counts the reads of the release records (every alert pass and every timer-armed look makes one, so a polling timer would raise
+     * it): the stored value is not a list, and a getter on it runs each time the world copies it for a read.
+     */
+    const counting = (w: { store: Map<string, unknown> }): { reads: () => number } => {
+      let n = 0
+      w.store.set('release-reviews', { get not() { n++; return 'a list' } })
+
+      return { reads: () => n }
+    }
+    const seed = async (key: string, taskId: number, extra: Partial<AlertRecord> = {}) => {
+      const project = await projectHash('/work/example')
+      const records = written(rec(key, { kind: 'release-no-go', taskId, at: 1, ...extra }))
+
+      return { records, store: { [occKeyOf(project, idsOf(records)[0]!)]: { v: 1, records }, 'release-reviews': { not: 'a list' } } as Record<string, unknown> }
+    }
+    test('another session\'s NO-GO, inspected here: no timer, no notification, no new occurrence, no resolution', REPEAT, async ($, on) => {
+      const { store } = await seed('9@9:release-no-go:release', 9)
+      const w = world(on, {}, store); const held = hostState(on, {}); session(on, 's2')
+      const c = counting(w)
+      await start($)
+      const before = JSON.stringify(ledger(held).alerts)
+      await say($, 'alerts'); await say($, 'alerts digest'); await say($, 'guard')
+      const reads = c.reads()
+      // the instrument works: the inspection above did read the release records
+      expect(reads).toBeGreaterThan(0)
+      await w.clock.advance(6 * HOUR)
+      expect(w.notified).toEqual([])
+      expect(JSON.stringify(ledger(held).alerts)).toBe(before)
+      expect(episodesOf(ledger(held).alerts ?? [])).toHaveLength(1)
+      expect(w.storeWrites.filter(x => x.key.startsWith('alert-') && !x.key.startsWith('alert-seen:'))).toEqual([])
+      // a timer that polls would read the release records again at each look
+      expect(c.reads()).toBe(reads)
+      expect(attention(await say($, 'alerts digest'))).not.toContain('NO LONGER OPEN')
+    })
+    test('this session\'s own NO-GO with an unreadable release history: not closed, not repeated, no timer', REPEAT, async ($, on) => {
+      const t = blockedTask()
+      const { store } = await seed(`${t.id}@${t.startedAt}:release-no-go:release`, t.id, { outcome: 'sent', attempts: 1, channel: 'kitty' })
+      const w = world(on, {}, store); const held = hostState(on, { task: t }); session(on, 's2')
+      const c = counting(w)
+      await start($)
+      await say($, 'alerts digest')
+      const before = JSON.stringify(ledger(held).alerts)
+      const reads = c.reads()
+      // the instrument works: the inspection above did read the release records
+      expect(reads).toBeGreaterThan(0)
+      await w.clock.advance(6 * HOUR)
+      expect(w.notified).toEqual([])
+      expect(JSON.stringify(ledger(held).alerts)).toBe(before)
+      expect((ledger(held).alerts ?? []).some(a => a.outcome === 'resolved')).toBe(false)
+      expect(c.reads()).toBe(reads)
+      const text = attention(await say($, 'alerts digest'))
+      expect(text).not.toContain('NO LONGER OPEN')
+      expect(text).toContain('open now 0 · UNKNOWN 1')
+    })
+  })
 })

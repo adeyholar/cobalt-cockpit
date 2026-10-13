@@ -4813,10 +4813,10 @@ export const register: Register = (on, options) => {
           const project = ledgerNow.alertsProject ?? null
           const acked = project === null ? new Set<string>() : await storedAcks($, project)
           const records = applyAcks(kept, acked)
-          const openNow = await openAlerts($, records)
+          const { open: openNow, observation } = await observeAlerts($, records)
           const at = await $.clock.now()
 
-          return { text: exportOf(occurrencesOf(records, openNow), project, at) }
+          return { text: exportOf(occurrencesOf(records, openNow), project, at, observation) }
         }
         if (arg === 'legacy') {
           const keys = await $.store.keys().catch(() => [] as string[])

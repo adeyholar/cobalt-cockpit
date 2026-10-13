@@ -536,7 +536,11 @@ export const historyFrom = (stored: readonly { id: string; records: readonly Ale
 // --- v0.6.0: a bounded export, and the earlier formats' cleanup plan ---
 
 export const EXPORT_SCHEMA = 'cobalt-cockpit/alerts-export'
-export const EXPORT_VERSION = 1
+/** Version 2 (v0.6.2): `condition` can be UNKNOWN, and ENDED is reported only where the owning task was observed not holding it. */
+export const EXPORT_VERSION = 2
+/** What `condition` can say. UNKNOWN: it cannot be observed from the exporting session, which is neither open nor ended. */
+export const EXPORT_CONDITIONS = ['OPEN', 'ENDED', 'RESOLVED', 'UNKNOWN'] as const
+const CONDITION: Record<Standing, (typeof EXPORT_CONDITIONS)[number]> = { OPEN: 'OPEN', CLEARED: 'ENDED', RESOLVED: 'RESOLVED', UNKNOWN: 'UNKNOWN' }
 export const EXPORT_MAX = 64
 const NOTIFICATION: Record<PinStatus, string> = { sent: 'SENT', recorded: 'RECORDED', deferred: 'DEFERRED', 'not-sent': 'NOT_SENT', held: 'HELD_BACK', 'kind-off': 'NOT_NOTIFIED_KIND_OFF', silenced: 'NOT_NOTIFIED_SILENCED' }
 /** The host's own notification channels: anything else in a stored record is reported as `other`, never echoed. */
@@ -547,15 +551,16 @@ const iso = (at: number): string | null => { try { return new Date(at).toISOStri
  * `/cockpit alerts export`: the project's occurrences as JSON in a closed vocabulary. Each field is an enumerated word, a number,
  * an 8-hex id, a 12-hex project hash, an ISO time or the host's channel name; no prompt, path, command, key or free text. What
  * became of the notification and whether the person acknowledged it are separate fields, so SENT, RECORDED and DEFERRED never
- * stand in for ACKNOWLEDGED. Bounded, and nothing is written anywhere.
+ * stand in for ACKNOWLEDGED. Bounded, and nothing is written anywhere. `condition` is judged by `standingOf` against what the
+ * exporting session can observe; with no observation given nothing is observable, so nothing is called ENDED.
  */
-export const exportOf = (occ: readonly Occurrence[], project: string | null, now: number): string => {
+export const exportOf = (occ: readonly Occurrence[], project: string | null, now: number, obs: Observation = { uid: null, blind: [] }): string => {
   const ordered = [...occ].sort((a, b) => a.seq - b.seq)
   const shown = ordered.slice(-EXPORT_MAX)
 
   return JSON.stringify({
     schema: EXPORT_SCHEMA, version: EXPORT_VERSION, project: project !== null && PROJECT_RE.test(project) ? project : null, exportedAt: iso(now),
-    occurrences: shown.map(o => ({ id: o.id, level: o.level, kind: o.kind, task: o.taskId, recordedAt: iso(o.at), lastRecordedAt: iso(o.lastAt), condition: o.state === 'open' ? 'OPEN' : o.state === 'resolved' ? 'RESOLVED' : 'ENDED', notification: NOTIFICATION[o.status], channel: o.status === 'sent' ? channelOf(o.channel) : null, reminders: o.reminders, acknowledged: o.acked })),
+    occurrences: shown.map(o => ({ id: o.id, level: o.level, kind: o.kind, task: o.taskId, recordedAt: iso(o.at), lastRecordedAt: iso(o.lastAt), condition: CONDITION[standingOf(o, obs)], notification: NOTIFICATION[o.status], channel: o.status === 'sent' ? channelOf(o.channel) : null, reminders: o.reminders, acknowledged: o.acked })),
     count: shown.length, truncated: ordered.length > shown.length,
     note: 'Records of what Cockpit wrote and what the host reported; not evidence that anyone saw a notification.',
   }, null, 2)
@@ -752,7 +757,7 @@ const joinFit = (parts: readonly string[], columns: number, head: string): strin
 export const sinceLines = (occ: readonly Occurrence[], seen: ReadonlySet<string> | null, columns = 100, obs?: Observation): string[] => {
   const fresh = sinceOf(occ, seen)
   const lv = (['CRITICAL', 'HIGH', 'NORMAL'] as const).map(l => [l, fresh.filter(o => o.level === l).length] as const).filter(([, n]) => n > 0).map(([l, n]) => `${n} ${l}`)
-  const head = joinFit(fresh.length === 0 ? ['nothing new'] : lv, columns - (seen === null ? 0 : 0), 'SINCE LAST LOOK: ')
+  const head = joinFit(fresh.length === 0 ? ['nothing new'] : lv, columns, 'SINCE LAST LOOK: ')
   const lines = [seen === null && fresh.length > 0 && head.length + 22 <= columns ? `${head} (no earlier look)` : head]
   if (fresh.length === 0 || columns < 36) return lines
   const n = (f: (o: Occurrence) => boolean): number => fresh.filter(f).length

@@ -113,7 +113,7 @@ On the 32 occurrences a ledger can hold (the cap), in the plugin test host, mean
 - **A condition that a different kind replaced** (a blocked run that became exhausted verification) reads CLEARED for the first key; the second is its own occurrence.
 - **The GUARD label** (`SENT`/`FAILED`) is computed from the records alone. A sent, unacknowledged notice of a task this process no longer holds is no longer closed by a pass, so the label can keep saying `SENT` (a true statement: it was sent and nobody acknowledged it) where v0.6.1 returned to `ARMED` after closing it. Acknowledging it clears the label.
 - **Resolution marks written before this release** by a session that could not observe the condition cannot be told from true ones; they read RESOLVED.
-- **Export** still reports `ENDED` for what is not open; its schema is version 1 and was not changed, so it does not say UNKNOWN.
+- **Export** is schema version 2: `condition` is `OPEN`, `RESOLVED`, `ENDED` or `UNKNOWN`. `ENDED` keeps its meaning but is said only where this session's own task was observed not holding it; a condition it cannot observe is `UNKNOWN`, never `ENDED`. Version 1 said `ENDED` for both. With no observation given, nothing is called `ENDED` or `OPEN`. A consumer pinned to version 1 sees a new `version` value and one new word; it never sees a false `ENDED`.
 - **Look marker and acknowledgments** are as best-effort across sessions as they were; the section can over-report "new", never mark something shown that no person displayed.
 - Nothing here says that a person saw anything, and none of it changes native Claude Code permissions, a security hold, a release approval or the Stop Guard.
 
