@@ -2042,6 +2042,10 @@ const allowInstructionFile = async ($: EngineInterface, path: string): Promise<{
 /** The guards: a `{ deny }` when the call must not run, else null. Each guard is judged on its own, and a guard that throws refuses. */
 const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } & Record<string, unknown>): Promise<{ deny: string } | null> => {
   if (e.tool === 'Bash') {
+    // a Bash call whose command is not text cannot be judged by any guard, so it is refused, not read as an empty command
+    if ((config.hasAttributionGuard || config.hasGuard) && typeof e['command'] !== 'string') {
+      return { deny: 'Cobalt Cockpit: this Bash call carries no command text the guards can read, so it did not run.' }
+    }
     const command = typeof e['command'] === 'string' ? e['command'] : ''
     if (config.hasAttributionGuard) {
       const attribution = await failClosed('attribution', 'Bash', async () => {
@@ -2078,12 +2082,26 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
     return null
   }
 
-  if (!config.hasAttributionGuard || (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit')) return null
+  if (!config.hasAttributionGuard || (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit' && e.tool !== 'MultiEdit')) return null
+  const attribution = await failClosed('attribution', e.tool, async () => {
+    if (e.tool !== 'MultiEdit') return editGuard($, e)
+    if (!Array.isArray(e['edits'])) throw new TypeError('MultiEdit without a list of edits')
+    for (const one of e['edits'] as Record<string, unknown>[]) {
+      const refusal = await editGuard($, { ...one, tool: 'Edit', file_path: one['file_path'] ?? e['file_path'] })
+      if (refusal !== null) return refusal
+    }
 
-  return failClosed('attribution', e.tool, () => editGuard($, e))
+    return null
+  })
+  if (attribution !== null || e.tool !== 'Write') return attribution
+
+  return failClosed('instruction-file', e.tool, async () => {
+    const path = String(e['file_path'] ?? '')
+    return path === '' || path.startsWith(`${$.plugin.root}/`) || !isInstructionFile(path) ? null : allowInstructionFile($, path)
+  })
 }
 
-/** The attribution guard over an Edit, Write or NotebookEdit, and the instruction-file guard over a Write. */
+/** The attribution guard over one Edit, Write or NotebookEdit. */
 const editGuard = async ($: EngineInterface, e: { tool: string } & Record<string, unknown>): Promise<{ deny: string } | null> => {
   const path = String(e['file_path'] ?? e['notebook_path'] ?? '')
   // this plugin's own sources and tests spell the patterns out
@@ -2109,8 +2127,6 @@ const editGuard = async ($: EngineInterface, e: { tool: string } & Record<string
     )
     if (answer !== 'Allow once') return attributionDeny(phrase, `this edit to ${basename(path)}`)
   }
-  if (e.tool === 'Write' && isInstructionFile(path)) return allowInstructionFile($, path)
-
   return null
 }
 

@@ -53,7 +53,10 @@ describe('failClosed: a guard that throws refuses, whichever guard it is', () =>
     hostile.name = `rm -rf / ${SECRET}\n`
     const text = guardFailure('tool', `Bash ${SECRET}`, hostile).deny
     expect(text).not.toContain('\n')
-    expect(text).not.toContain(' / ')
+    expect(text).not.toContain(SECRET)
+    expect(text).not.toContain('rm')
+    expect(text).toContain('(Error)')
+    expect(text).toContain('this tool call')
   })
 })
 
@@ -66,10 +69,31 @@ for (const [label, options] of CONFIGS) {
       expect(denial(viaShell)).toContain('the instruction-file guard failed')
       expect(denial(viaShell)).not.toContain(SECRET)
       const viaWrite = await $.tool.call({ tool: 'Write', file_path: '/work/example/AGENTS.md', content: 'hi' } as never)
-      expect(denial(viaWrite)).toContain('the attribution guard failed')
+      expect(denial(viaWrite)).toContain('the instruction-file guard failed')
       expect(commandsRun(w)).toEqual([])
       expect(edits(w)).toEqual([])
       expect(w.asked).toEqual([])
+    })
+
+    test('a Bash call without command text, and a MultiEdit without edits, are refused, not read as empty', { options }, async ($, on) => {
+      const w = world(on)
+      await start($)
+      expect(denial(await $.tool.call({ tool: 'Bash' } as never))).toContain('no command text')
+      expect(denial(await $.tool.call({ tool: 'Bash', command: ['git', 'push', '--force'] } as never))).toContain('no command text')
+      expect(denial(await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/a.ts' } as never))).toContain('the attribution guard failed')
+      expect(commandsRun(w)).toEqual([])
+      expect(edits(w)).toEqual([])
+    })
+
+    test('MultiEdit is held to the attribution guard like Edit', { options }, async ($, on) => {
+      const w = world(on, { answer: 'Block' })
+      await start($)
+      const trailer = ['Co-authored-by: Claude', '<noreply@anthropic.com>'].join(' ')
+      const refused = await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/a.ts', edits: [{ old_string: 'a', new_string: 'b' }, { old_string: 'c', new_string: trailer }] } as never)
+      expect(denial(refused)).toContain('AI attribution')
+      expect(edits(w)).toEqual([])
+      const fine = await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/a.ts', edits: [{ old_string: 'a', new_string: 'b' }] } as never)
+      expect(denial(fine)).toBe('')
     })
 
     test('a failed guard does not take the session down: other tools run, and the next call is checked afresh', { options }, async ($, on) => {
@@ -95,6 +119,13 @@ for (const [label, options] of CONFIGS) {
 }
 
 describe('the operator\'s switches still decide which guards run', () => {
+  test('blastRadiusGuard off: a destructive command is not asked about, and attribution still stands', { options: { blastRadiusGuard: false } }, async ($, on) => {
+    const w = world(on, { answer: 'Cancel' })
+    await start($)
+    expect(denial(await bash($, 'git reset --hard'))).toBe('')
+    expect(w.asked).toEqual([])
+  })
+
   test('attributionGuard off: an unreadable filesystem does not stop a command or an edit', { options: { attributionGuard: false } }, async ($, on) => {
     const w = world(on, { failExists: true })
     await start($)

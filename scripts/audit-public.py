@@ -117,8 +117,8 @@ else:
 # failure into "no refusal" (SECURITY.md, "Hooks that refuse"). tests/guard-failure.test.ts cannot make a pure rule throw.
 _reg = (root/'hooks/register.tsx').read_text()
 for _name in ('attribution', 'instruction-file', 'destructive-command'):
- if f"failClosed('{_name}'" not in _reg: findings.append(f"hooks/register.tsx: the {_name} guard does not run under failClosed")
-for _bad, _why in ((r'guard\(\$, call\)\.catch\(\s*\(\)\s*=>\s*null\s*\)', 'a failed tool guard is read as no refusal'), (r'\$\.fs\.exists\([^)]*\)\.catch\(\s*\(\)\s*=>\s*true\s*\)', 'an unreadable filesystem is read as the file existing'), (r'isApiRefused', 'the subscription check fails open')):
+ if not re.search(r"^[^/\n]*await failClosed\('" + _name + r"'", _reg, re.M) and not re.search(r"return failClosed\('" + _name + r"'", _reg): findings.append(f"hooks/register.tsx: the {_name} guard does not run under failClosed")
+for _bad, _why in ((r'guard\(\$, call\)\.catch\(\s*\(\w*\)\s*=>\s*(?!guardFailure)', 'a failed tool guard is read as no refusal'), (r'\$\.fs\.exists\([^)]*\)\.catch\(', 'an unreadable filesystem is read as the file existing'), (r'isApiRefused', 'the subscription check fails open')):
  if re.search(_bad, _reg): findings.append(f'hooks/register.tsx: {_why}')
 if not re.search(r'guard\(\$, call\)\.catch\(\(error: unknown\) => guardFailure\(', _reg): findings.append('hooks/register.tsx: the tool guard has no refusing last net')
 print(f'{count} files; {total} bytes; manifest/defaults/license checks passed; icon {width}x{height} {len(data)} bytes')
