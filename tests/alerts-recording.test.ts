@@ -248,7 +248,8 @@ describe('in a run: record-only', () => {
     expect(await guardRow($)).toBe('GUARD ▲ CRITICAL security check failed · task 1 · RECORDED, no notification · /cockpit alerts')
     for (const columns of [60, 40, 24, 12]) expect((await guardRow($, columns))!.length).toBeLessThanOrEqual(columns)
     await say($, `alerts ack ${idOf(await say($, 'alerts'), 'security-failure')}`)
-    expect(await guardRow($)).toBeUndefined()
+    // v0.6.2: acknowledged, but the failed gate still holds: the row says so, apart from any unacknowledged pin
+    expect(await guardRow($)).toBe('GUARD: RECORDING · 1 acknowledged, still open · /cockpit alerts digest')
   })
   test('nothing recorded draws no row at all, and the progress rows are what they were', REC(), async ($, on) => {
     world(on); hostState(on, {}); session(on)
@@ -390,7 +391,9 @@ describe('in a run: switching modes', () => {
     world(on, {}, store); hostState(on, {}); session(on, 's2')
     await start($)
     const text = await say($, 'alerts')
-    expect(text).toContain('condition no longer open (task replaced or gone)')
+    // v0.6.2: no task is observable in this session, so the condition is UNKNOWN, not resolved
+    expect(text).toContain('condition state UNKNOWN from this session')
+    expect(text).not.toContain('condition no longer open')
   })
 })
 

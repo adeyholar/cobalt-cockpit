@@ -479,8 +479,10 @@ describe('recovery: restart, reload and project switch', () => {
     await start($)
     const text = await say($, 'alerts')
     expect(ids(text)).toHaveLength(1)
-    expect(text).toContain('HISTORY (recorded earlier; the condition no longer holds)')
-    expect(text).toContain('condition no longer open (task replaced or gone)')
+    // v0.6.2: another session's incident cannot be observed from here, so it is UNKNOWN and not "history"
+    expect(text).toContain('CONDITION UNKNOWN (raised by another session or task')
+    expect(text).toContain('condition state UNKNOWN from this session')
+    expect(text).not.toContain('the condition no longer holds')
     await w.clock.advance(HOUR)
     expect(w.notified).toEqual([])
   })

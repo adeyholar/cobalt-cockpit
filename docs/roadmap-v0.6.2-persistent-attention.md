@@ -1,6 +1,6 @@
 # Planned for v0.6.2: Persistent Attention
 
-Status: approved for the roadmap, not designed in detail and not implemented. Nothing here is part of v0.6.1, and v0.6.1's scope was not widened for it. It is a milestone of its own, separate from [Diff-Aware Verification](roadmap-v0.7.0-diff-aware-verification.md).
+Status: implemented in v0.6.2 on a candidate branch, pending the owner's approval to merge; the design and what was built are in [implementation-v0.6.2.md](implementation-v0.6.2.md). Nothing here was part of v0.6.1, and v0.6.1's scope was not widened for it. It is a milestone of its own, separate from [Diff-Aware Verification](roadmap-v0.7.0-diff-aware-verification.md).
 
 ## Objective
 

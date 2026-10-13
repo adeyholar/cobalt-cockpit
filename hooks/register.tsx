@@ -63,7 +63,8 @@ import {
 } from './hygiene'
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
-import { exportOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, unreadOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import type { Observation } from './alerts'
+import { exportOf, hudCountsOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
@@ -3109,18 +3110,26 @@ const alertFacts = async ($: EngineInterface, task: Task, atStop: boolean, withR
   }
 }
 
-/** Every alert condition that holds now, for the HUD and the status: read-only, and empty when it cannot be read. */
-const openAlerts = async ($: EngineInterface, kept: readonly AlertRecord[]): Promise<Open[]> => {
+/**
+ * Every alert condition that holds now, and what this session can observe of the rest: read-only. With no task, or when the task
+ * cannot be read, nothing is open and nothing is observable (`uid` null): a condition is then UNKNOWN, never resolved. A NO-GO
+ * is judged from the release history, so when that cannot be read the kind is `blind` and is not reported as cleared either.
+ */
+const observeAlerts = async ($: EngineInterface, kept: readonly AlertRecord[]): Promise<{ open: Open[]; observation: Observation }> => {
   try {
     const task = await read($, taskAtom)
-    if (task === null || kept.length === 0) return []
+    if (task === null || kept.length === 0) return { open: [], observation: { uid: null, blind: [] } }
 
     // the release history is read only when a NO-GO was raised: without a record it could not be listed anyway
-    const facts = await alertFacts($, task, true, kept.some(a => a.kind === 'release-no-go'))
+    const wantsRelease = kept.some(a => a.kind === 'release-no-go')
+    const releaseReadable = !wantsRelease || (await $.store.get('release-reviews').then(() => true, () => false))
+    const facts = await alertFacts($, task, true, wantsRelease && releaseReadable)
 
-    return dueOf(facts)
-  } catch { return [] }
+    return { open: dueOf(facts), observation: { uid: facts.taskUid, blind: releaseReadable ? [] : ['release-no-go'] } }
+  } catch { return { open: [], observation: { uid: null, blind: [] } } }
 }
+/** Every alert condition that holds now, for the HUD and the status: read-only, and empty when it cannot be read. */
+const openAlerts = async ($: EngineInterface, kept: readonly AlertRecord[]): Promise<Open[]> => (await observeAlerts($, kept)).open
 
 /** Raises whatever alert is due. Never throws, never loops, and never touches a gate, a review or an approval. */
 const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> => {
@@ -3332,9 +3341,10 @@ const guardPin = async ($: EngineInterface, view: { state: typeof EMPTY_GUARD; k
     const scope = await transportScope($)
     const unconfirmed = guardCfg.enabled && transportStatus(validTransport(await read($, transportAtom)), scope.session, scope.link, scope.now) !== 'USER CONFIRMED'
 
-    const open = await openAlerts($, view.kept)
+    const { open, observation } = await observeAlerts($, view.kept)
+    const counts = hudCountsOf(occurrencesOf(view.kept, open), observation)
 
-    return pinLine(pinsOf(view.kept, open), unconfirmed, guardLabel(guardCfg, view.state, view.kept), width, unreadOf(occurrencesOf(view.kept, open)))
+    return pinLine(pinsOf(view.kept, open), unconfirmed, guardLabel(guardCfg, view.state, view.kept), width, counts.unread, counts)
   } catch { return null }
 }
 const transportText = async ($: EngineInterface): Promise<string[]> => {
@@ -4838,23 +4848,23 @@ export const register: Register = (on, options) => {
           // read-only: the look marker is read to say what is new and is never written here
           const seen = await readSeen($, ledgerNow.alertsProject)
 
-          const openNow = await openAlerts($, recorded)
+          const { open: openNow, observation } = await observeAlerts($, recorded)
           const at = await $.clock.now()
 
-          return { text: digestText(occurrencesOf(recorded, openNow), at, guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns }) }
+          return { text: digestText(occurrencesOf(recorded, openNow), at, guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns, observation }) }
         }
         const page = arg === '' ? 1 : /^\d{1,3}$/.test(arg) ? Number(arg) : -1
         if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | digest | ack <id> | export | legacy [delete <code>]' }
         const ledgerNow = await read($, ledgerAtom)
         const kept = ledgerNow.alerts ?? []
-        const openNow = await openAlerts($, kept)
+        const { open: openNow, observation } = await observeAlerts($, kept)
         const occ = occurrencesOf(kept, openNow)
         const shownPage = Math.min(page, inboxPages(occ.length))
         const seen = await readSeen($, ledgerNow.alertsProject)
-        const text = inboxText(occ, shownPage, await $.clock.now(), guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns })
+        const text = inboxText(occ, shownPage, await $.clock.now(), guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns, observation })
         // a person's look marks what it showed; the count above was taken first. Nothing is acknowledged by looking.
         // with both settings off nothing new is kept, the look marker included
-        if (isRecording(guardCfg) && isHumanAuthority(e.origin) && ledgerNow.alertsProject !== undefined && occ.length > 0) await hush(() => markSeen($, ledgerNow.alertsProject as string, seen ?? null, pageIdsOf(occ, shownPage)))
+        if (isRecording(guardCfg) && isHumanAuthority(e.origin) && ledgerNow.alertsProject !== undefined && occ.length > 0) await hush(() => markSeen($, ledgerNow.alertsProject as string, seen ?? null, pageIdsOf(occ, shownPage, observation)))
 
         return { text }
       }

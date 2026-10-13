@@ -659,7 +659,8 @@ describe('in a run: the pinned row', () => {
     expect(pinned).toBe('GUARD ▲ CRITICAL security check failed · task 1 · notification SENT, not acknowledged · transport not confirmed')
     expect(pinned).not.toMatch(NEVER_CLAIMED)
     await say($, 'guard ack')
-    expect(await guardRow($)).toBe('GUARD: ARMED · transport not confirmed · /cockpit guard test')
+    // v0.6.2: the pin is gone, but the failed gate still holds, so the row says an acknowledged condition is still open
+    expect(await guardRow($)).toBe('GUARD: ARMED · 1 acknowledged, still open · transport not confirmed · /cockpit alerts digest')
     // the acknowledgment cleared the pin and nothing else
     expect(task(held).gates.SECURITY.state).toBe('fail')
     // a second condition, later, is pinned on its own; fixing it clears it without any acknowledgment

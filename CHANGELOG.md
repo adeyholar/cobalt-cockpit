@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (0.6.2) — Persistent Attention
+
+Design, the observation rule, measurements, limits and the acceptance procedure: [docs/implementation-v0.6.2.md](docs/implementation-v0.6.2.md).
+
+- **An Attention section in `/cockpit alerts digest`.** Acknowledged incidents whose condition is observed still open are listed apart from the unacknowledged ones, by level and kind (at most five detailed, the rest counted), with the new-since-last-look count and the acknowledged incidents whose state cannot be observed (`UNVERIFIED CONDITION STATE`). Each incident is counted in one group only. Acknowledging stops reminders and resolves nothing.
+- **A condition is OPEN only where this session observes it.** The standing is read from the session's own task each time and is never stored: a record without a resolution mark is not evidence that a condition is open, and an incident raised by another session, an earlier task or a release NO-GO whose history cannot be read is UNKNOWN, never resolved. Records, keys and the export are unchanged.
+- **The inbox and the digest no longer call an unobservable condition "no longer open".** For another session's incident the line reads `condition state UNKNOWN from this session`, under its own heading; the digest's history figure excludes it.
+- **HUD row.** After an acknowledgment the row went blank while the condition still held. It now adds `N acknowledged, still open` and `N unverified` (static, INFO level, same narrow forms); unchanged when there are none.
+- Read-only and silent: the digest writes nothing, no timer, process or network call was added, and an acknowledged incident that stays open is not notified again. The Stop Guard, security holds, release approvals and native permissions are untouched. Four earlier tests changed for the two wording and row differences above; `tests/alerts-attention.test.ts` adds 32.
+
 ## Unreleased (0.6.1) — Smarter swarm operations
 
 Why Haiku was under-used, the exact reviewer permissions, the corrections to earlier rules, measurements, the review record and the acceptance procedure: [docs/implementation-v0.6.1.md](docs/implementation-v0.6.1.md).
