@@ -449,7 +449,8 @@ describe('in a run', () => {
       return { records, store: { [occKeyOf(project, idsOf(records)[0]!)]: { v: 1, records }, 'release-reviews': { not: 'a list' } } as Record<string, unknown> }
     }
     test('another session\'s NO-GO, inspected here: no timer, no notification, no new occurrence, no resolution', REPEAT, async ($, on) => {
-      const { store } = await seed('9@9:release-no-go:release', 9)
+      // a uid no other test in this module holds, so the record is foreign here whatever ran before
+      const { store } = await seed('77@7:release-no-go:release', 77)
       const w = world(on, {}, store); const held = hostState(on, {}); session(on, 's2')
       const c = counting(w)
       await start($)
@@ -479,6 +480,7 @@ describe('in a run', () => {
       // the instrument works: the inspection above did read the release records
       expect(reads).toBeGreaterThan(0)
       await w.clock.advance(6 * HOUR)
+      // the read count below is the real guard against a polling timer: with the history unreadable nothing could be sent anyway
       expect(w.notified).toEqual([])
       expect(JSON.stringify(ledger(held).alerts)).toBe(before)
       expect((ledger(held).alerts ?? []).some(a => a.outcome === 'resolved')).toBe(false)

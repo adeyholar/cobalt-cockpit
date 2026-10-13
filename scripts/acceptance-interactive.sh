@@ -11,7 +11,9 @@
 # user-scope plugin, your settings, your sessions and your store are neither read nor written, and the candidate is the only
 # Cockpit that loads (no duplicate registration). The plugin is a snapshot of the committed tree (`git archive HEAD`), loaded
 # with `--plugin-dir`; commit or discard changes first, the script refuses a dirty tree. No credential is copied: you sign in once,
-# inside the disposable configuration, on the first launch (both sessions share it). Set COBALT_ACCEPT_PASS_AUTH=1 to pass
+# inside the disposable configuration, on the first launch (both sessions share it). On macOS the host may keep its sign-in in the
+# system Keychain, which a configuration directory does not isolate: there the disposable session can reuse your sign-in (the
+# plugin, settings and store are still its own). Set COBALT_ACCEPT_PASS_AUTH=1 to pass
 # ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN from your environment instead. The plugin options (alerts on, a short reminder
 # interval) are given with --settings for these launches only.
 set -euo pipefail
@@ -19,7 +21,8 @@ umask 077
 fail() { printf 'acceptance-interactive: %s\n' "$*" >&2; exit 2; }
 cmd=${1:-}; shift || true
 claude_bin=${CLAUDE_BIN:-$(command -v claude || true)}
-[[ -n $claude_bin && -x $claude_bin ]] || fail 'claude was not found on PATH (set CLAUDE_BIN)'
+need_claude() { [[ -n $claude_bin && -x $claude_bin ]] || fail 'claude was not found on PATH (set CLAUDE_BIN)'; }
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 settings='{"pluginConfigs":{"cobalt-cockpit@inline":{"options":{"guardAlerts":true,"guardRepeat":true,"guardRepeatSec":60,"guardCooldownSec":30,"guardMaxReminders":3,"guardDigest":false,"telemetry":false}}}}'
 
 check_dir() { # the directory must be one this script made
@@ -44,33 +47,37 @@ in_host() { # in_host <dir> <command...>: run with the disposable environment, i
 
 case $cmd in
   setup)
+    need_claude
     dir=
     [[ ${1:-} == --dir ]] && dir=${2:-}
-    repo=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'run it inside the plugin repository'
+    # the candidate is the repository this script belongs to, wherever it is run from
+    repo=$(git -C "$here" rev-parse --show-toplevel 2>/dev/null) || fail 'this script is not inside the plugin repository'
     [[ -z $(git -C "$repo" status --porcelain) ]] || fail 'the working tree is not clean: commit or discard first, so the candidate is exactly a commit'
     sha=$(git -C "$repo" rev-parse HEAD)
-    if [[ -z $dir ]]; then dir=$(mktemp -d "${TMPDIR:-/tmp}/cobalt-accept-XXXXXX"); else [[ ! -e $dir || -z $(ls -A -- "$dir") ]] || fail "not empty: $dir"; mkdir -p -- "$dir"; fi
-    dir=$(realpath -e -- "$dir")
+    if [[ -z $dir ]]; then dir=$(mktemp -d "${TMPDIR:-/tmp}/cobalt-accept-XXXXXX"); else [[ ! -e $dir || -z $(ls -A -- "$dir") ]] || fail "not empty: $dir"; fi
+    dir=$(realpath -m -- "$dir")
     [[ $dir == */cobalt-accept-* ]] || fail "the directory name must contain cobalt-accept-: $dir"
+    mkdir -p -- "$dir"
     mkdir -p "$dir/config" "$dir/state" "$dir/home" "$dir/plugin" "$dir/project"
     : > "$dir/.made-by-acceptance-interactive"
-    git -C "$repo" archive --format=tar HEAD | tar -x -C "$dir/plugin"
+    git -C "$repo" -c core.attributesFile=/dev/null archive --format=tar HEAD | tar -x -C "$dir/plugin"
     printf '%s\n' "$sha" > "$dir/candidate-sha"
-    ( cd "$dir/project" && git init -q . && printf '# disposable acceptance project\n' > README.md && git add README.md && git -c user.name=acceptance -c user.email=acceptance@example.invalid commit -q -m 'disposable project' )
+    ( cd "$dir/project" && git init -q . && printf '# disposable acceptance project\n' > README.md && git add README.md && git -c user.name=acceptance -c user.email=acceptance@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q -m 'disposable project' )
     printf 'candidate %s (cobalt-cockpit %s)\ndirectory %s\n\n' "$sha" "$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/plugin/.claude-plugin/plugin.json" | head -1)" "$dir"
     printf 'Next:\n  %s verify %s\n  %s launch %s 1     # terminal 1\n  %s launch %s 2     # terminal 2, after session 1 has recorded and acknowledged\n  %s clean %s\n' "$0" "$dir" "$0" "$dir" "$0" "$dir" "$0" "$dir"
     ;;
   verify)
+    need_claude
     dir=$(check_dir "${1:-}")
+    # each probe reports its own exit status: a failing probe is shown, it never silently ends the others
+    probe() { local label=$1 n=$2; shift 2; local out rc=0; out=$("$@" 2>&1 < /dev/null) || rc=$?; printf '%s\n' "--- $label (exit $rc):"; printf '%s\n' "$out" | head -"$n"; }
     echo "candidate: $(cat "$dir/candidate-sha")"
-    echo '--- installed plugins in the disposable configuration (expect none):'
-    in_host "$dir" "$claude_bin" plugin list 2>&1 | head -5
-    echo '--- what is loaded, from where:'
-    in_host "$dir" timeout 90 "$claude_bin" -p '/cockpit version' --plugin-dir "$dir/plugin" --settings "$settings" < /dev/null 2>&1 | head -12
-    echo '--- strict validation of the snapshot:'
-    in_host "$dir" "$claude_bin" plugin validate --strict "$dir/plugin" 2>&1 | tail -2
+    probe 'installed plugins in the disposable configuration (expect none)' 5 in_host "$dir" "$claude_bin" plugin list
+    probe 'what is loaded, and from where (expect version 0.6.2 and the SOURCE under this directory)' 12 in_host "$dir" timeout 90 "$claude_bin" -p '/cockpit version' --plugin-dir "$dir/plugin" --settings "$settings"
+    probe 'strict validation of the snapshot' 3 in_host "$dir" "$claude_bin" plugin validate --strict "$dir/plugin"
     ;;
   launch)
+    need_claude
     dir=$(check_dir "${1:-}"); n=${2:-}
     [[ $n == 1 || $n == 2 ]] || fail 'launch <dir> 1|2'
     local_args=(--plugin-dir "$dir/plugin" --settings "$settings")
