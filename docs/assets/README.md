@@ -11,7 +11,7 @@ Everything the root README shows is in this folder and is generated from files i
 | `modules/01-swarm-*.svg` … `modules/06-ledger-*.svg` | The six module keys, dark and light | 2 KB each |
 | `demo/cockpit-demo.gif` | The demo loop, 1105 × 797, about 44 seconds | 1.0 MB |
 | `demo/cockpit-demo-poster.png` | One frame of the loop, as the static alternative | 56 KB |
-| `demo/frames.json` | The captured frames the loop and the README quote, as data | 186 KB |
+| `demo/frames.json` | The captured frames the loop and the README quote, as data | 189 KB |
 | `src/` | The capture script, the two builders and `regenerate.sh` | text |
 
 ## What is genuine, and what is not

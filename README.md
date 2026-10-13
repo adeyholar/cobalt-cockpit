@@ -66,7 +66,7 @@ The fail-closed rule has one structural exception, `turn.step`: see [SECURITY.md
   </picture>
 </p>
 
-**Synthetic demo, genuine output.** The HUD band, the panes, the command output and the tool replies in this loop are output of Cockpit v0.6.0's own render hooks, commands and tools, run in Claude Code's offline plugin test host (`claude plugin test`) against a scripted task; the Bash results are the test host's scripted answers. No model ran and no live session was recorded. The frame, the captions, the call labels, the typed command line and the timing are presentation.
+**Synthetic demo, genuine output.** The HUD band, the panes, the command output and the tool replies in this loop are output of Cockpit v0.6.1's own render hooks, commands and tools, run in Claude Code's offline plugin test host (`claude plugin test`) against a scripted task; the Bash results are the test host's scripted answers. No model ran and no live session was recorded. The frame, the captions, the call labels, the typed command line and the timing are presentation.
 
 [Static frame](docs/assets/demo/cockpit-demo-poster.png) · [How it was captured, and how to regenerate it](docs/assets/README.md) · [The captured frames as data](docs/assets/demo/frames.json)
 
@@ -85,7 +85,7 @@ On a narrow screen the loop is small: open the static frame, or read the main fr
 <details>
 <summary><b>Read the captured frames as text</b></summary>
 
-The HUD band while a scout and two engineers run (100 columns; the last three rows are the per-agent strips). How the Braille and box-drawing rows line up depends on your font; the animation shows them exactly:
+The HUD band while a scout and two engineers run and a reviewer waits for them (100 columns; the `SWARM:` row is shown because that task is blocked; the last three rows are the per-agent strips). How the Braille and box-drawing rows line up depends on your font; the animation shows them exactly:
 
 ```text
 OPUS ENGINEERING ─╼─ SONNET ×3 2 active !1 0 queued 0 done ─╼─ HAIKU ×1 1 active 0 queued 0 done
@@ -94,6 +94,7 @@ OPUS ENGINEERING ─╼─ SONNET ×3 2 active !1 0 queued 0 done ─╼─ HAIK
 TEST ·  TYPE ·  BUILD ·  GIT ·   CTX 39%   THINK +3 agents   opus-5-5
 ● INPUT ⠶⠶⠶⠶⠶⠶⠶⠶ ● DISCOVERY ⠶⠶⠶⠶⠶⠶⠶⠶ ● ROUTING ⣤⣶◆⠶⣤⣶◆⠶ ◎ WORKERS ⠤⠤⠤⠤⠤⠤⠤⠤ ○ VERIFY ⠤⠤⠤⠤⠤⠤⠤⠤ ○ DONE
 GUARD: ARMED · transport not confirmed · /cockpit guard test
+SWARM: 1 BLOCKED · /cockpit agents
 OPUS / MAIN · IMPLEMENT   HAIKU+SONNET / SUBAGENTS 3/16
                        01 scout       READ        13s · 1 tools      ⡬   ⡫    ⢗ ⡔   ⢱  ⠑⠞⣊⠹
                        02 worker      EDIT        9s · 1 tools       ⡬   ⡫    ⢗ ⡔   ⢱  ⠑⠞⣊⠹
@@ -233,6 +234,8 @@ Three read-only views of what Cockpit already records about multi-agent work. No
 ```text
 AGENTS · wave ENGINEERING · 3 active · 1 waiting · 0 stalled · 0 escalated · 0 completed of 4
 CAPACITY · 3 of 16 slots · SONNET 2/8 · HAIKU 1/16 · OPUS in the main loop
+ROUTE HAIKU · suggested 1 · requested 1 · admitted 1 · spawned 1 · completed 0 · verified 0
+ROUTE SONNET · suggested 3 · requested 3 · admitted 2 · spawned 2 · completed 0 · verified 0
   REV-1 SONNET reviewer · blocked · no agent · none: not started
     ↳ Waiting for task ENG-1 (running).
   ENG-1 SONNET worker · running · agent spawned- · last observed just now
@@ -248,6 +251,7 @@ TASK REV-1 · SONNET reviewer · blocked
 objective: Review the limiter and its tests against the criteria
 agent: none bound
 model: SONNET assigned; model not observed (no agent bound)
+route: SONNET, as the route suggested (independent review needs engineering judgement)
 effort: requested AUTO · launch: none set on the call · applied: not observed
 wave: ENGINEERING
 owns: read …/src/limiter.ts, …/tests/limiter.test.ts
@@ -263,6 +267,8 @@ suggestion (information only; nothing was changed): Wait for ENG-1; /cockpit age
 ```text
 AGENTS · wave ENGINEERING · 0 active · 1 waiting · 0 stalled · 0 escalated · 3 completed of 4
 CAPACITY · 0 of 16 slots · SONNET 0/8 · HAIKU 0/16 · OPUS in the main loop
+ROUTE HAIKU · suggested 1 · requested 1 · admitted 1 · spawned 1 · completed 1 · verified 0
+ROUTE SONNET · suggested 3 · requested 3 · admitted 2 · spawned 2 · completed 2 · verified 1
   REV-1 SONNET reviewer · blocked · no agent · none: not started
     ↳ Nothing recorded stops it: it is admissible now and has not been admitted.
   ENG-1 SONNET worker · completed · agent spawned- · ended just now
