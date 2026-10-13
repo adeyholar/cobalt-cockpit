@@ -68,6 +68,29 @@ describe('a scoped reviewer inspects Git inside its scope', () => {
   })
 })
 
+describe('what a scoped inspection costs the host', () => {
+  test('one realpath per path and one rev-parse per revision more than a wildcard inspection, and nothing for a refusal of shape', options, async ($, on) => {
+    const w = world(on); await start($)
+    await assign($, 'wide', ['*']); await assign($, 'narrow', SCOPE)
+    const wide = (await spawn($, 'wide')).agentId!; const narrow = (await spawn($, 'narrow')).agentId!
+    const cost = async (agentId: string, command: string): Promise<string[]> => {
+      const before = w.runs.length
+      await git($, agentId, command)
+
+      return w.runs.slice(before).map(argv => argv[0] === 'git' ? `git ${argv.find(a => ['rev-parse', 'config', 'check-attr', 'ls-files', 'ls-tree'].includes(a))}${argv.includes('--verify') ? ' --verify' : ''}` : String(argv[0]))
+    }
+    const wildcard = await cost(wide, 'git diff main...HEAD -- hooks/swarm.ts')
+    const scoped = await cost(narrow, 'git diff main...HEAD -- hooks/swarm.ts')
+    // repository identity (two git, two realpath) and the filter check are what a wildcard inspection already paid
+    expect(wildcard).toEqual(['git rev-parse', 'git rev-parse', 'realpath', 'realpath', 'git config'])
+    expect(scoped).toEqual(['git rev-parse', 'git rev-parse', 'realpath', 'realpath', 'realpath', 'git rev-parse --verify', 'git rev-parse --verify', 'git config'])
+    // a command refused for its shape, or for a path outside the scope, runs no revision proof at all
+    expect(await cost(narrow, 'git log --full-diff -- hooks/swarm.ts')).toEqual([])
+    expect((await cost(narrow, 'git diff main...HEAD -- README.md')).filter(run => run.includes('--verify'))).toEqual([])
+    expect(await cost(narrow, 'cat README.md')).toEqual([])
+  })
+})
+
 describe('a read-only Git command does not widen a scope', () => {
   test('paths outside the owned resources are refused, however they are spelled', options, async ($, on) => {
     const w = world(on); const a = await reviewer($)

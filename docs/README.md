@@ -30,6 +30,7 @@ The root [README](../README.md) is the front page. These files hold the detail.
 | Version | Page |
 | --- | --- |
 | 0.6.0 | [Mission Control operations](implementation-v0.6.0.md) |
+| 0.6.1 | [Smarter swarm operations](implementation-v0.6.1.md) |
 | 0.5.9 | [Record-only mode and the since-last-look summary](implementation-v0.5.9.md) |
 | 0.5.8 | [Inbox consistency and the return digest](implementation-v0.5.8.md) |
 | 0.5.7 | [Alert inbox and recovery](implementation-v0.5.7.md) |
