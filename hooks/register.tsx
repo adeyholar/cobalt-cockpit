@@ -2087,7 +2087,7 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
     if (e.tool !== 'MultiEdit') return editGuard($, e)
     if (!Array.isArray(e['edits'])) throw new TypeError('MultiEdit without a list of edits')
     for (const one of e['edits'] as Record<string, unknown>[]) {
-      const refusal = await editGuard($, { ...one, tool: 'Edit', file_path: one['file_path'] ?? e['file_path'] })
+      const refusal = await editGuard($, { tool: 'Edit', file_path: e['file_path'], old_string: one['old_string'], new_string: one['new_string'] })
       if (refusal !== null) return refusal
     }
 

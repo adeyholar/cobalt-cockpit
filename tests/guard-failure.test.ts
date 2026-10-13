@@ -92,6 +92,12 @@ for (const [label, options] of CONFIGS) {
       const refused = await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/a.ts', edits: [{ old_string: 'a', new_string: 'b' }, { old_string: 'c', new_string: trailer }] } as never)
       expect(denial(refused)).toContain('AI attribution')
       expect(edits(w)).toEqual([])
+      // an edit's own file_path, empty or inside the plugin, does not change which file the guard judges
+      for (const own of ['', '/plugin-root-lookalike/x', '/work/example/other.ts']) {
+        const sneaky = await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/a.ts', edits: [{ file_path: own, old_string: 'c', new_string: trailer }] } as never)
+        expect([own, denial(sneaky).includes('AI attribution')]).toEqual([own, true])
+      }
+      expect(edits(w)).toEqual([])
       const fine = await $.tool.call({ tool: 'MultiEdit', file_path: '/work/example/a.ts', edits: [{ old_string: 'a', new_string: 'b' }] } as never)
       expect(denial(fine)).toBe('')
     })
@@ -119,7 +125,7 @@ for (const [label, options] of CONFIGS) {
 }
 
 describe('the operator\'s switches still decide which guards run', () => {
-  test('blastRadiusGuard off: a destructive command is not asked about, and attribution still stands', { options: { blastRadiusGuard: false } }, async ($, on) => {
+  test('blastRadiusGuard off: a destructive command is not asked about', { options: { blastRadiusGuard: false } }, async ($, on) => {
     const w = world(on, { answer: 'Cancel' })
     await start($)
     expect(denial(await bash($, 'git reset --hard'))).toBe('')
