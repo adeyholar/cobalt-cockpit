@@ -74,7 +74,7 @@ case $cmd in
     echo "candidate: $(cat "$dir/candidate-sha")"
     probe 'installed plugins in the disposable configuration (expect none)' 5 in_host "$dir" "$claude_bin" plugin list
     probe 'what is loaded, and from where (expect version 0.6.2 and the SOURCE under this directory)' 12 in_host "$dir" timeout 90 "$claude_bin" -p '/cockpit version' --plugin-dir "$dir/plugin" --settings "$settings"
-    probe 'strict validation of the snapshot' 3 in_host "$dir" "$claude_bin" plugin validate --strict "$dir/plugin"
+    probe 'strict validation of the snapshot' 12 in_host "$dir" "$claude_bin" plugin validate --strict "$dir/plugin"
     ;;
   launch)
     need_claude
