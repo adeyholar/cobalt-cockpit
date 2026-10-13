@@ -232,3 +232,21 @@ describe('the shell reader', () => {
     expect(unwrap(['CI=1', '/usr/bin/env', 'node', 'x.js'])?.program).toBe('node')
   })
 })
+
+describe('a program whose name an object inherits', () => {
+  test('is a program, not a wrapper: unwrap answers and does not throw', () => {
+    for (const name of ['toString', 'constructor', 'valueOf', 'hasOwnProperty', '__proto__', 'isPrototypeOf']) {
+      expect(unwrap([name, '-x', 'rm', '-rf', '/'])).toEqual({ program: name, args: ['-x', 'rm', '-rf', '/'], wrappers: [] })
+    }
+    // the real wrappers are still unwrapped
+    expect(unwrap(['sudo', '-u', 'root', 'rm', '-rf', '/'])).toEqual({ program: 'rm', args: ['-rf', '/'], wrappers: ['sudo'] })
+  })
+  test('does not stop the guard reading the rest of the line', () => {
+    expect(rules('valueOf -x; rm -rf /')).toEqual(['rm-recursive'])
+    expect(rules('constructor --x && git push --force')).toEqual(['git-force-push'])
+    expect(rules('toString -a | git reset --hard')).toEqual(['git-reset-hard'])
+    expect(rules('hasOwnProperty -q; git clean -fd')).toEqual(['git-clean'])
+    // the program itself is not rm: `toString rm -rf /` runs toString, with arguments
+    expect(rules('toString rm -rf /')).toEqual([])
+  })
+})

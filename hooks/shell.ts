@@ -344,7 +344,8 @@ export const unwrap = (argv: readonly string[]): Unwrapped | null => {
     const head = words[0]
     if (head === undefined) return null
     const name = basename(head)
-    const valued = WRAPPERS[name]
+    // an own entry only: a program called `constructor` or `toString` is a program, not a wrapper inherited from Object
+    const valued = Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : undefined
     if (valued === undefined) return { program: name, args: words.slice(1), wrappers }
     // `command -v tsc` looks a program up; it runs nothing
     if (name === 'command' && /^-[vV]+$/.test(words[1] ?? '')) return { program: name, args: words.slice(1), wrappers }

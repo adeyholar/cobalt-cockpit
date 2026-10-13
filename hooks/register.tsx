@@ -609,12 +609,22 @@ const serveSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
       if (typeof e['objective'] !== 'string' || !e['objective'].trim()) throw new Error('Bounded objective required')
       if (!/^[\w.-]{1,80}$/.test(id) || !['OPUS','SONNET','HAIKU'].includes(String(e['tier']))) throw new Error('Valid task_id and tier required')
       if (e['tier'] === 'OPUS' && isSonnetLed()) throw new Error('OPUS / in SONNET_LED an Opus task is admitted only through action consult, with a ground and an evidence packet')
-      const owned = await Promise.all(list('owned_resources').map(p => canonicalResource($, p)))
-      const assignedSwarm = await changeSwarm($, held => { const submitted = submitTask(held, { id, tier: e['tier'] as ModelTier, role: str('role'), objective: str('objective'), scope: str('scope'), dependencies:list('dependencies'), owned, mode: e['mode'] === 'write' ? 'write' : 'read', parentTask: typeof e['parent_task'] === 'string' ? e['parent_task'] : null, spawnReason: str('spawn_reason'), ...(isEffortRequest(e['effort']) ? { effort: e['effort'] } : {}), ...(typeof e['effort_reason'] === 'string' ? { effortReason: str('effort_reason') } : {}) }, at).swarm; if (jsonBytes(submitted.tasks.map(t=>({ ...t,result:null,escalation:null }))) > 192_000) throw new Error('Ownership metadata storage budget reached; finish/archive work before assigning more'); return submitted })
+      const named = list('owned_resources')
+      const owned = await Promise.all(named.map(p => canonicalResource($, p)))
+      // A claim that is a pattern, starts with "~" or does not resolve has always been taken as the whole repository: the
+      // safe reading for a lock, and a wide one for a reader. It is not narrowed here, and it is no longer silent.
+      const widened = named.filter((p, i) => p.trim() !== '*' && owned[i] === '*').length
+      const scopeNote = widened > 0 ? ` SCOPE / ${widened} of the owned_resources could not be kept narrow (a pattern, "~" or a path that did not resolve), so this task's claim is *: it may read, and it locks, the whole repository. Cancel it and assign literal paths under a new task_id to keep it narrow.` : named.length === 0 ? ' SCOPE / no owned_resources were named, so this task\'s claim is *: the whole repository.' : ''
+      let isRepeat = false
+      const assignedSwarm = await changeSwarm($, held => { const made = submitTask(held, { id, tier: e['tier'] as ModelTier, role: str('role'), objective: str('objective'), scope: str('scope'), dependencies:list('dependencies'), owned, mode: e['mode'] === 'write' ? 'write' : 'read', parentTask: typeof e['parent_task'] === 'string' ? e['parent_task'] : null, spawnReason: str('spawn_reason'), ...(isEffortRequest(e['effort']) ? { effort: e['effort'] } : {}), ...(typeof e['effort_reason'] === 'string' ? { effortReason: str('effort_reason') } : {}) }, at); isRepeat = made.duplicate; const submitted = made.swarm; if (jsonBytes(submitted.tasks.map(t=>({ ...t,result:null,escalation:null }))) > 192_000) throw new Error('Ownership metadata storage budget reached; finish/archive work before assigning more'); return submitted })
       const assigned = assignedSwarm.tasks.find(t => t.id === id)
+      // a task id is never reused: assigning one that has already ended assigns nothing, and saying "cancelled; use Agent" would mislead
+      if (isRepeat && assigned && ['completed', 'failed', 'cancelled'].includes(assigned.state)) return { result: `Task ${id} already exists and is ${assigned.state}; nothing was assigned. A task id is never reused: assign the work under a new task_id.` }
       // the route's reading of the assignment is advice beside the commander's choice: it changes no tier and starts nothing
-      const advice = assigned && assigned.suggestedTier !== undefined && assigned.suggestedTier !== assigned.tier ? ` ROUTE / ${assigned.suggestedTier} suggested (${assigned.routeReason ?? 'no reason recorded'}); ${assigned.tier} kept as assigned. The choice is yours: cancel and assign again to change the tier.` : ''
-      return { result: assigned ? `Task ${id} ${assigned.state}; use Agent description [task:${id}]. OPUS tasks stay in main.${advice}` : 'Duplicate suppressed; see swarm status for existing task.' }
+      // how the advice could be followed, where it can be: a task id is never reused, and Opus is not a tier to assign in SONNET_LED
+      const follow = assigned?.suggestedTier === 'OPUS' ? (isSonnetLed() ? 'An Opus view is asked for with action consult, on a ground that holds.' : 'That decision is the commander\'s to make in the main session.') : 'To follow it, cancel this task and assign the work under a new task_id.'
+      const advice = assigned && assigned.suggestedTier !== undefined && assigned.suggestedTier !== assigned.tier ? ` ROUTE / ${assigned.suggestedTier} suggested (${assigned.routeReason ?? 'no reason recorded'}); ${assigned.tier} kept as assigned. Advice only. ${follow}` : ''
+      return { result: assigned ? `Task ${id} ${assigned.state}; use Agent description [task:${id}]. OPUS tasks stay in main.${advice}${scopeNote}` : 'Duplicate suppressed; see swarm status for existing task.' }
     }
     if (action === 'consult') { const reply = await serveConsult($, e, at); await persist($); return { result: reply } }
     if (action === 'wave') { if (!['RECONNAISSANCE','ENGINEERING','REVIEW','INTEGRATION','VERIFICATION'].includes(String(e['wave']))) throw new Error('Valid wave required'); await changeSwarm($, held => setWave(held, e['wave'] as Wave, at)) }
@@ -700,8 +710,14 @@ const scopedGitPlan = async ($: EngineInterface, s: Swarm, task: SwarmTask, comm
       paths.push(canonical)
     }
     for (const object of vetted.git.objects) {
+      // Git reads <rev>:<path> by name in that commit's tree and follows no link, while realpath follows the links the
+      // working tree has today. A directory that became a link into the scope must not open what it used to hold: the
+      // path as written and the path as resolved must both be owned.
+      const written = normalizeOwned(`${place.root}/${object.path}`)
       const canonical = await canonicalIn($, place.root, object.path)
-      if (canonical === '*' || !ownershipAllows(s, task.id, canonical, 'read')) return outside(canonical === '*' ? 'a path that could not be resolved' : shortResource(canonical))
+      if (written === '*' || canonical === '*') return outside('a path that could not be resolved')
+      if (!ownershipAllows(s, task.id, written, 'read')) return outside(shortResource(written))
+      if (!ownershipAllows(s, task.id, canonical, 'read')) return outside(shortResource(canonical))
     }
     for (const name of vetted.git.commits) {
       const peeled = await $.process.run(['git', ...GIT_SAFE, '-C', place.dir, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`], { timeoutMs: GIT_TIMEOUT_MS })
@@ -4872,8 +4888,11 @@ export const register: Register = (on, options) => {
     // The swarm's recorded state, from the Ledger this render reads anyway: no timer, no poll, no new subscription. One
     // static line, only while a task is blocked, quiet or escalated, paid for out of the strips' rows like the crew line.
     const runLedger = await read($, ledgerAtom)
-    const swarmNote = e.props.maxRows >= 2 ? swarmHint(swarmState(runLedger), layout.columns) : null
-    const room = Math.max(0, e.props.maxRows - 1 - (layout.columns >= 44 ? 1 : 0) - (flowWanted ? 1 : 0) - (swarmNote === null ? 0 : 1))
+    const stripBudget = Math.max(0, e.props.maxRows - 1 - (layout.columns >= 44 ? 1 : 0) - (flowWanted ? 1 : 0))
+    // only under enforced orchestration (an earlier session's Ledger says nothing of this one's swarm), and only where a
+    // strip row exists to give up: the band is never taller for it
+    const swarmNote = config.hasOrchestration && stripBudget >= 1 ? swarmHint(swarmState(runLedger), layout.columns) : null
+    const room = swarmNote === null ? stripBudget : stripBudget - 1
     // The orchestration line sits above the strips and is paid for out of their
     // rows, so the band is never taller for it; with one row to spare the strips
     // keep it and the line is left out.

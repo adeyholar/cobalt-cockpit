@@ -117,6 +117,34 @@ const NEVER = [
   'git grep -e -- --open-files-in-pager=sh',
   'git log -- -p',
   'git log -- x%Gy',
+  // Git reads options more loosely than they are typed: a bundle of short options, and any unambiguous prefix of a long one
+  "git grep -nO'touch /tmp/canary #' -e .",
+  'git grep -nOless -e .',
+  'git grep -inO -e .',
+  'git diff -pO/etc/passwd',
+  "git grep --op='touch /tmp/canary #' -e .",
+  'git grep --ope=sh -e .',
+  'git grep --open-f=sh -e .',
+  'git grep --no-ind -e x /etc/passwd',
+  'git grep --no-i -e x',
+  'git log --ou=/tmp/x',
+  'git log --o=/tmp/x',
+  'git diff --ex',
+  'git diff --te',
+  'git log --hel',
+  'git log --exe=x',
+  // a control character: a carriage return is a blank to the reader and a word character to bash, and a NUL can split a name
+  'git log --oneline -1\r# ; touch /tmp/canary',
+  'git log\r--output=/tmp/x',
+  'git log --o\0utput=/tmp/x',
+  'git log\x0b--oneline',
+  'git log \x1b[0m',
+  'git log\x7f',
+  // a program whose name an object inherits is a program like any other
+  'toString -x',
+  'constructor --x',
+  '__proto__ -x',
+  'valueOf -x; git diff',
   '',
   '   ',
   'ls',
@@ -134,6 +162,17 @@ describe('the commander\'s rule: read-only Git inspection as typed', () => {
   test('nothing quoted is taken on trust, because the command runs as typed', () => {
     for (const command of ["git grep '$x'", "git grep 'a > b'", "git grep 'a < b'", "git grep '`x`'"]) expect([command, readOnlyShell(command)]).toEqual([command, false])
   })
+  test('what only bash would expand is refused, because the command runs as typed', () => {
+    // brace expansion writes the option the refusal list never saw; a pattern in an option could expand to one
+    for (const command of ['git log --{output=/tmp/canary,}', 'git diff --o{utput=/tmp/canary,}', 'git log -{p,O/etc/passwd}', 'git log --since={1..2}', 'git log --outpu* x', 'git log --grep=fix*', 'git log -[pO]', "git grep 'a{2,3}' hooks"]) expect([command, readOnlyShell(command)]).toEqual([command, false])
+    // a brace with nothing to expand is a revision like any other
+    for (const command of ['git diff HEAD@{1}', 'git log stash@{0}', 'git show HEAD^{tree}', 'git log -- hooks/*.ts']) expect([command, readOnlyShell(command)]).toEqual([command, true])
+  })
+  test('a harmless value that looks like a refused option is refused too: the rule follows how Git reads, not what was meant', () => {
+    for (const command of ['git log -SOWNER', 'git grep -eTODO hooks', 'git grep --extended-regexp x', 'git log --output-indicator-new=x']) expect([command, readOnlyShell(command), agentInspection(command)]).toEqual([command, false, false])
+    // and what it leaves alone
+    for (const command of ['git log -Sneedle', 'git grep -e todo hooks', 'git grep -E x', 'git log --oneline --no-color --name-only --first-parent --follow hooks/a.ts', 'git ls-files -o --exclude-standard', 'git grep --heading --only-matching x', 'git diff --no-ext-diff --no-textconv --patience']) expect([command, readOnlyShell(command), agentInspection(command)]).toEqual([command, true, true])
+  })
 })
 
 describe('a wildcard subagent\'s rule: the same, with single-quoted text as data', () => {
@@ -143,6 +182,13 @@ describe('a wildcard subagent\'s rule: the same, with single-quoted text as data
   })
   test('a single-quoted pattern may hold `$`, `<`, `>` and a backtick', () => {
     for (const command of ["git grep -n '\\$\\.process' -- hooks", "git grep '=>' -- hooks", "git grep 'a < b' hooks", "git grep '`x`' -- docs", "git grep '$(id)' -- hooks"]) expect([command, agentInspection(command)]).toEqual([command, true])
+  })
+  test('a word bash would have expanded is only text once the command is rebuilt', () => {
+    const command = 'git log --{output=/tmp/canary,}'
+    expect(agentInspection(command)).toBe(true)
+    // Git is handed the braces themselves, as one word, and refuses the option it does not know
+    expect(argvOf(rebuildGit(command)).at(-1)).toBe('--{output=/tmp/canary,}')
+    expect(rebuildGit(command).endsWith("'--{output=/tmp/canary,}'")).toBe(true)
   })
   test('the same characters outside single quotes are still refused', () => {
     for (const command of [
@@ -226,7 +272,7 @@ describe('the scoped rule: what a narrow scope may ask of Git', () => {
     expect(accepted("git grep 'HEAD:secret' -- hooks").commits).toEqual([])
     expect(accepted('git grep -A 2 -B2 -C 3 -m 5 x -- hooks').words).toEqual(['-A', '2', '-B2', '-C', '3', '-m', '5', 'x'])
   })
-  test('a narrow scope never accepts what the wildcard rule refuses', () => {
+  test('what the scoped rule accepts in everyday use, the wildcard rule accepts too', () => {
     for (const command of [
       'git diff main...HEAD -- hooks/swarm.ts', 'git diff --stat -U5 abc1234 def5678 -- hooks', 'git log --oneline -n 20 main..HEAD -- hooks/', 'git log -5 -p -Sneedle -- hooks/swarm.ts',
       'git show --stat HEAD~2 -- hooks/swarm.ts', 'git show HEAD:hooks/swarm.ts', 'git status -sb -- hooks', "git grep -niE 'a|b' main -- hooks", 'git grep -e foo -e bar HEAD~1 -- hooks', 'git ls-files -o --exclude-standard -- hooks',
@@ -291,6 +337,19 @@ describe('the scoped rule: what a narrow scope may ask of Git', () => {
     }
     expect(reasonOf('git log --full-diff -- hooks')).toContain('not on the list of options')
     expect(reasonOf('git log --full-diff -- hooks')).toContain('wildcard read scope')
+  })
+  test('bundles and abbreviations that Git would read as a refused option are not on any list', () => {
+    for (const command of [
+      "git grep -nO'touch /tmp/canary #' -e . -- hooks", 'git grep -inO -e . -- hooks', "git grep --op='touch /tmp/canary #' -e . -- hooks", 'git grep --no-ind -e x -- hooks', 'git diff -pO/etc/passwd -- hooks', 'git log -pL1,2:README.md -- hooks',
+      'git log --ou=/tmp/x -- hooks', 'git log --form=%H -- hooks', 'git log -nS -- hooks', 'git log -pn 5 -- hooks', 'git grep -ne . -- hooks', 'git status -sz -- hooks',
+    ]) expect([command, scopedGit(command).ok]).toEqual([command, false])
+    // a bundle of flags that are each on the list is the flags themselves
+    for (const command of ['git grep -niwF x -- hooks', 'git status -sb -- hooks', 'git diff -pw -- hooks', 'git log -ps -- hooks']) expect([command, scopedGit(command).ok]).toEqual([command, true])
+  })
+  test('control characters and inherited program names are refused without an error', () => {
+    for (const command of ['git diff -- hooks\r# ; touch /tmp/canary', 'git log --o\0neline -- hooks', 'git diff -- hooks\x0b', 'toString -x', 'constructor --x', '__proto__ -x', 'valueOf -x', 'hasOwnProperty -x -- hooks']) {
+      expect([command, scopedGit(command).ok]).toEqual([command, false])
+    }
   })
   test('an option that takes a value takes a plain one, and never the `--`', () => {
     for (const command of ['git log -n -- hooks', 'git log -n -5 -- hooks', 'git log -n abc -- hooks', 'git log -n 99999 -- hooks', 'git grep -e -- hooks', 'git grep -e -x -- hooks', 'git grep -e', 'git grep -A x pat -- hooks', 'git grep -C -- hooks', 'git grep -m -- hooks']) {

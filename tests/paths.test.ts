@@ -59,6 +59,15 @@ describe('a user\'s name in a home path is never shown', () => {
     ['D:\\work\\x\\y\\z.ts', '…/y/z.ts'],
     ['file:///home/alice/x/y.ts', 'file://…/x/y.ts'],
     ['file://localhost/var/home/alice/x', 'file://…/x'],
+    ['file:///C:/Users/alice/x', 'file://…/x'],
+    ['file:///C:/Users/alice', 'file://…/'],
+    ['file:///c:/users/alice/a/b/c', 'file://…/b/c'],
+    // a backslash doubled, as JSON and many logs write it
+    ['"C:\\\\Users\\\\alice\\\\proj\\\\a.ts"', '"…/proj/a.ts"'],
+    // Windows keeps no case: users is Users
+    ['c:\\users\\alice\\x\\y', '…/x/y'],
+    ['/mnt/c/users/alice/x', '…/x'],
+    ['/users/alice/x', '…/x'],
     ['user@host:/home/alice/repo.git', 'user@host:…/repo.git'],
     ['(/home/alice/x)', '(…/x)'],
     ["cwd='/var/home/alice/p'", "cwd='…/p'"],
@@ -69,9 +78,10 @@ describe('a user\'s name in a home path is never shown', () => {
     ['/home/alice/a /var/home/alice/b /Users/alice/c', '…/a …/b …/c'],
   ]))
   test('no recognised form leaves the name in the text', () => {
-    for (const prefix of ['/home', '/var/home', '/Users', '/usr/home', '/export/home', '/mnt/c/Users', '/c/Users', '/cygdrive/c/Users', '/Volumes/X/Users', '/System/Volumes/Data/Users', '/media', '/run/media', 'C:\\Users', 'C:/Users', 'file:///var/home', 'host:/var/home']) {
+    for (const prefix of ['/home', '/var/home', '/Users', '/users', '/usr/home', '/export/home', '/mnt/c/Users', '/mnt/c/users', '/c/Users', '/cygdrive/c/Users', '/Volumes/X/Users', '/System/Volumes/Data/Users', '/media', '/run/media', 'C:\\Users', 'c:\\users', 'C:/Users', 'C:\\\\Users', 'file:///var/home', 'file:///C:/Users', 'host:/var/home']) {
       for (const tail of ['', '/', '/a', '/a/b', '/a/b/c.ts', '/.config/x/y/z']) {
-        const input = `${prefix}/${NAME}${prefix.includes('\\') ? tail.replace(/\//g, '\\') : tail}`
+        const slash = prefix.includes('\\\\') ? '\\\\' : prefix.includes('\\') ? '\\' : '/'
+        const input = `${prefix}${slash}${NAME}${tail.replace(/\//g, slash)}`
         expect([input, shortenPaths(`open ${input} now`).includes(NAME)]).toEqual([input, false])
       }
     }
@@ -86,6 +96,8 @@ describe('what is not a home path is not damaged', () => {
     ['http://localhost:3000/home/alice/x', 'http://localhost:3000/home/alice/x'],
     ['git clone ssh://git@example.org/home/alice/r.git', 'git clone ssh://git@example.org/home/alice/r.git'],
     ['see https://github.com/echelong/cobalt-cockpit/blob/main/hooks/swarm.ts#L10', 'see https://github.com/echelong/cobalt-cockpit/blob/main/hooks/swarm.ts#L10'],
+    ['http://[::1]/a/b/c', 'http://[::1]/a/b/c'],
+    ['http://[::1]:8080/home/alice/x', 'http://[::1]:8080/home/alice/x'],
   ]))
   test('relative paths are left as they are', () => each([
     ['hooks/alerts.ts', 'hooks/alerts.ts'],
@@ -121,7 +133,7 @@ describe('what is not a home path is not damaged', () => {
     ['', ''],
   ]))
   test('shortening again changes nothing more', () => {
-    for (const input of ['/var/home/alice/Projects/cobalt/hooks/a.ts', 'fix /home/alice/x and ~/a/b/c', 'C:\\Users\\alice\\proj\\a.ts', 'file:///home/alice/x/y.ts', '/etc/ssh/sshd_config']) {
+    for (const input of ['/var/home/alice/Projects/cobalt/hooks/a.ts', 'fix /home/alice/x and ~/a/b/c', 'C:\\Users\\alice\\proj\\a.ts', 'file:///home/alice/x/y.ts', '/etc/ssh/sshd_config', '/home/alice/media/bob', '/work/x/home/bob/y', '/a/b/Users/carol', '/x/y/z/media/dave/e']) {
       const once = shortenPaths(input)
       expect([input, shortenPaths(once)]).toEqual([input, once])
     }
@@ -138,8 +150,11 @@ describe('the documented limits: forms that are not recognised', () => {
     // UNC shares
     ['//server/share/Users/alice/x', '//server/share/Users/alice/x'],
     ['\\\\server\\share\\Users\\alice', '\\\\server\\share\\Users\\alice'],
-    // a user name with a space: the part after the space is not seen as part of the path
+    // a user name with a space or a quote character in it: the path is taken to end there, so the rest of the name stays
     ['/Users/alice smith/Documents/x', '…/ smith/Documents/x'],
+    ["/home/o'brien/x", "…/'brien/x"],
+    // text of the form ~word/… is read as another person's home, which loses the word
+    ['about ~five/six days', 'about …/six days'],
   ]))
 })
 
@@ -157,6 +172,11 @@ describe('claims, diagnostics and the Inspector use the same rule', () => {
     expect(withoutHomeName('/mnt/c/Users/alice/x')).toBe('/mnt/c/Users/…/x')
     expect(withoutHomeName('/opt/claude/plugins')).toBe('/opt/claude/plugins')
     expect(withoutHomeName('relative/home/alice/x')).toBe('relative/home/alice/x')
+    // a drive-letter path keeps its own slashes
+    expect(withoutHomeName('C:\\Users\\alice\\.claude\\plugins')).toBe('C:\\Users\\…\\.claude\\plugins')
+    expect(withoutHomeName('C:/Users/alice/.claude')).toBe('C:/Users/…/.claude')
+    expect(withoutHomeName('c:\\users\\alice')).toBe('c:\\users\\…')
+    expect(withoutHomeName('D:\\work\\x')).toBe('D:\\work\\x')
     // the session's own home is shown as ~; another home, or an unknown one, loses only its name
     expect(shown('/var/home/alice/.claude/plugins', '/var/home/alice')).toBe('~/.claude/plugins')
     expect(shown('/var/home/alice/.claude/plugins', null)).toBe('/var/home/…/.claude/plugins')

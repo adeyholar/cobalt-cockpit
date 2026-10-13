@@ -127,6 +127,23 @@ describe('a read-only Git command does not widen a scope', () => {
     expect((await git($, a, 'git show HEAD:tests/x.ts')).deny).toBeUndefined()
     expect(sentOf(w)).toHaveLength(1)
   })
+  test('a directory that became a link into the scope does not open what it used to hold', options, async ($, on) => {
+    // `private` was a directory at an earlier commit and is now a link to `tests`, which the task owns. realpath follows
+    // the link; Git reads <rev>:<path> by name in that commit's tree and does not.
+    const w = world(on); const a = await reviewer($)
+    w.links[`${ROOT}/private`] = `${ROOT}/tests`
+    const out = await git($, a, 'git show HEAD~1:private/key.txt')
+    expect(out.deny).toContain('read outside owned resources')
+    expect(out.deny).toContain('…/private/key.txt')
+    // as a path after `--` it is the resolved path that Git is given, so that is what must be owned, and is
+    expect((await git($, a, 'git log --oneline -3 -- private/key.txt')).deny).toBeUndefined()
+    expect(sentOf(w)).toEqual([[...HEAD, 'log', '--no-ext-diff', '--no-textconv', '--oneline', '-3', '--', `${ROOT}/tests/key.txt`]])
+    // and a link that leads out of the scope is refused both ways
+    w.links[`${ROOT}/tests/out`] = `${ROOT}/secret`
+    expect((await git($, a, 'git show HEAD:tests/out/key.txt')).deny).toContain('read outside owned resources')
+    expect((await git($, a, 'git diff -- tests/out/key.txt')).deny).toContain('read outside owned resources')
+    expect(sentOf(w)).toHaveLength(1)
+  })
   test('the refusal names the scope without a home directory\'s user name', options, async ($, on) => {
     world(on); const a = await reviewer($, ['/var/home/alice/work/repo/hooks/swarm.ts'])
     const out = await git($, a, 'git diff -- /var/home/alice/work/repo/README.md')
@@ -224,10 +241,12 @@ describe('a wildcard reader keeps the v0.6.0 rule, with the path separator', () 
       ['git', '--no-pager', ...GIT_SAFE, 'log', '--no-ext-diff', '--no-textconv', '--oneline', '-5'],
     ])
   })
-  test('what it refused before, it refuses still', options, async ($, on) => {
+  test('what it refused before it refuses still, and the pager and output options in every form Git reads', options, async ($, on) => {
     const w = world(on); const a = await reviewer($, ['*'])
     for (const command of [
       'git diff -- --output=x', 'git log --author -- --show-signature', 'git grep -e -- --open-files-in-pager=sh', 'git diff --output=x', 'git log --format=%H', 'git show --show-sig', 'git grep -Oless x', 'git diff > x', 'git diff $(id)',
+      // bundled and abbreviated forms of the pager and output options, which v0.6.0 let through
+      "git grep -nO'touch /tmp/canary #' -e .", "git grep --op='touch /tmp/canary #' -e .", 'git grep --ope=sh -e .', 'git grep --no-ind -e x', 'git diff -pO/etc/passwd', 'git log --ou=/tmp/x', 'git log --oneline -1\r# ; touch /tmp/canary',
       'git grep "$(id)"', 'git -C /etc diff', 'git diff | head', 'env git diff', 'git push', 'cat README.md', 'npm test',
     ]) expect([command, (await git($, a, command)).deny !== undefined]).toEqual([command, true])
     expect(sentOf(w)).toEqual([])

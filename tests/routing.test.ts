@@ -16,7 +16,7 @@ const REPRESENTATIVE: Case[] = [
   { what: 'narrow reference search: callers of one function', tier: 'SONNET', role: 'Reference search', mode: 'read', effort: 'AUTO', wave: 'RECONNAISSANCE', suggests: 'HAIKU' },
   { what: 'classification of a bounded failure log', tier: 'SONNET', role: 'UTILITY', mode: 'read', effort: 'AUTO', wave: 'VERIFICATION', suggests: 'HAIKU' },
   { what: 'mechanical comparison of two schema files', tier: 'HAIKU', role: 'cobalt-cockpit:utility', mode: 'read', effort: 'low', wave: 'ENGINEERING', suggests: 'HAIKU' },
-  { what: 'simple read-only lookup the commander named light', tier: 'SONNET', role: 'Engineer', mode: 'read', effort: 'low', wave: 'ENGINEERING', suggests: 'HAIKU' },
+  { what: 'simple read-only lookup the commander named light', tier: 'SONNET', role: 'Lookup', mode: 'read', effort: 'low', wave: 'ENGINEERING', suggests: 'HAIKU' },
   { what: 'triage of which tests failed, by name', tier: 'SONNET', role: 'triage', mode: 'read', effort: 'AUTO', wave: 'VERIFICATION', suggests: 'HAIKU' },
   // investigation and review: engineering judgement
   { what: 'trace a code path through the admission hook', tier: 'SONNET', role: 'EXPLORER', mode: 'read', effort: 'AUTO', wave: 'ENGINEERING', suggests: 'SONNET' },
@@ -32,6 +32,12 @@ const REPRESENTATIVE: Case[] = [
   { what: 'refactoring', tier: 'SONNET', role: 'implementer', mode: 'write', effort: 'AUTO', wave: 'ENGINEERING', suggests: 'SONNET' },
   { what: 'a scout asked to write', tier: 'HAIKU', role: 'SCOUT', mode: 'write', effort: 'low', wave: 'RECONNAISSANCE', suggests: 'SONNET' },
   { what: 'a risky migration asked of a Haiku utility', tier: 'HAIKU', role: 'utility', mode: 'write', effort: 'AUTO', wave: 'ENGINEERING', suggests: 'SONNET' },
+  // the role's label is read as written: by whole word, whatever surrounds it
+  { what: 'a review whose label has a colon in it', tier: 'SONNET', role: 'Reviewer: security', mode: 'read', effort: 'AUTO', wave: 'RECONNAISSANCE', suggests: 'SONNET' },
+  { what: 'a scout whose label has a colon in it', tier: 'SONNET', role: 'Scout: inventory', mode: 'read', effort: 'AUTO', wave: 'ENGINEERING', suggests: 'HAIKU' },
+  { what: 'an inventory of the architecture is an inventory', tier: 'HAIKU', role: 'Architecture inventory', mode: 'read', effort: 'AUTO', wave: 'ENGINEERING', suggests: 'HAIKU' },
+  { what: 'a worker that only reads is still an engineer', tier: 'SONNET', role: 'worker', mode: 'read', effort: 'AUTO', wave: 'RECONNAISSANCE', suggests: 'SONNET' },
+  { what: 'a debugger sent during reconnaissance investigates', tier: 'SONNET', role: 'Debugger', mode: 'read', effort: 'AUTO', wave: 'RECONNAISSANCE', suggests: 'SONNET' },
   // the commander's own
   { what: 'an architecture decision', tier: 'SONNET', role: 'Architect', mode: 'read', effort: 'AUTO', wave: 'RECONNAISSANCE', suggests: 'OPUS' },
   { what: 'integration kept in the main loop', tier: 'OPUS', role: 'Integration', mode: 'write', effort: 'AUTO', wave: 'INTEGRATION', suggests: 'OPUS' },
@@ -44,8 +50,9 @@ describe('the route suggestion on representative assignments', () => {
   test('every suggestion carries its reason', () => {
     for (const c of REPRESENTATIVE) expect(suggestRoute(c).reason.length).toBeGreaterThan(8)
     expect(suggestRoute(REPRESENTATIVE[0]!).reason).toBe('bounded extractive read (the role)')
-    expect(suggestRoute({ tier: 'SONNET', role: 'Engineer', mode: 'read', effort: 'low', wave: 'ENGINEERING' }).reason).toBe('read-only work the commander named light')
-    expect(suggestRoute({ tier: 'SONNET', role: 'Engineer', mode: 'read', effort: 'AUTO', wave: 'RECONNAISSANCE' }).reason).toBe('read-only reconnaissance')
+    expect(suggestRoute({ tier: 'SONNET', role: 'Lookup', mode: 'read', effort: 'low', wave: 'ENGINEERING' }).reason).toBe('read-only work the commander named light')
+    expect(suggestRoute({ tier: 'SONNET', role: 'Lookup', mode: 'read', effort: 'AUTO', wave: 'RECONNAISSANCE' }).reason).toBe('read-only reconnaissance')
+    expect(suggestRoute({ tier: 'SONNET', role: 'Engineer', mode: 'read', effort: 'low', wave: 'RECONNAISSANCE' }).reason).toBe('an engineering role, even when it only reads')
     expect(suggestRoute({ tier: 'HAIKU', role: 'utility', mode: 'write', effort: 'AUTO', wave: 'ENGINEERING' }).reason).toBe('a write task is engineering work')
     expect(suggestRoute({ tier: 'HAIKU', role: 'reviewer', mode: 'read', effort: 'low', wave: 'REVIEW' }).reason).toBe('independent review needs engineering judgement')
     expect(suggestRoute({ tier: 'SONNET', role: 'Reader', mode: 'read', effort: 'xhigh', wave: 'RECONNAISSANCE' }).reason).toBe('the commander named heavy reasoning (xhigh)')
@@ -54,23 +61,23 @@ describe('the route suggestion on representative assignments', () => {
   test('Haiku is never suggested for a write, a review, an architect or work named heavy, whatever else is true', () => {
     const waves: Wave[] = ['RECONNAISSANCE', 'ENGINEERING', 'REVIEW', 'INTEGRATION', 'VERIFICATION']
     const efforts: EffortRequest[] = ['AUTO', 'low', 'medium', 'high', 'xhigh', 'max']
-    for (const wave of waves) for (const effort of efforts) for (const role of ['SCOUT', 'utility', 'Engineer', 'worker', 'reviewer', 'Architect', 'explorer', '']) {
+    for (const wave of waves) for (const effort of efforts) for (const role of ['SCOUT', 'utility', 'Lookup', 'Engineer', 'worker', 'implementer', 'reviewer', 'Reviewer: security', 'cobalt-cockpit:reviewer', 'Security audit', 'Verifier', 'Architect', 'explorer', '']) {
       for (const tier of ['HAIKU', 'SONNET'] as const) {
         expect(suggestRoute({ tier, role, mode: 'write', effort, wave }).tier).not.toBe('HAIKU')
-        if (/review|architect/i.test(role) || ['high', 'xhigh', 'max'].includes(effort)) expect(suggestRoute({ tier, role, mode: 'read', effort, wave }).tier).not.toBe('HAIKU')
+        if (/review|audit|verif|secur|architect|engineer|worker|implementer/i.test(role) || ['high', 'xhigh', 'max'].includes(effort)) expect([role, effort, wave, suggestRoute({ tier, role, mode: 'read', effort, wave }).tier === 'HAIKU']).toEqual([role, effort, wave, false])
       }
     }
   })
   test('the objective\'s words are not evidence: the same fields give the same suggestion', () => {
     let s = emptySwarm()
-    s = submitTask(s, { id: 'a', tier: 'SONNET', role: 'Engineer', objective: 'inventory, list, scan, classify every file', mode: 'read' }, 1).swarm
-    s = submitTask(s, { id: 'b', tier: 'SONNET', role: 'Engineer', objective: 'redesign the architecture of the security boundary', mode: 'read' }, 2).swarm
+    s = submitTask(s, { id: 'a', tier: 'SONNET', role: 'Lookup', objective: 'inventory, list, scan, classify every file', mode: 'read' }, 1).swarm
+    s = submitTask(s, { id: 'b', tier: 'SONNET', role: 'Lookup', objective: 'redesign the architecture of the security boundary', mode: 'read' }, 2).swarm
     expect(s.tasks.map(t => t.suggestedTier)).toEqual(['HAIKU', 'HAIKU'])   // both: a read in the reconnaissance wave
     s = { ...s, wave: 'ENGINEERING' }
-    s = submitTask(s, { id: 'c', tier: 'SONNET', role: 'Engineer', objective: 'inventory, list, scan, classify every file', mode: 'read' }, 3).swarm
+    s = submitTask(s, { id: 'c', tier: 'SONNET', role: 'Lookup', objective: 'inventory, list, scan, classify every file', mode: 'read' }, 3).swarm
     expect(s.tasks.at(-1)?.suggestedTier).toBe('SONNET')
   })
-  test('the dormant routeTask policy is the one the suggestion runs through', () => {
+  test('the suggestion agrees with routeTask on its three outcomes', () => {
     expect(routeTask({ extractive: true, bounded: true })).toBe(suggestRoute({ tier: 'SONNET', role: 'scout', mode: 'read', effort: 'AUTO', wave: 'ENGINEERING' }).tier)
     expect(routeTask({ extractive: true, bounded: false })).toBe(suggestRoute({ tier: 'SONNET', role: 'scout', mode: 'read', effort: 'high', wave: 'ENGINEERING' }).tier)
     expect(routeTask({ architecture: true, extractive: true, bounded: true })).toBe(suggestRoute({ tier: 'SONNET', role: 'Architect scout', mode: 'read', effort: 'low', wave: 'RECONNAISSANCE' }).tier)
@@ -179,7 +186,7 @@ describe('through the real swarm tool: advice only', () => {
   type Engine = Parameters<typeof start>[0]
   const SWARM = 'mcp__cobalt-cockpit__swarm'
   const options = { options: { orchestration: true, maxSubagents: 6, maxSonnetAgents: 3, maxHaikuAgents: 4 } }
-  const assign = ($: Engine, id: string, extra: Record<string, unknown>) => $.tool.call({ tool: SWARM, action: 'assign', task_id: id, tier: 'SONNET', role: 'Engineer', objective: `Bounded ${id}`, scope: `Scope ${id}`, owned_resources: [`/work/${id}`], mode: 'read', spawn_reason: 'Independent bounded host test', ...extra } as never)
+  const assign = ($: Engine, id: string, extra: Record<string, unknown>) => $.tool.call({ tool: SWARM, action: 'assign', task_id: id, tier: 'SONNET', role: 'Lookup', objective: `Bounded ${id}`, scope: `Scope ${id}`, owned_resources: [`/work/${id}`], mode: 'read', spawn_reason: 'Independent bounded host test', ...extra } as never)
   const spawn = ($: Engine, id: string, subagentType: string) => $.agent.spawn({ prompt: `Perform task ${id}`, description: `[task:${id}] bounded work`, subagentType, tool_use_id: `spawn-${id}`, parentModel: 'claude-opus-5-5', provider: { plugin: 'cobalt-cockpit', tier: 'user' }, background: true, fork: false } as never)
   const swarmOf = (held: ReturnType<typeof hostState>): Swarm => (held.get('run-ledger')!.value as Ledger).swarm!
 
@@ -188,18 +195,51 @@ describe('through the real swarm tool: advice only', () => {
     const differs = String((await assign($, 'lookup', { role: 'scout' })).result)
     expect(differs).toContain('Task lookup queued; use Agent description [task:lookup]')
     expect(differs).toContain('ROUTE / HAIKU suggested (bounded extractive read (the role)); SONNET kept as assigned')
+    // the advice says how it could be followed: a task id is never reused, so the work is assigned again under a new one
+    expect(differs).toContain('Advice only. To follow it, cancel this task and assign the work under a new task_id.')
+    await $.tool.call({ tool: SWARM, action: 'cancel', task_id: 'lookup' } as never)
+    expect(String((await assign($, 'lookup', { tier: 'HAIKU', role: 'scout' })).result)).toBe('Task lookup already exists and is cancelled; nothing was assigned. A task id is never reused: assign the work under a new task_id.')
+    expect(String((await assign($, 'lookup-2', { tier: 'HAIKU', role: 'scout' })).result)).toContain('Task lookup-2 queued')
     const agrees = String((await assign($, 'scan', { tier: 'HAIKU', role: 'scout' })).result)
     expect(agrees).toContain('Task scan queued')
     expect(agrees).not.toContain('ROUTE /')
     const risky = String((await assign($, 'migrate', { tier: 'HAIKU', role: 'utility', mode: 'write' })).result)
     expect(risky).toContain('ROUTE / SONNET suggested (a write task is engineering work); HAIKU kept as assigned')
-    expect(swarmOf(held).tasks.map(t => [t.id, t.tier, t.suggestedTier, t.state])).toEqual([['lookup', 'SONNET', 'HAIKU', 'queued'], ['scan', 'HAIKU', 'HAIKU', 'queued'], ['migrate', 'HAIKU', 'SONNET', 'queued']])
+    expect(swarmOf(held).tasks.map(t => [t.id, t.tier, t.suggestedTier, t.state])).toEqual([['lookup', 'SONNET', 'HAIKU', 'cancelled'], ['lookup-2', 'HAIKU', 'HAIKU', 'queued'], ['scan', 'HAIKU', 'HAIKU', 'queued'], ['migrate', 'HAIKU', 'SONNET', 'queued']])
     // assigning spawned nothing, and no model was called
     expect(w.spawns).toHaveLength(0)
     const status = JSON.parse(String((await $.tool.call({ tool: SWARM, action: 'status' } as never)).result))
-    expect(status.tasks.map((t: { id: string; suggested: string }) => [t.id, t.suggested])).toEqual([['lookup', 'HAIKU'], ['scan', 'HAIKU'], ['migrate', 'SONNET']])
+    expect(status.tasks.map((t: { id: string; suggested: string }) => [t.id, t.suggested]).sort()).toEqual([['lookup', 'HAIKU'], ['lookup-2', 'HAIKU'], ['migrate', 'SONNET'], ['scan', 'HAIKU']])
     expect(status.routing.differing).toBe(2)
-    expect(status.routing.tiers.HAIKU).toEqual({ suggested: 2, requested: 2, admitted: 0, spawned: 0, completed: 0, verified: 0 })
+    expect(status.routing.tiers.HAIKU).toEqual({ suggested: 3, requested: 3, admitted: 0, spawned: 0, completed: 0, verified: 0 })
+  })
+  test('an Opus suggestion says where that decision is made, in each profile', options, async ($, on) => {
+    world(on); await start($)
+    const led = String((await assign($, 'design', { role: 'Architect' })).result)
+    expect(led).toContain('ROUTE / OPUS suggested (architecture belongs with the commander); SONNET kept as assigned. Advice only. That decision is the commander\'s to make in the main session.')
+    expect(led).not.toContain('new task_id')
+  })
+  test('in SONNET_LED an Opus suggestion points to consult, the only way Opus is admitted there', { options: { orchestration: true, profile: 'SONNET_LED' } }, async ($, on) => {
+    world(on); await start($)
+    const led = String((await assign($, 'design', { role: 'Architect' })).result)
+    expect(led).toContain('ROUTE / OPUS suggested')
+    expect(led).toContain('An Opus view is asked for with action consult, on a ground that holds.')
+    expect(String((await assign($, 'direct', { tier: 'OPUS', role: 'Architect' })).result)).toContain('only through action consult')
+  })
+  test('a claim that could not be kept narrow is said to be the whole repository', options, async ($, on) => {
+    world(on); const held = hostState(on, {}); await start($)
+    const literal = String((await assign($, 'narrow', { owned_resources: ['/work/example/hooks'] })).result)
+    expect(literal).not.toContain('SCOPE /')
+    const explicit = String((await assign($, 'whole', { owned_resources: ['*'] })).result)
+    expect(explicit).not.toContain('SCOPE /')
+    for (const [id, claim] of [['glob', 'src/**/*.ts'], ['bracket', 'app/[id]/page.tsx'], ['home', '~/notes'], ['brace', 'src/{a,b}.ts']] as const) {
+      const reply = String((await assign($, id, { owned_resources: ['/work/example/hooks', claim] })).result)
+      expect([id, reply.includes('SCOPE / 1 of the owned_resources could not be kept narrow')]).toEqual([id, true])
+      expect(reply).toContain("this task's claim is *")
+      expect(swarmOf(held).tasks.find(t => t.id === id)?.owned).toContain('*')
+    }
+    const none = String((await assign($, 'unnamed', { owned_resources: [] })).result)
+    expect(none).toContain("SCOPE / no owned_resources were named, so this task's claim is *")
   })
   test('what is spawned is the commander\'s tier, within the configured pools', options, async ($, on) => {
     const w = world(on); const held = hostState(on, {}); await start($)

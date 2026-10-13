@@ -22,6 +22,7 @@ import type { Simple } from './shell'
 
 const WILDCARD_SUBCOMMANDS: readonly string[] = ['diff', 'status', 'log', 'show', 'ls-files', 'rev-parse', 'grep']
 const NAMED_UNSAFE = /--(?:output|ext-diff|textconv)|--no-index/
+const CONTROL = /[\x00-\x08\x0a-\x1f\x7f]/
 
 /** The text outside single quotes, with each quoted run reduced to `''`; null when a quote never closes. */
 const outsideSingleQuotes = (command: string): string | null => {
@@ -54,20 +55,40 @@ const outsideSingleQuotes = (command: string): string | null => {
  * runs, so the commander's own commands, which run as typed, are judged without it.
  */
 const isLexicallyPlain = (command: string, quotedLiterals: boolean): boolean => {
-  if (command.includes('\n') || NAMED_UNSAFE.test(command)) return false
+  // No second line and no control character at all (tab apart). A carriage return is a blank to the reader in ./shell
+  // and a word character to bash, and a NUL can hide inside an option's name: neither is ever needed in an inspection.
+  if (CONTROL.test(command) || NAMED_UNSAFE.test(command)) return false
   const seen = quotedLiterals ? outsideSingleQuotes(command) : command
 
   return seen !== null && !/[<>`]/.test(seen) && !seen.includes('$')
 }
 
-const WILDCARD_REFUSED_LONG: readonly string[] = ['--show-signature', '--pretty', '--format']
-/** An option the wildcard rule refuses: it writes a file, runs a program or prints through a custom format. */
-const isRefusedOption = (a: string): boolean =>
-  a.includes('%G') ||
-  // Git accepts any unambiguous prefix of a long option, so every prefix of a refused one is refused
-  (a.startsWith('--') && WILDCARD_REFUSED_LONG.some(option => option.startsWith(a.split('=')[0] as string))) ||
-  a === '-c' || a.startsWith('--output') || a === '--exec' || a === '--help' || a === '-h' ||
-  a.startsWith('--open') || a.startsWith('-O') || a.startsWith('--out') || a.startsWith('--ext') || a.startsWith('--text')
+// Long options that write a file, run a program, read outside the repository or print through a custom format.
+const REFUSED_LONG: readonly string[] = ['--output', '--open-files-in-pager', '--ext-diff', '--textconv', '--no-index', '--exec', '--help', '--show-signature', '--pretty', '--format']
+/**
+ * An option the wildcard rule refuses: it writes a file, runs a program or prints through a custom format.
+ *
+ * Git reads options more loosely than they are usually typed, and the refusal follows Git. A long option may be
+ * abbreviated to any unambiguous prefix (`--op=sh` is `--open-files-in-pager=sh`), so a word is refused when its name is
+ * a prefix of a refused option, or begins with one. Short options may be bundled, and `-O` takes the rest of its word as
+ * a pager to run (git grep) or an order file to read (git diff), so `-nOsh` is `-n -Osh`: any one-dash word with an `O`
+ * in it is refused, at the cost of refusing a harmless value that happens to contain the letter (`-SOWNER`).
+ */
+const isRefusedOption = (a: string): boolean => {
+  if (a.includes('%G')) return true
+  if (a.startsWith('--')) {
+    const name = a.split('=')[0] as string
+
+    return REFUSED_LONG.some(option => option.startsWith(name) || name.startsWith(option)) || a === '--exec' || a.startsWith('--open') || a.startsWith('--out') || a.startsWith('--ext') || a.startsWith('--text')
+  }
+
+  return a === '-c' || a === '-h' || (a.startsWith('-') && a.includes('O'))
+}
+// What only bash would do to a word, and the reader in ./shell does not model: brace expansion (`--{output=x,}` is
+// `--output=x --`) and, for an option, a filename pattern that could expand to one. A command that runs as typed must
+// not contain either; a rebuilt one cannot, because every word of it is quoted again.
+const BRACE_EXPANSION = /\{[^{}]*(?:,|\.\.)[^{}]*\}/
+const expandsInBash = (word: string): boolean => BRACE_EXPANSION.test(word) || (word.startsWith('-') && /[*?[]/.test(word))
 
 /** `git <subcommand> …` typed plainly: no wrapper, assignment, redirect or here-document. Its arguments, or null. */
 const plainGitArgs = (c: Simple): string[] | null => {
@@ -77,9 +98,10 @@ const plainGitArgs = (c: Simple): string[] | null => {
   return r.args
 }
 
-const isWildcardCommand = (c: Simple): boolean => {
+const isWildcardCommand = (c: Simple, isRebuilt: boolean): boolean => {
   const args = plainGitArgs(c)
   if (args === null || !WILDCARD_SUBCOMMANDS.includes(args[0] ?? '')) return false
+  if (!isRebuilt && args.some(expandsInBash)) return false
   const separator = args.indexOf('--')
   const options = separator < 0 ? args : args.slice(0, separator)
   const paths = separator < 0 ? [] : args.slice(separator + 1)
@@ -95,7 +117,7 @@ const isInspection = (command: string, quotedLiterals: boolean): boolean => {
     const parsed = parseShell(command)
     if (parsed.pipelines.length === 0 || parsed.substitutions.length > 0) return false
 
-    return parsed.pipelines.every(p => p.commands.every(isWildcardCommand))
+    return parsed.pipelines.every(p => p.commands.every(c => isWildcardCommand(c, quotedLiterals)))
   } catch { return false }
 }
 
@@ -198,12 +220,12 @@ export const scopedGit = (command: string): ScopedVerdict => {
   const isGit = /^\s*git(?:\s|$)/.test(command)
   const refuse = (reason: string): ScopedVerdict => ({ ok: false, isGit, reason })
   if (!isLexicallyPlain(command, true)) return refuse(`a scoped Git inspection is one plain command: no redirect, substitution, variable, second line, output file or external driver. Form: ${SCOPED_FORM}`)
-  let only: Simple | undefined
+  let args: string[] | null = null
   try {
     const parsed = parseShell(command)
-    if (parsed.substitutions.length === 0 && parsed.pipelines.length === 1 && parsed.pipelines[0]!.commands.length === 1) only = parsed.pipelines[0]!.commands[0]
-  } catch { only = undefined }
-  const args = only === undefined ? null : plainGitArgs(only)
+    const only = parsed.substitutions.length === 0 && parsed.pipelines.length === 1 && parsed.pipelines[0]!.commands.length === 1 ? parsed.pipelines[0]!.commands[0] : undefined
+    args = only === undefined ? null : plainGitArgs(only)
+  } catch { args = null }
   if (args === null) return refuse(`a scoped Git inspection is one plain git command: no pipe, chain, wrapper or assignment. Form: ${SCOPED_FORM}`)
   const sub = args[0] ?? ''
   if (!(SCOPED_SUBCOMMANDS as string[]).includes(sub)) return refuse(`"git ${sub.slice(0, 24)}" is not available under a narrow scope; the subcommand comes first and is one of ${SCOPED_SUBCOMMANDS.join(', ')}. Use Read for a file you own`)

@@ -138,16 +138,22 @@ const activityText = (t: SwarmTask, now: number): string => {
 
   return age === null ? 'observed (time not comparable)' : `last observed ${age}`
 }
-/** One tier's funnel in as many words as the width allows. The six figures are six different facts and are never merged. */
-const routeLine = (tier: ModelTier, c: RouteCounts, columns: number): string =>
-  columns >= 96 ? `ROUTE ${tier} · suggested ${c.suggested} · requested ${c.requested} · admitted ${c.admitted} · spawned ${c.spawned} · completed ${c.completed} · verified ${c.verified}`
-    : columns >= 64 ? `ROUTE ${tier} · sug ${c.suggested} · req ${c.requested} · adm ${c.admitted} · spawn ${c.spawned} · done ${c.completed} · ver ${c.verified}`
-      : `${tier} sug${c.suggested} req${c.requested} adm${c.admitted} spn${c.spawned} done${c.completed} ver${c.verified}`
+/** One tier's funnel in the widest wording that fits the width as it really is, so no figure is cut while a shorter form would keep it. The six figures are six different facts and are never merged. */
+const routeLine = (tier: ModelTier, c: RouteCounts, columns: number): string => {
+  const forms = [
+    `ROUTE ${tier} · suggested ${c.suggested} · requested ${c.requested} · admitted ${c.admitted} · spawned ${c.spawned} · completed ${c.completed} · verified ${c.verified}`,
+    `ROUTE ${tier} · sug ${c.suggested} · req ${c.requested} · adm ${c.admitted} · spawn ${c.spawned} · done ${c.completed} · ver ${c.verified}`,
+    `${tier} sug${c.suggested} req${c.requested} adm${c.admitted} spn${c.spawned} done${c.completed} ver${c.verified}`,
+    `${tier[0]} s${c.suggested} r${c.requested} a${c.admitted} p${c.spawned} d${c.completed} v${c.verified}`,
+  ]
+
+  return forms.find(form => form.length <= columns) ?? clip(forms[forms.length - 1] as string, columns)
+}
 const ROUTE_ORDER: readonly ModelTier[] = ['HAIKU', 'SONNET', 'OPUS']
 /** The delegation funnel, one line per tier that has anything to show, then what differs from the suggestion. */
 const routeLines = (s: Swarm, columns: number): string[] => {
   const { tiers, differing, unrecorded } = routingOf(s)
-  const lines = ROUTE_ORDER.filter(tier => tiers[tier].requested > 0 || tiers[tier].suggested > 0).map(tier => clip(routeLine(tier, tiers[tier], columns), columns))
+  const lines = ROUTE_ORDER.filter(tier => tiers[tier].requested > 0 || tiers[tier].suggested > 0).map(tier => routeLine(tier, tiers[tier], columns))
   if (differing > 0) lines.push(clip(`  ${differing} assignment${differing === 1 ? ' differs' : 's differ'} from the route's suggestion; the commander's tier stands`, columns))
   if (unrecorded > 0) lines.push(clip(`  ${unrecorded} task${unrecorded === 1 ? ' carries' : 's carry'} no suggestion (assigned before v0.6.1)`, columns))
 
@@ -174,7 +180,8 @@ export const swarmHint = (s: Swarm, columns: number): string | null => {
   const escalated = count('escalated')
   const total = blocked + quiet + escalated
   if (total === 0) return null
-  const threshold = s.config.stallMs >= 60_000 ? `${Math.round(s.config.stallMs / 60_000)}m+` : `${Math.max(1, Math.round(s.config.stallMs / 1000))}s+`
+  // rounded down: a task marked at 90 seconds has been quiet for at least one minute, not two
+  const threshold = s.config.stallMs >= 60_000 ? `${Math.floor(s.config.stallMs / 60_000)}m+` : `${Math.max(1, Math.floor(s.config.stallMs / 1000))}s+`
   const parts = (b: string, q: string, e: string): string => [blocked > 0 ? `${blocked} ${b}` : '', quiet > 0 ? `${quiet} ${q}` : '', escalated > 0 ? `${escalated} ${e}` : ''].filter(p => p !== '').join(' · ')
   const where = ' · /cockpit agents'
   const forms = [
@@ -201,8 +208,8 @@ export const agentsText = (v: AgentsView): string => {
   const waiting = count('queued') + count('blocked')
   const head = columns >= 90
     ? `AGENTS · wave ${s.wave} · ${used.total} active · ${waiting} waiting · ${count('stalled')} stalled · ${count('escalated')} escalated · ${count('completed')} completed of ${s.tasks.length}`
-    // a stalled mark is silence, not a stopped agent, so it is never merged into a word that says more
-    : `AGENTS · ${used.total} active · ${waiting} waiting · ${count('stalled')} stalled · ${count('escalated')} esc · ${count('completed')}/${s.tasks.length} done · ${s.wave}`
+    // a stalled mark is silence, not a stopped agent, so it is never merged into a word that says more; a zero is left out to keep the done count and the wave in view
+    : `AGENTS · ${used.total} active · ${waiting} waiting${count('stalled') > 0 ? ` · ${count('stalled')} stalled` : ''}${count('escalated') > 0 ? ` · ${count('escalated')} esc` : ''} · ${count('completed')}/${s.tasks.length} done · ${s.wave}`
   const lines = [clip(head, columns)]
   lines.push(clip(`CAPACITY · ${used.counted} of ${lim.total} slots · SONNET ${used.sonnet}/${lim.sonnet} · HAIKU ${used.haiku}/${lim.haiku}${lim.opus > 0 ? ` · OPUS ${used.opus}/${lim.opus}` : ' · OPUS in the main loop'}${s.conflicts > 0 ? ` · ${s.conflicts} ownership conflict${s.conflicts === 1 ? '' : 's'} recorded` : ''}`, columns))
   if (s.tasks.length === 0) lines.push('No tasks assigned in this session. The commander assigns work with the swarm tool; Cockpit invents none.')

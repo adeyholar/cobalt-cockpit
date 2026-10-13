@@ -98,6 +98,8 @@ export type World = {
   top: string
   /** Names that do not resolve to a commit: `rev-parse --verify <name>^{commit}` fails for each (a tree, a blob, an unknown name). */
   nonCommits: string[]
+  /** Symbolic links `realpath` follows: a path at or below a key resolves to the same place at or below its value. */
+  links: Record<string, string>
   gitPrefix: string
   gitFilterConfig: string
   gitFilterAttributes: string
@@ -223,6 +225,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     head: 'a'.repeat(40),
     top: '/work/example',
     nonCommits: [],
+    links: {},
     statusHidden: false,
     statusWarning: '',
     statusStderrTruncated: false,
@@ -424,7 +427,12 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
       return { value: { exitCode: 1, stdout: '', stderr: `stat: cannot statx '${asked}': ${why}\n`, isStdoutTruncated: false, isStderrTruncated: false } }
     }
-    if (program === 'realpath') return ran(0, String(e.argv.at(-1)).replace(/\/+$/, '') + '\n')
+    if (program === 'realpath') {
+      const asked = String(e.argv.at(-1)).replace(/\/+$/, '')
+      const link = Object.keys(w.links).find(from => asked === from || asked.startsWith(`${from}/`))
+
+      return ran(0, (link === undefined ? asked : `${w.links[link]}${asked.slice(link.length)}`) + '\n')
+    }
     if (program === 'git') {
       if (w.gitStatus === null) return ran(128)
 

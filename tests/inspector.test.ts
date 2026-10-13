@@ -156,7 +156,7 @@ describe('the agents view shows what was observed and says what was not', () => 
   test('the header counts, the capacity and the wave come from the swarm', () => {
     const text = agentsText(view(swarm))
     expect(text).toContain('AGENTS · wave RECONNAISSANCE · 1 active · 2 waiting · 0 stalled · 0 escalated · 0 completed of 3')
-    expect(agentsText(view(swarm, [], 60)).split('\n')[0]).toBe('AGENTS · 1 active · 2 waiting · 0 stalled · 0 esc · 0/3 don…')
+    expect(agentsText(view(swarm, [], 60)).split('\n')[0]).toBe('AGENTS · 1 active · 2 waiting · 0/3 done · RECONNAISSANCE')
     expect(text).toContain('CAPACITY · 1 of 4 slots · SONNET 1/2 · HAIKU 0/2 · OPUS in the main loop')
   })
   test('what needs attention comes first, with its reason under it', () => {

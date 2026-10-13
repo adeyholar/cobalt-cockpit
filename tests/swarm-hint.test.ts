@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { agentsText, swarmHint } from '../hooks/inspector'
+import { swarmGraph } from '../hooks/field'
 import { orchestraRows } from '../hooks/orchestra'
 import { admitTask, bindAgent, emptySwarm, escalateTask, finishTask, heartbeat, markStalled, requestCancel, resolveEscalation, submitTask, summarizeSwarm } from '../hooks/swarm'
 import type { Ledger, Swarm } from '../types'
@@ -74,8 +75,12 @@ describe('blocked, quiet and escalated are told apart, and queued is not counted
   test('the quiet threshold is the configured one, in the unit that fits it', () => {
     const at = (stallMs: number): Swarm => ({ ...s, config: { ...s.config, stallMs } })
     expect(swarmHint(at(600_000), WIDE)).toContain('1 QUIET 10m+')
-    expect(swarmHint(at(90_000), WIDE)).toContain('1 QUIET 2m+')
+    // rounded down: quiet for ninety seconds is at least one minute, not two
+    expect(swarmHint(at(90_000), WIDE)).toContain('1 QUIET 1m+')
+    expect(swarmHint(at(119_999), WIDE)).toContain('1 QUIET 1m+')
+    expect(swarmHint(at(120_000), WIDE)).toContain('1 QUIET 2m+')
     expect(swarmHint(at(30_000), WIDE)).toContain('1 QUIET 30s+')
+    expect(swarmHint(at(1_999), WIDE)).toContain('1 QUIET 1s+')
   })
   test('it clears as each is settled: a resolved escalation, a cancelled blocked task, a recovered agent', () => {
     let next = resolveEscalation(s, 'esc', { conclusion: 'go left', evidence: ['read it'] }, 500_000)
@@ -90,6 +95,14 @@ describe('blocked, quiet and escalated are told apart, and queued is not counted
     expect([summary.blocked, summary.stalled, summary.escalated, summary.queue]).toEqual([2, 1, 1, 1])
     const header = agentsText({ swarm: s, agents: [], now: 400_000, columns: WIDE }).split('\n')[0]
     expect(header).toContain('3 waiting · 1 stalled · 1 escalated')       // waiting is queued and blocked together, by name
+    // the narrow header names each, and leaves a zero out so the done count and the wave stay in view
+    expect(agentsText({ swarm: s, agents: [], now: 400_000, columns: 70 }).split('\n')[0]).toBe('AGENTS · 2 active · 3 waiting · 1 stalled · 1 esc · 1/8 done · RECONN…')
+    expect(agentsText({ swarm: add(emptySwarm(), 'q'), agents: [], now: 0, columns: 70 }).split('\n')[0]).toBe('AGENTS · 0 active · 1 waiting · 0/1 done · RECONNAISSANCE')
+    // the Activity Field's labels count them apart as well
+    expect(swarmGraph(s)?.label).toContain('queue 1 · blocked 2 · quiet 1')
+    expect(swarmGraph(s)?.branches[0]?.label).toContain('queue 1 · blocked 2 · quiet 1 · done 1 · failed 1')
+    expect(swarmGraph(add(emptySwarm(), 'q'))?.label).toContain('queue 1 · blocked 0')
+    expect(swarmGraph(add(emptySwarm(), 'q'))?.label).not.toContain('quiet')
     const rows = orchestraRows({ meter: { model: 'claude-opus-5-5' } as never, task: null, activity: { kind: 'IDLE' } as never, isWorking: false, agents: [], nwho: null, limit: 8, now: 400_000, swarm: s }, WIDE, { accent: 'a', ok: 'o', bad: 'b', steel: 's' })
     const graph = rows.map(row => row.map(seg => seg.text).join('')).find(text => text.includes('TASK GRAPH'))
     expect(graph).toContain('queue 1 · blocked 2 · quiet 1 · escalated 1')
@@ -161,6 +174,7 @@ describe('it reads state and keeps none', () => {
 describe('on the HUD, through the real render hook', () => {
   type Engine = Parameters<typeof start>[0]
   const PLUGIN = 'cobalt-cockpit'
+  const ON = { options: { orchestration: true } }
   // the test world's clock when the session starts: a task last seen then has not been quiet for the threshold
   const NOW = 1_000_000
   const mount = ($: Engine, columns: number, maxRows: number, surface: 'terminal' | 'desktop' = 'terminal') =>
@@ -169,7 +183,9 @@ describe('on the HUD, through the real render hook', () => {
   const blank = (): Ledger => ({ schema: 2, sessionId: 'hint-session', runs: [], currentRun: null, agents: [], tools: [], turns: {}, warnings: [] } as unknown as Ledger)
   const hintOf = async (hud: { drawn: () => Promise<unknown> }): Promise<string[]> => (await rowsOf(hud)).filter(row => row.startsWith('SWARM'))
 
-  test('the line appears while a task is blocked, quiet or escalated, at the width of the band', async ($, on) => {
+  const stripsOf = async (hud: { drawn: () => Promise<unknown> }): Promise<number> => (await rowsOf(hud)).filter(row => /^\s*~+\s*$/.test(row)).length
+
+  test('the line appears while a task is blocked, quiet or escalated, at the width of the band', ON, async ($, on) => {
     world(on); on('session.id', () => ({ value: 'hint-session' })); seeded(on, busy(NOW)); await start($)
     const wide = await mount($, 120, 12)
     expect(await hintOf(wide)).toEqual(['SWARM: 2 BLOCKED · 1 QUIET 5m+ · 1 ESCALATED · /cockpit agents'])
@@ -182,38 +198,68 @@ describe('on the HUD, through the real render hook', () => {
       await hud.unmount()
     }
   })
-  test('a swarm with nothing to act on adds no row at all', async ($, on) => {
+  test('a swarm with nothing to act on adds no row at all', ON, async ($, on) => {
     world(on); on('session.id', () => ({ value: 'hint-session' }))
     seeded(on, run(add(add(emptySwarm(), 'q'), 'a'), 'a', NOW)); await start($)
     const hud = await mount($, 120, 12)
-    const with_ = await rowsOf(hud)
-    expect(with_.filter(row => row.includes('SWARM:'))).toEqual([])
+    expect((await rowsOf(hud)).filter(row => row.includes('SWARM:'))).toEqual([])
     await hud.unmount()
   })
-  test('no swarm at all: the HUD is what it was', async ($, on) => {
-    world(on); await start($)
+  test('no swarm at all, and observation mode with an earlier session\'s swarm still in the Ledger: no line', async ($, on) => {
+    world(on); on('session.id', () => ({ value: 'hint-session' })); seeded(on, busy(NOW)); await start($)
     const hud = await mount($, 120, 12)
+    // orchestration is off (the default): the Ledger's blocked tasks are not this session's to act on
     expect((await rowsOf(hud)).filter(row => row.includes('SWARM'))).toEqual([])
     await hud.unmount()
   })
-  test('a one-row band has no room for it', async ($, on) => {
+  test('the row is paid for out of the strips\' rows, so the band is never taller for it', ON, async ($, on) => {
     world(on); on('session.id', () => ({ value: 'hint-session' })); seeded(on, busy(NOW)); await start($)
-    const hud = await mount($, 120, 1)
-    expect(await hintOf(hud)).toEqual([])
-    await hud.unmount()
+    // at 120 columns the main row and the second row are spoken for: a band of one or two rows has no strip row to give up
+    for (const maxRows of [1, 2]) {
+      const hud = await mount($, 120, maxRows)
+      expect([maxRows, await hintOf(hud)]).toEqual([maxRows, []])
+      await hud.unmount()
+    }
+    for (const maxRows of [3, 4, 12]) {
+      const hud = await mount($, 120, maxRows)
+      expect([maxRows, (await hintOf(hud)).length]).toEqual([maxRows, 1])
+      await hud.unmount()
+    }
+    // below 44 columns there is no second row, so two rows are enough
+    const narrow = await mount($, 40, 2)
+    expect((await hintOf(narrow)).length).toBe(1)
+    await narrow.unmount()
   })
-  test('the desktop surface draws the same words', async ($, on) => {
+  test('the same band without the swarm\'s trouble draws the same rows, less that one', ON, async ($, on) => {
+    world(on); on('session.id', () => ({ value: 'hint-session' }))
+    const calm = busy(NOW)
+    // the same tasks with the three states settled into ones the line does not count
+    const settled: Swarm = { ...calm, tasks: calm.tasks.map(t => t.state === 'blocked' ? { ...t, state: 'queued' as const, reason: null } : t.state === 'stalled' ? { ...t, state: 'running' as const, reason: null } : t.state === 'escalated' ? { ...t, state: 'completed' as const, escalation: null } : t) }
+    const held = seeded(on, calm); await start($)
+    const withLine = await mount($, 120, 12)
+    const rowsWith = await rowsOf(withLine)
+    await withLine.unmount()
+    held.get('run-ledger')!.value = { ...(held.get('run-ledger')!.value as Ledger), swarm: settled }
+    const without = await mount($, 120, 12)
+    const rowsWithout = await rowsOf(without)
+    await without.unmount()
+    expect(rowsWith.filter(row => row.startsWith('SWARM'))).toHaveLength(1)
+    expect(rowsWithout.filter(row => row.startsWith('SWARM'))).toHaveLength(0)
+    expect(rowsWith.filter(row => !row.startsWith('SWARM')).length).toBe(rowsWithout.length)
+  })
+  test('the desktop surface draws the same words', ON, async ($, on) => {
     world(on); on('session.id', () => ({ value: 'hint-session' })); seeded(on, busy(NOW)); await start($)
     const hud = await mount($, 120, 12, 'desktop')
     expect(await hintOf(hud)).toEqual(['SWARM: 2 BLOCKED · 1 QUIET 5m+ · 1 ESCALATED · /cockpit agents'])
     await hud.unmount()
   })
-  test('rendering starts no process and no timer of its own for the line', async ($, on) => {
-    const w = world(on); on('session.id', () => ({ value: 'hint-session' })); seeded(on, busy(NOW)); await start($)
-    const before = w.runs.length
-    const hud = await mount($, 120, 12)
-    await hintOf(hud); await hintOf(hud)
-    expect(w.runs.slice(before).filter(argv => argv.join(' ').includes('swarm'))).toEqual([])
-    await hud.unmount()
+  test('drawing the line runs no host process that drawing without it does not', ON, async ($, on) => {
+    const w = world(on); on('session.id', () => ({ value: 'hint-session' })); const held = seeded(on, busy(NOW)); await start($)
+    const count = async (): Promise<number> => { const before = w.runs.length; const hud = await mount($, 120, 12); await rowsOf(hud); await hud.unmount(); return w.runs.length - before }
+    await count()                                            // the first draw settles what any draw starts
+    const withLine = await count()
+    held.get('run-ledger')!.value = { ...(held.get('run-ledger')!.value as Ledger), swarm: emptySwarm() }
+    const without = await count()
+    expect(withLine).toBe(without)
   })
 })
