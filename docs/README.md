@@ -58,6 +58,7 @@ The root [README](../README.md) is the front page. These files hold the detail.
 | [delivery-v0.5.0-router.md](delivery-v0.5.0-router.md) | Delivery report: the session router, with its measurements |
 | [delivery-v0.5.0-hardening.md](delivery-v0.5.0-hardening.md) | Delivery report: v0.5.0 release hardening |
 | [delivery-sonnet-led.md](delivery-sonnet-led.md) | Delivery report: the Sonnet-led profile |
+| [roadmap-security-followups.md](roadmap-security-followups.md) | Security follow-ups recorded after v0.6.1: a P0 on a guard that throws refusing nothing, and read claims widening to `*` (neither implemented) |
 | [roadmap-v0.7.0-diff-aware-verification.md](roadmap-v0.7.0-diff-aware-verification.md) | Roadmap, v0.7.0: a design milestone for evidence that correlates changed lines with measured coverage (not implemented) |
 | [roadmap-v0.6.2-persistent-attention.md](roadmap-v0.6.2-persistent-attention.md) | Roadmap, v0.6.2: acknowledged incidents whose conditions are still open, in the alert digest (not implemented) |
 | [roadmap-v0.5.3-verification-intelligence.md](roadmap-v0.5.3-verification-intelligence.md) | A proposal for verification intelligence |
