@@ -171,9 +171,11 @@ describe('the commander\'s rule: read-only Git inspection as typed', () => {
     for (const command of [
       'git log --{output=/tmp/canary\\},}', 'git log --{output=/tmp/canary,\\{}', "git log --{output=/tmp/canary,'{'}", 'git log --{output=/tmp/canary,"}"}', "git log --'{'output=/tmp/canary,}", 'git log --\\{output=/tmp/canary,}',
       'git log --{output=/tmp/canary,HEAD@{1}}', 'git log HEAD@{1..2}', 'git log HEAD@{a,b}', 'git diff {a..c}', 'git log }{', "git grep '{' hooks", 'git log --grep={',
+      // and anything left over once a revision's own braces are set aside
+      'git log HEAD@{1.}', 'git log HEAD@{1}}', 'git log HEAD@{1}{2}', "git log @'{'a,b'}'", 'git log @{a@{b}}', 'git log {@{1}', 'git log HEAD@{1..2..3}', 'git log --out@{1}',
     ]) expect([command, readOnlyShell(command)]).toEqual([command, false])
     // a revision's own braces hold nothing bash expands
-    for (const command of ['git diff HEAD@{1}', 'git log stash@{0}', 'git show HEAD^{tree}', 'git log HEAD@{1}..HEAD', 'git log HEAD@{2.days.ago}', 'git log "HEAD@{2 days ago}"', 'git diff @{u}', 'git log HEAD^{/fix}', 'git diff @{-1} HEAD^{}', 'git log -- hooks/*.ts']) expect([command, readOnlyShell(command)]).toEqual([command, true])
+    for (const command of ['git diff HEAD@{1}', 'git log stash@{0}', 'git show HEAD^{tree}', 'git log HEAD@{1}..HEAD', 'git log HEAD@{2.days.ago}', 'git log "HEAD@{2 days ago}"', 'git diff @{u}', 'git log HEAD^{/fix}', 'git diff @{-1} HEAD^{}', 'git log HEAD@{1.2}', 'git log HEAD@{.1}', 'git log -- hooks/*.ts']) expect([command, readOnlyShell(command)]).toEqual([command, true])
   })
   test('a harmless value that looks like a refused option is refused too: the rule follows how Git reads, not what was meant', () => {
     for (const command of ['git log -SOWNER', 'git grep -eTODO hooks', 'git grep --extended-regexp x', 'git log --output-indicator-new=x']) expect([command, readOnlyShell(command), agentInspection(command)]).toEqual([command, false, false])
