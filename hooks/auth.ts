@@ -95,6 +95,10 @@ export const API_REFUSAL =
 export const AUTH_UNREADABLE_REFUSAL =
   'AUTH / STATE UNREADABLE. This workflow runs on the Claude subscription only, and this session\'s authentication could not be read, so nothing was sent. Reload the plugin, or set the plugin option "subscriptionOnly" to false to stop checking.'
 
+/** What a prompt or request is refused with while subscriptionOnly is on and the session's sign-in is not confirmed. */
+export const AUTH_UNVERIFIED_REFUSAL =
+  'AUTH / UNVERIFIED. This workflow runs on the Claude subscription only, and this session\'s subscription sign-in could not be confirmed, so nothing was sent. Sign in to your subscription with /login and try again, or reload the plugin; /cockpit auth shows what was read, by name and never by value. To stop checking, set the plugin option "subscriptionOnly" to false.'
+
 const line = (name: string, value: string, color?: string, dim = false): Row => [
   { text: ` ${name.padEnd(13)}`, isDim: true },
   { text: value, ...(color === undefined ? {} : { color }), ...(dim ? { isDim: true } : {}) },

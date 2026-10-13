@@ -516,7 +516,13 @@ describe('the authentication diagnostic', () => {
     await start($)
     expect(w.toasts).toEqual(['AUTH / UNVERIFIED · FABLE / BLOCKED'])
     expect((await command($, 'auth')).text).not.toContain('API BILLING / OFF')
-    // unverified is not refused: only a detected API route is
+    // with subscriptionOnly on, an unconfirmed sign-in is refused as an API route is (see closeout.test.ts)
+    expect((await prompt($, 'Add rate limiting')).drop).toContain('AUTH / UNVERIFIED')
+  })
+
+  test('an engine that reports no credential is not refused when subscriptionOnly is off', { options: { subscriptionOnly: false } }, async ($, on) => {
+    world(on, { credential: null })
+    await start($)
     expect((await prompt($, 'Add rate limiting')).drop).toBeUndefined()
   })
 

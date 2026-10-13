@@ -120,8 +120,10 @@ export const isInstructionFile = (path: string): boolean =>
 export const namesInstructionFile = (prompt: string): boolean =>
   /\b(claude|agents)\.md\b/i.test(prompt) || /^\s*\/init\b/.test(prompt)
 
-/** The instruction files a shell command would write: redirects, tee, touch, cp, mv. */
-export const instructionFilesWritten = (command: string): string[] => {
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish'])
+
+/** The instruction files a shell command would write: redirects, tee, touch, truncate, cp, mv, install, ln, dd, and a script handed to a shell or eval. */
+export const instructionFilesWritten = (command: string, depth = 0): string[] => {
   const written: string[] = []
   for (const pipeline of parseShell(command).pipelines) {
     for (const simple of pipeline.commands) {
@@ -129,9 +131,21 @@ export const instructionFilesWritten = (command: string): string[] => {
       const run = unwrap(simple.argv)
       if (run === null) continue
       const paths = run.args.filter(arg => !arg.startsWith('-'))
-      if (run.program === 'touch' || run.program === 'tee') written.push(...paths)
-      if ((run.program === 'cp' || run.program === 'mv') && paths.length > 1) {
+      if (run.program === 'touch' || run.program === 'tee' || run.program === 'truncate') written.push(...paths)
+      if (['cp', 'mv', 'install', 'ln'].includes(run.program) && paths.length > 1) {
         written.push(paths[paths.length - 1] as string)
+      }
+      if (run.program === 'dd') written.push(...run.args.filter(arg => arg.startsWith('of=')).map(arg => arg.slice(3)))
+      // a script handed to a shell (`-c`, and clusters that end in it) or to eval is read too
+      if (depth < 4 && run.program === 'eval') written.push(...instructionFilesWritten(run.args.join(' '), depth + 1))
+      // a script piped into a bare shell: the words of the commands feeding it are read as the script
+      if (depth < 4 && SHELLS.has(run.program) && !run.args.some(arg => /^-[A-Za-z]*c$/.test(arg)) && pipeline.commands.length > 1 && simple === pipeline.commands[pipeline.commands.length - 1]) {
+        for (const feeder of pipeline.commands.slice(0, -1)) written.push(...instructionFilesWritten(`${feeder.argv.slice(1).join(' ')}\n${feeder.heredoc ?? ''}`, depth + 1))
+      }
+      if (depth < 4 && SHELLS.has(run.program)) {
+        const flag = run.args.findIndex(arg => /^-[A-Za-z]*c$/.test(arg))
+        if (flag >= 0) written.push(...instructionFilesWritten(run.args[flag + 1] ?? '', depth + 1))
+        if (simple.heredoc !== null) written.push(...instructionFilesWritten(simple.heredoc, depth + 1))
       }
     }
   }

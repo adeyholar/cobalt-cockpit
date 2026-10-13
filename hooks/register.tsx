@@ -53,7 +53,7 @@ import { parseStatus, projectOf, filterCommands, activeFilter } from './git'
 import { GIT_SAFE, commitEntries } from './git-integrity'
 import type { CommitEntry, DiskEntry, Measurement } from './git-integrity'
 import { assessCommand } from './guard'
-import { failClosed, guardFailure } from './guard-rules'
+import { failClosed, guardFailure, isInsideFolder } from './guard-rules'
 import {
   addedAttribution,
   attributionInCommand,
@@ -115,7 +115,7 @@ import {
 } from './nwho'
 import type { Cursor, Flash, LocalControl, NwhoEvent } from './nwho'
 import { paintCrawler } from './progress-visual'
-import { API_REFUSAL, AUTH_UNREADABLE_REFUSAL, authLines, authOf, authRows, settingsSources } from './auth'
+import { API_REFUSAL, AUTH_UNREADABLE_REFUSAL, AUTH_UNVERIFIED_REFUSAL, authLines, authOf, authRows, settingsSources } from './auth'
 import {
   EMPTY_ORCHESTRA,
   admitSpawn,
@@ -1573,13 +1573,23 @@ const probeAuth = async ($: EngineInterface, announce: boolean): Promise<void> =
 }
 
 /**
- * The refusal text when the session's requests are refused because it is not on the subscription, else null. An
- * authentication state that cannot be read is not a pass: with the policy on, the request is refused and says why.
+ * The refusal text when the session's requests are refused because it is not on the subscription, else null. With the
+ * policy on, only a confirmed subscription passes: an API-style configuration, an unconfirmed sign-in (`unverified`), a
+ * state not yet read and a state that cannot be read are each a refusal, and each says which.
  */
 const apiRefusal = async ($: EngineInterface): Promise<string | null> => {
-  if (!config.isSubscriptionOnly) return null
+  // a host this plugin stands by on is not this plugin's to police
+  if (!config.isSubscriptionOnly || !isSupported) return null
   try {
-    return (await read($, authAtom))?.mode === 'api' ? API_REFUSAL : null
+    let mode = (await read($, authAtom))?.mode
+    if (mode !== 'subscription' && mode !== 'api') {
+      // not read yet, or not confirmed: read once more before refusing, so a sign-in made since is seen
+      await quiet(() => probeAuth($, false))
+      mode = (await read($, authAtom))?.mode
+    }
+    if (mode === 'subscription') return null
+
+    return mode === 'api' ? API_REFUSAL : AUTH_UNVERIFIED_REFUSAL
   } catch {
     return AUTH_UNREADABLE_REFUSAL
   }
@@ -2019,10 +2029,13 @@ const attributionDeny = (found: Attribution, where: string): { deny: string } =>
   deny: `Cobalt Cockpit: ${where} would add AI attribution (${quote(found.line)}). This user's repositories carry none. Do it again without that text.`,
 })
 
-const allowInstructionFile = async ($: EngineInterface, path: string): Promise<{ deny: string } | null> => {
+const isInsidePlugin = ($: EngineInterface, path: string): boolean => isInsideFolder($.plugin.root, path)
+
+const allowInstructionFile = async ($: EngineInterface, path: string, isMoved = false): Promise<{ deny: string } | null> => {
   const absolute = path.startsWith('/') ? path : `${cwd}/${path}`
   // A check that cannot be made is not an answer: it throws, and the guard refuses the call (see `failClosed`).
-  const hasFile = await $.fs.exists(absolute)
+  // A command that changes directory first writes somewhere the session's directory says nothing about: it is new.
+  const hasFile = !isMoved && await $.fs.exists(absolute)
   const task = await read($, taskAtom)
   if (hasFile || task?.hasInstructionFileRequest === true) return null
   const name = basename(path)
@@ -2055,8 +2068,9 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
       })
       if (attribution !== null) return attribution
       const instruction = await failClosed('instruction-file', 'Bash', async () => {
+        const isMoved = /\b(cd|pushd|popd)\b|--chdir|\s-C\s?\S/.test(command)
         for (const path of instructionFilesWritten(command)) {
-          const refusal = await allowInstructionFile($, path)
+          const refusal = await allowInstructionFile($, path, isMoved && !path.startsWith('/'))
           if (refusal !== null) return refusal
         }
 
@@ -2093,11 +2107,13 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
 
     return null
   })
-  if (attribution !== null || e.tool !== 'Write') return attribution
+  if (attribution !== null) return attribution
 
+  // Creating an instruction file is asked about whatever tool creates it: an Edit with an empty old_string, a MultiEdit and a
+  // NotebookEdit create a file as a Write does. A file that exists, or that the person asked for (/init), is not asked about.
   return failClosed('instruction-file', e.tool, async () => {
-    const path = String(e['file_path'] ?? '')
-    return path === '' || path.startsWith(`${$.plugin.root}/`) || !isInstructionFile(path) ? null : allowInstructionFile($, path)
+    const path = String(e['file_path'] ?? e['notebook_path'] ?? '')
+    return path === '' || isInsidePlugin($, path) || !isInstructionFile(path) ? null : allowInstructionFile($, path)
   })
 }
 
@@ -2105,7 +2121,7 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
 const editGuard = async ($: EngineInterface, e: { tool: string } & Record<string, unknown>): Promise<{ deny: string } | null> => {
   const path = String(e['file_path'] ?? e['notebook_path'] ?? '')
   // this plugin's own sources and tests spell the patterns out
-  if (path === '' || path.startsWith(`${$.plugin.root}/`)) return null
+  if (path === '' || isInsidePlugin($, path)) return null
   const after = String(e['new_string'] ?? e['content'] ?? e['new_source'] ?? '')
   let added: Attribution[] = []
   if (e.tool === 'Edit') {
@@ -3906,7 +3922,8 @@ export const register: Register = (on, options) => {
           ...base,
           lastPrompt: oneLine(e.text, 160),
           updatedAt: now,
-          hasInstructionFileRequest: base.hasInstructionFileRequest || namesInstructionFile(e.text),
+          // only a human gesture asks for the file: text from an `sdk` turn (a nested `claude -p` an agent can start), a plugin or a peer does not
+          hasInstructionFileRequest: base.hasInstructionFileRequest || (isHumanAuthority(e.origin) && namesInstructionFile(e.text)),
         }
         if (!isSonnetLed()) return settle(discovered(prompted)).task
         // Grounds are read from the full prompt: the stored one is clipped.
@@ -3952,8 +3969,8 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'init' }, async ($, e, next) => {
-    // /init is the person asking for a CLAUDE.md
-    await quiet(() => change($, task => ({ ...task, hasInstructionFileRequest: true })))
+    // /init is the person asking for a CLAUDE.md, when the person typed it: any other origin asks for nothing
+    if (isHumanAuthority(e.origin)) await quiet(() => change($, task => ({ ...task, hasInstructionFileRequest: true })))
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -4252,7 +4269,7 @@ export const register: Register = (on, options) => {
     // The same for a session that is not on the subscription.
     const apiStep = await apiRefusal($)
     if (apiStep !== null) {
-      const text = apiStep === API_REFUSAL ? 'AUTH / API DETECTED' : 'AUTH / STATE UNREADABLE'
+      const text = apiStep === API_REFUSAL ? 'AUTH / API DETECTED' : apiStep === AUTH_UNVERIFIED_REFUSAL ? 'AUTH / UNVERIFIED' : 'AUTH / STATE UNREADABLE'
       yield { kind: 'text', index: 0, text }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null }
 

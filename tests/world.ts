@@ -24,6 +24,8 @@ export type World = {
   failWrites: boolean
   /** Every `$.fs.exists` throws, as an unreadable filesystem would. */
   failExists: boolean
+  /** `$.session.authorize()` throws, as an engine that does not answer would. */
+  failAuthorize: boolean
   /** Every `$.ui.notify` the plugin made. */
   notified: { text: string; title: string | undefined }[]
   /** What `$.session.cwd()` answers. */
@@ -189,6 +191,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     telemetryModes: 'ok',
     failWrites: false,
     failExists: false,
+    failAuthorize: false,
     notified: [],
     cwd: '/work/example',
     gitPrefix: '',
@@ -302,7 +305,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   on('agent.offer', () => ({ isOffered: true }))
   on('agent.list', () => ({ value: w.agents.map(one => ({ ...one })) }))
   on('session.model', () => ({ value: w.model }))
-  on('session.authorize', () => ({ value: w.credential }))
+  on('session.authorize', () => { if (w.failAuthorize) throw new Error('authorize unavailable'); return { value: w.credential } })
   on('settings.read', () => ({ value: w.settings }))
   on('config.set', ($, e) => {
     w.configured.push(e.key)

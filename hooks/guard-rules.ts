@@ -35,3 +35,6 @@ export const failClosed = async (name: GuardName, tool: string, run: () => Promi
     return guardFailure(name, tool, error)
   }
 }
+
+/** A path is inside a folder only when it says so plainly: a path that climbs out of it with `..` or wanders with `.` is not. */
+export const isInsideFolder = (root: string, path: string): boolean => path.startsWith(`${root}/`) && !/(^|\/)\.{1,2}(\/|$)/.test(path)
