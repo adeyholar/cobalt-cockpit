@@ -404,14 +404,15 @@ describe('reload and restart', () => {
     await progress($, { action: 'status' })
     expect(w.notified).toEqual([])
   })
-  test('a stored record of a task that is gone is resolved on the first look, never repeated', armed(), async ($, on) => {
+  // v0.6.2: a record of a task this session never held cannot be observed from here, so no session writes it resolved: it stays UNKNOWN
+  test('a stored record of a task that is gone is not repeated, and not recorded resolved by a session that never held it', armed(), async ($, on) => {
     const w = world(on, {}, { 'ledger:s1': { ...emptyLedger('s1'), alerts: [rec('9@9:security-failure:SECURITY', { at: 1, taskId: 9 })] } })
     on('session.id', () => ({ value: 's1' }))
     const held = hostState(on, {})
     await start($)
     await w.clock.advance(60 * MIN)
     expect(w.notified).toEqual([])
-    expect(outcomes(held)).toEqual(['security-failure:sent', 'security-failure:resolved'])
+    expect(outcomes(held)).toEqual(['security-failure:sent'])
   })
   test('a stale in-flight mark left by a module that is gone costs one look, not the reminder', armed(), async ($, on) => {
     const t = heldTask()

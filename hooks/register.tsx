@@ -64,7 +64,7 @@ import {
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
 import type { Observation } from './alerts'
-import { exportOf, hudCountsOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import { exportOf, hudCountsOf, standingOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
@@ -461,6 +461,10 @@ const releaseHistory = async ($: EngineInterface): Promise<ReleaseRecord[]> => {
   if (held !== undefined && !Array.isArray(held)) throw new Error('OPUS / RELEASE RECORD UNREADABLE. The stored record of release reviews is not usable, so the allowance cannot be established. Nothing was started.')
 
   return releaseRecords(held)
+}
+/** One strict read of the release records for a view: what they hold, and whether they could be read at all. */
+const releaseRead = async ($: EngineInterface): Promise<{ history: ReleaseRecord[]; readable: boolean }> => {
+  try { return { history: await releaseHistory($), readable: true } } catch { return { history: [], readable: false } }
 }
 /** The same, for housekeeping: what can be read. */
 const releaseHistorySoft = async ($: EngineInterface): Promise<ReleaseRecord[]> => releaseRecords(await $.store.get('release-reviews').catch(() => undefined))
@@ -3056,7 +3060,10 @@ const stopReminders = () => {
 const armReminders = async ($: EngineInterface): Promise<void> => {
   try {
     const view = guardCfg.enabled && !isSessionOver ? await guardView($) : null
-    if (view === null || !hasWorkLeft(guardCfg, view.state, view.kept)) { stopReminders(); return }
+    // the current task's conditions are this session's own, whether or not a pass has run yet (a reload resumes them)
+    const current = view === null ? null : await read($, taskAtom)
+    if (current !== null) ownedUids.add(uidOf(current))
+    if (view === null || !hasWorkLeft(guardCfg, view.state, view.kept.filter(a => isOwned(a.key)))) { stopReminders(); return }
     if (reminderTimer !== null) return
     reminderTimer = $.clock.every(REMINDER_POLL_MS, () => quiet(() => raiseAlerts($, false)))
   } catch { stopReminders() }
@@ -3093,8 +3100,8 @@ const cueOwner = ($: EngineInterface, key: string, at: number): void => {
 }
 
 /** The facts the alert policy reads off a task. `withRelease` false leaves the release history unread (no NO-GO is then reported). */
-const alertFacts = async ($: EngineInterface, task: Task, atStop: boolean, withRelease = true): Promise<Facts> => {
-  const history = withRelease ? await releaseHistorySoft($) : []
+const alertFacts = async ($: EngineInterface, task: Task, atStop: boolean, withRelease = true, given?: ReleaseRecord[]): Promise<Facts> => {
+  const history = withRelease ? (given ?? await releaseHistorySoft($)) : []
   const latest = [...history].sort((a, b) => b.at - a.at)[0]
   const review = task.review
 
@@ -3121,15 +3128,21 @@ const observeAlerts = async ($: EngineInterface, kept: readonly AlertRecord[]): 
     if (task === null || kept.length === 0) return { open: [], observation: { uid: null, blind: [] } }
 
     // the release history is read only when a NO-GO was raised: without a record it could not be listed anyway
+    // read once and strictly: a value that cannot be used makes the kind blind, so a NO-GO is never read as cleared from it
     const wantsRelease = kept.some(a => a.kind === 'release-no-go')
-    const releaseReadable = !wantsRelease || (await $.store.get('release-reviews').then(() => true, () => false))
-    const facts = await alertFacts($, task, true, wantsRelease && releaseReadable)
+    const release = wantsRelease ? await releaseRead($) : { history: [], readable: true }
+    const releaseReadable = release.readable
+    const facts = await alertFacts($, task, true, wantsRelease && releaseReadable, release.history)
 
     return { open: dueOf(facts), observation: { uid: facts.taskUid, blind: releaseReadable ? [] : ['release-no-go'] } }
   } catch { return { open: [], observation: { uid: null, blind: [] } } }
 }
 /** Every alert condition that holds now, for the HUD and the status: read-only, and empty when it cannot be read. */
 const openAlerts = async ($: EngineInterface, kept: readonly AlertRecord[]): Promise<Open[]> => (await observeAlerts($, kept)).open
+
+/** The identities of the tasks this process has held: the only ones whose conditions it may record as resolved. */
+const ownedUids = new Set<string>()
+const isOwned = (key: string): boolean => [...ownedUids].some(u => key.startsWith(`${u}:`))
 
 /** Raises whatever alert is due. Never throws, never loops, and never touches a gate, a review or an approval. */
 const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> => {
@@ -3152,7 +3165,11 @@ const raiseAlerts = async ($: EngineInterface, atStop: boolean): Promise<void> =
       const now = await $.clock.now()
       const before = (await read($, ledgerAtom)).alerts ?? []
       const keys = open.map(o => o.key)
-      const closed = [...closedOf(before, keys), ...lapsedOf(before, keys)]
+      // only a condition of a task this session has itself held is judged here: another session's, or one from before this
+      // session, cannot be observed from here, and recording it resolved would turn UNKNOWN into a stored resolution
+      if (facts !== null) ownedUids.add(facts.taskUid)
+      const releaseBlind = before.some(a => a.kind === 'release-no-go') && !(await releaseRead($)).readable
+      const closed = [...closedOf(before, keys), ...lapsedOf(before, keys)].filter(a => isOwned(a.key) && !(releaseBlind && a.kind === 'release-no-go'))
       if (closed.length > 0) {
         await update($, ledgerAtom, old => ({ ...old, alerts: closed.reduce((all, a) => boundedAlerts(all, { key: a.key, kind: a.kind, taskId: a.taskId, at: now, outcome: 'resolved', attempts: 0, channel: null }), old.alerts ?? []) }))
         await hush(() => persist($))
@@ -4777,10 +4794,10 @@ export const register: Register = (on, options) => {
           await hush(() => persist($))
           // its reminders end now, not at the timer's next look
           await armReminders($)
-          const holds = o?.state === 'open'
+          const standing = o === undefined ? 'UNKNOWN' : standingOf(o, (await observeAlerts($, before)).observation)
           const where = shared ? ' It is recorded for this project, so another session reads it too.' : ' It could not be recorded for the project: it holds in this session only.'
 
-          return { text: `Cockpit: alert ${named} was acknowledged${holds ? '; its condition is still open, and no more reminders will be sent for it' : '; its condition no longer holds, so this only marks the record'}.${where} Other alerts, gates, reviews, approvals and the verification verdict were not changed.` }
+          return { text: `Cockpit: alert ${named} was acknowledged${standing === 'OPEN' ? '; its condition is still open, and no more reminders will be sent for it' : standing === 'UNKNOWN' ? '; its condition cannot be observed from this session, so it is not known whether it still holds, and this only marks the record' : '; its condition no longer holds, so this only marks the record'}.${where} Other alerts, gates, reviews, approvals and the verification verdict were not changed.` }
         }
         if (arg === 'export') {
           // printed for the person who typed it, never written or sent anywhere; acknowledgments in the store are applied in memory only

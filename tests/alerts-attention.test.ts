@@ -3,7 +3,7 @@
 // a condition this session cannot observe is UNKNOWN, which is not resolved. Synthetic: nothing here shows that a person saw anything.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { ATTENTION_DETAIL_MAX, ALERT_CAP, ackKeyOf, KINDS, attentionLines, attentionOf, bounded, decide, deferredOf, digestText, isSettledQuietly, episodesOf, guardConfigOf, hudCountsOf, inboxOrder, isAlertRecord, occKeyOf, occurrencesOf, pinLine, remind, standingOf, validAlerts } from '../hooks/alerts'
+import { DETAIL_OF, dueOf, ATTENTION_DETAIL_MAX, ALERT_CAP, ackKeyOf, KINDS, attentionLines, attentionOf, bounded, decide, deferredOf, digestText, isSettledQuietly, episodesOf, guardConfigOf, hudCountsOf, inboxOrder, isAlertRecord, occKeyOf, occurrencesOf, pinLine, remind, standingOf, validAlerts } from '../hooks/alerts'
 import type { AlertKind, AlertRecord, Observation, Occurrence } from '../hooks/alerts'
 import { applyAction, newTask, settle } from '../hooks/model'
 import type { Ledger, Task } from '../types'
@@ -378,5 +378,41 @@ describe('in a run', () => {
     expect(inbox).toMatch(/acknowledged · condition OPEN now/)
     expect(JSON.stringify(ledger(held).alerts)).toBe(before)
     expect(w.notified).toEqual([])
+  })
+  test('another session\'s pass never records this session\'s unobservable incident resolved: it stays UNKNOWN', ALERTS(), async ($, on) => {
+    const { store } = await stored(blockedTask(), { outcome: 'sent', attempts: 1, channel: 'kitty', acked: true })
+    const w = world(on, {}, store); const held = hostState(on, {}); session(on, 's2')
+    await start($); await planAndComplete($, 1); await block($)
+    await w.clock.advance(HOUR)
+    // this session owns its own task only; the older acknowledged incident is not its to close
+    expect((ledger(held).alerts ?? []).filter(a => a.outcome === 'resolved')).toEqual([])
+    const text = attention(await say($, 'alerts digest'))
+    expect(countOf(text, 'UNVERIFIED CONDITION STATE')).toBe(1)
+    expect(text).not.toContain('NO LONGER OPEN')
+  })
+  test('acknowledging an incident this session cannot observe does not claim its condition no longer holds', REC(), async ($, on) => {
+    const { records, store } = await stored(blockedTask())
+    world(on, {}, store); hostState(on, {}); session(on, 's2')
+    await start($)
+    const text = await say($, `alerts ack ${idsOf(records)[0]}`)
+    expect(text).toContain('cannot be observed from this session')
+    expect(text).not.toContain('no longer holds')
+  })
+  test('an unreadable release history makes a recorded NO-GO UNKNOWN, never cleared', ALERTS(), async ($, on) => {
+    const t = blockedTask()
+    const project = await projectHash('/work/example')
+    const key = `${t.id}@${t.startedAt}:release-no-go:release`
+    const records = written(rec(key, { kind: 'release-no-go', at: 1, taskId: t.id, acked: true }))
+    const store: Record<string, unknown> = { [occKeyOf(project, idsOf(records)[0]!)]: { v: 1, records }, 'release-reviews': { not: 'a list' } }
+    world(on, {}, store); hostState(on, { task: t }); session(on, 's2')
+    await start($)
+    const text = attention(await say($, 'alerts digest'))
+    expect(countOf(text, 'UNVERIFIED CONDITION STATE')).toBe(1)
+    expect(text).not.toContain('NO LONGER OPEN')
+  })
+  test('every kind\'s key is the one dueOf builds, so ownership is matched exactly', () => {
+    const f = { taskUid: '4@9', securityFailed: true, stopBlocker: 'check exit 1', blocker: 'b', releaseNoGo: true, reviewOpen: true, atStop: true }
+    for (const d of [...dueOf(f), ...dueOf({ ...f, stopBlocker: null })]) expect(d.key).toBe(`4@9:${d.kind}:${DETAIL_OF[d.kind]}`)
+    expect(new Set([...dueOf(f), ...dueOf({ ...f, stopBlocker: null })].map(d => d.kind)).size).toBe(KINDS.length)
   })
 })

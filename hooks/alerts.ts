@@ -143,6 +143,8 @@ export type Facts = {
 /** A hold is "retries exhausted" only when a check really ran and kept failing; a missing, changed or unstartable script is a blocked run. */
 export const exhaustedBlocker = (reason: string | null): string | null => (reason !== null && /^check (?:exit|timed out)/.test(reason) ? reason : null)
 
+/** The fixed detail of each kind's condition key: `dueOf` builds every key from it. */
+export const DETAIL_OF: Readonly<Record<AlertKind, string>> = { 'security-failure': 'SECURITY', 'release-no-go': 'release', 'verification-exhausted': 'TEST', 'run-blocked': 'task', 'review-hold': 'review' }
 export const keyOf = (taskUid: string, kind: AlertKind, detail: string): string => `${taskUid}:${kind}:${detail}`
 
 /** The conditions that call for a person, in the order they are told. A recoverable failure is not among them. */
@@ -439,7 +441,7 @@ export type Observation = { uid: string | null; blind: readonly AlertKind[] }
 export type Standing = 'OPEN' | 'CLEARED' | 'RESOLVED' | 'UNKNOWN'
 export const standingOf = (o: Occurrence, obs: Observation): Standing => {
   if (o.state === 'resolved') return 'RESOLVED'
-  const mine = obs.uid !== null && o.key.startsWith(`${obs.uid}:${o.kind}:`) && !obs.blind.includes(o.kind)
+  const mine = obs.uid !== null && o.key === keyOf(obs.uid, o.kind, DETAIL_OF[o.kind]) && !obs.blind.includes(o.kind)
   if (!mine) return 'UNKNOWN'
 
   return o.state === 'open' ? 'OPEN' : 'CLEARED'
@@ -812,9 +814,9 @@ const standings = (occ: readonly Occurrence[], obs: Observation): string => {
  */
 export const attentionLines = (occ: readonly Occurrence[], obs: Observation, seen: ReadonlySet<string> | null | undefined, now: number, columns = 100): string[] => {
   const g = attentionOf(occ, obs, seen)
-  const clip = (s: string): string => (s.length <= columns ? s : `${s.slice(0, Math.max(1, columns - 1))}…`)
+  const clip = (s: string): string => (s.length <= columns ? s : columns > 1 ? `${s.slice(0, columns - 1)}…` : s.slice(0, Math.max(0, columns)))
   const lines = ['COBALT GUARD / ATTENTION']
-  lines.push(seen === undefined ? 'NEW SINCE LAST LOOK: not tracked here (no project record)' : `NEW SINCE LAST LOOK: ${g.fresh.length}${seen === null && g.fresh.length > 0 ? ' (no earlier look)' : ''}`)
+  lines.push(seen === undefined ? 'NEW SINCE LAST LOOK: not tracked here (no project record)' : `NEW SINCE LAST LOOK: ${g.fresh.length} (unacknowledged only)${seen === null && g.fresh.length > 0 ? ' (no earlier look)' : ''}`)
   if (g.fresh.length > 0) lines.push(`  not acknowledged · ${standings(g.fresh, obs)}`)
   if (g.waiting.length > 0) lines.push(`NOT ACKNOWLEDGED, ALREADY SHOWN: ${g.waiting.length}`, `  ${standings(g.waiting, obs)}`)
   lines.push(`STILL OPEN, ACKNOWLEDGED: ${g.stillOpen.length}`)
@@ -826,10 +828,10 @@ export const attentionLines = (occ: readonly Occurrence[], obs: Observation, see
     lines.push(...byLevelLines(g.unverified))
     for (const o of g.unverified.slice(0, ATTENTION_DETAIL_MAX)) lines.push(detailLine(o, now))
     if (g.unverified.length > ATTENTION_DETAIL_MAX) lines.push(`  +${g.unverified.length - ATTENTION_DETAIL_MAX} more: /cockpit alerts`)
-    lines.push('  Raised elsewhere: not observable from here. UNKNOWN is not resolved.')
+    lines.push('  UNKNOWN is not resolved: raised elsewhere, not observable from here.')
   }
   if (g.closed.length > 0) lines.push(`ACKNOWLEDGED, NO LONGER OPEN: ${g.closed.length}`)
-  lines.push('Each incident is counted once. Acknowledging stops reminders; it does not resolve a condition.', 'OPEN is read from this session\'s task now, never from a stored record.')
+  lines.push('Acknowledging does not resolve a condition; it stops reminders.', 'OPEN is read from this session\'s task now, never from a stored record. Each incident is counted once.')
 
   return lines.map(clip)
 }
@@ -914,7 +916,7 @@ export const inboxText = (occ: readonly Occurrence[], page: number, now: number,
     const unknown = obs !== undefined && o.state !== 'open' && standingOf(o, obs) === 'UNKNOWN'
     const g = o.state === 'open' ? 'OPEN NOW (read from the current task)' : unknown ? 'CONDITION UNKNOWN (raised by another session or task; not observable from here, and not resolved)' : 'HISTORY (recorded earlier; the condition no longer holds)'
     if (g !== group) { lines.push(g); group = g }
-    lines.push(`  ${o.id} ${o.level} ${o.kind} · task ${o.taskId} · recorded ${stamp(o.at)}${ageOf(now - o.at)} · ${OUTCOME[o.status]}${o.status === 'sent' && o.channel !== null ? ` via ${o.channel}` : ''}${o.reminders > 0 ? ` · ${o.reminders} reminder${o.reminders === 1 ? '' : 's'}` : ''} · ${o.acked ? 'acknowledged' : 'not acknowledged'} · ${unknown ? 'condition state UNKNOWN from this session' : STATE[o.state]}`)
+    lines.push(`  ${o.id} ${o.level} ${o.kind} · task ${o.taskId} · recorded ${stamp(o.at)}${ageOf(now - o.at)} · ${OUTCOME[o.status]}${o.status === 'sent' && o.channel !== null ? ` via ${o.channel}` : ''}${o.reminders > 0 ? ` · ${o.reminders} reminder${o.reminders === 1 ? '' : 's'}` : ''} · ${o.acked ? 'acknowledged' : 'not acknowledged'} · ${unknown ? 'condition state UNKNOWN from this session' : obs !== undefined && o.state === 'ended' ? 'condition no longer open (observed not holding)' : STATE[o.state]}`)
   }
   if (pages > 1) lines.push(`More: /cockpit alerts ${at < pages ? at + 1 : 1}`)
   lines.push('/cockpit alerts ack <id> acknowledges that one occurrence and stops its reminders; /cockpit guard ack acknowledges all. Neither changes a gate, a review, an approval or a verdict.')

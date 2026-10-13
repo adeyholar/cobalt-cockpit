@@ -744,14 +744,14 @@ describe('reload and restart', () => {
     await w.clock.advance(6 * HOUR)
     expect(w.notified.length).toBe(1)
   })
-  test('a stored deferral of a task that is gone is resolved on the first look, never told', quietly(), async ($, on) => {
+  test('a stored deferral of a task that is gone is never told, and not recorded resolved by a session that never held it', quietly(), async ($, on) => {
     const w = world(on, {}, { 'ledger:s1': { ...emptyLedger('s1'), alerts: [deferred('9@9:run-blocked:task', { at: 1, taskId: 9 })] } })
     on('session.id', () => ({ value: 's1' }))
     const held = hostState(on, {})
     await start($)
     await w.clock.advance(12 * HOUR)
     expect(w.notified).toEqual([])
-    expect(outcomes(held)).toEqual(['run-blocked:deferred', 'run-blocked:resolved'])
+    expect(outcomes(held)).toEqual(['run-blocked:deferred'])
   })
   test('quiet hours turned off after a deferral: it is told at the next look', { options: { guardAlerts: true, guardCooldownSec: 30 } }, async ($, on) => {
     const t = blockedTask()
