@@ -119,13 +119,31 @@ On the 32 occurrences a ledger can hold (the cap), in the plugin test host, mean
 
 ## Acceptance (real sessions)
 
-1. Record-only on. Block a milestone; `/cockpit alerts`, note the id; `/cockpit alerts ack <id>`. `/cockpit alerts digest` shows `STILL OPEN, ACKNOWLEDGED: 1`. The GUARD row shows `1 acknowledged, still open`. No desktop notification.
-2. Unblock the milestone. The digest shows `STILL OPEN, ACKNOWLEDGED: 0` and `ACKNOWLEDGED, NO LONGER OPEN: 1`; the row's acknowledged-open text is gone.
-3. Block again: `NEW SINCE LAST LOOK: 1`; the earlier incident stays closed.
-4. Two sessions in one project: raise and acknowledge in the first; open the second and run the digest. The incident reads `UNVERIFIED CONDITION STATE`, not open and not resolved. Acknowledge another in the second at the same time; both appear after the next digest.
-5. Restart Claude Code with the same task still blocked: the acknowledged incident reads OPEN again and nothing is notified.
-6. Alerts off with history: the digest still draws the section and says nothing new is recorded.
-7. Narrow the terminal to 40 columns: no line wraps and the row keeps its label.
+`scripts/acceptance-interactive.sh` builds a disposable place to try exactly the committed candidate in two real Claude Code sessions on one test project. It starts nothing for you, simulates no acknowledgment and confirms nothing on your behalf. The installed user-scope plugin and your own configuration are neither read nor written: the sessions run with their own `CLAUDE_CONFIG_DIR` and `HOME`, so the candidate is the only Cockpit that loads. No credential is copied; you sign in once inside the disposable configuration.
+
+```sh
+scripts/acceptance-interactive.sh setup                  # needs a clean tree; prints DIR
+scripts/acceptance-interactive.sh verify DIR             # no model, no login: loaded version and path, strict validation
+scripts/acceptance-interactive.sh launch DIR 1           # terminal 1
+scripts/acceptance-interactive.sh launch DIR 2           # terminal 2, when told below
+CONTINUE=1 scripts/acceptance-interactive.sh launch DIR 1   # session 1 again after a restart
+scripts/acceptance-interactive.sh clean DIR
+```
+
+The options for these launches are alerts on, `guardRepeat` on at 60 s, a 30 s cooldown and 3 reminders at most, so a repeated notification would show within a few minutes. The first launch shows Claude Code's first-run screens (theme, sign-in, folder trust) once; both sessions share the result. `COBALT_ACCEPT_PASS_AUTH=1` passes `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` from your environment instead of a sign-in.
+
+Record what you see at each step; where the text below says *expect*, a different result is a finding.
+
+1. **Session 1, record.** Ask Claude: *use the cobalt-cockpit progress tool to plan three milestones (Inspect, Implement, Verify), then block milestone m1 with the note "needs the owner"*. Expect one terminal notification (a NORMAL blocked-run alert) and a GUARD row that names it. `/cockpit alerts` lists it with an 8-character id.
+2. **Session 1, acknowledge (you).** Type `/cockpit alerts ack <id>`. Expect the reply to say the condition is still open and that no more reminders will be sent, and the GUARD row to read `1 acknowledged, still open`. `/cockpit alerts digest` ends with `STILL OPEN, ACKNOWLEDGED: 1` and `- NORMAL: 1 blocked run`.
+3. **Session 1, no repeat.** Wait four minutes without unblocking. Expect no further notification, and the row and digest unchanged. (Without the acknowledgment a reminder would come about every minute, three at most.)
+4. **Session 2, cannot observe.** Start session 2 and run `/cockpit alerts digest`. Expect `UNVERIFIED CONDITION STATE: 1` with `UNKNOWN is not resolved`, `STILL OPEN, ACKNOWLEDGED: 0` and no `NO LONGER OPEN`; no notification from session 2. `/cockpit alerts export` should show `"version": 2` and `"condition": "UNKNOWN"` for it. Do not acknowledge or unblock anything in session 2.
+5. **Session 1, resolution.** Ask Claude to unblock m1 with the progress tool. Expect the row's acknowledged-open text to go and the digest to show `STILL OPEN, ACKNOWLEDGED: 0` and `ACKNOWLEDGED, NO LONGER OPEN: 1`. No notification.
+6. **Session 1, recurrence.** Ask Claude to block m1 again. Expect a new occurrence with a new id (`NEW SINCE LAST LOOK: 1 (unacknowledged only)`), a notification for it (it is new, not a repeat), and the earlier one still counted as closed.
+7. **Restart.** Exit session 1 and launch it again with `CONTINUE=1`. Expect the history and your acknowledgment kept and nothing notified again for the acknowledged incident. Its condition reads OPEN if the task came back with the session and UNKNOWN if it did not; it must never read RESOLVED or NO LONGER OPEN unless you unblocked it. Session 2 restarted afterwards should now find the resolution session 1 recorded in step 5 and count that first incident as closed.
+8. **Narrow terminal.** Make a terminal about 40 columns wide and run `/cockpit alerts digest` in either session. Expect no wrapped line, the words `unacked` and `UNKNOWN is not resolved` (or `UNKNOWN ≠ resolved`) intact, and a GUARD row that keeps its label.
+
+What this shows and does not: the records, the host's report that it wrote a notification, and your own observation. It does not show that anyone read a notification, and nothing in the candidate claims it.
 
 ## Review record
 
