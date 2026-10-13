@@ -22,6 +22,8 @@ export type World = {
   telemetryModes: 'ok' | 'denied' | 'wide'
   /** Every $.fs.write fails, as a full disk would. */
   failWrites: boolean
+  /** Every `$.fs.exists` throws, as an unreadable filesystem would. */
+  failExists: boolean
   /** Every `$.ui.notify` the plugin made. */
   notified: { text: string; title: string | undefined }[]
   /** What `$.session.cwd()` answers. */
@@ -186,6 +188,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     telemetryRuns: [],
     telemetryModes: 'ok',
     failWrites: false,
+    failExists: false,
     notified: [],
     cwd: '/work/example',
     gitPrefix: '',
@@ -367,7 +370,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     return { value: { isPlaced: true as const } }
   })
   on('ui.close', () => ({ value: undefined }))
-  on('fs.exists', ($, e) => ({ value: e.path in w.files }))
+  on('fs.exists', ($, e) => { if (w.failExists) throw new Error(`EIO: ${e.path}`); return { value: e.path in w.files } })
   // `stat` answers from the same map the reads come from, so a test that puts a
   // ledger in `files` gets a size that matches what `read` will hand back.
   on('fs.stat', ($, e) => {

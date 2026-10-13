@@ -53,6 +53,7 @@ import { parseStatus, projectOf, filterCommands, activeFilter } from './git'
 import { GIT_SAFE, commitEntries } from './git-integrity'
 import type { CommitEntry, DiskEntry, Measurement } from './git-integrity'
 import { assessCommand } from './guard'
+import { failClosed, guardFailure } from './guard-rules'
 import {
   addedAttribution,
   attributionInCommand,
@@ -114,7 +115,7 @@ import {
 } from './nwho'
 import type { Cursor, Flash, LocalControl, NwhoEvent } from './nwho'
 import { paintCrawler } from './progress-visual'
-import { API_REFUSAL, authLines, authOf, authRows, settingsSources } from './auth'
+import { API_REFUSAL, AUTH_UNREADABLE_REFUSAL, authLines, authOf, authRows, settingsSources } from './auth'
 import {
   EMPTY_ORCHESTRA,
   admitSpawn,
@@ -1571,11 +1572,17 @@ const probeAuth = async ($: EngineInterface, announce: boolean): Promise<void> =
   }
 }
 
-/** Whether the session's requests are refused because it is not on the subscription. */
-const isApiRefused = async ($: EngineInterface): Promise<boolean> => {
-  if (!config.isSubscriptionOnly) return false
-
-  return (await read($, authAtom).catch(() => null))?.mode === 'api'
+/**
+ * The refusal text when the session's requests are refused because it is not on the subscription, else null. An
+ * authentication state that cannot be read is not a pass: with the policy on, the request is refused and says why.
+ */
+const apiRefusal = async ($: EngineInterface): Promise<string | null> => {
+  if (!config.isSubscriptionOnly) return null
+  try {
+    return (await read($, authAtom))?.mode === 'api' ? API_REFUSAL : null
+  } catch {
+    return AUTH_UNREADABLE_REFUSAL
+  }
 }
 
 /**
@@ -2014,7 +2021,8 @@ const attributionDeny = (found: Attribution, where: string): { deny: string } =>
 
 const allowInstructionFile = async ($: EngineInterface, path: string): Promise<{ deny: string } | null> => {
   const absolute = path.startsWith('/') ? path : `${cwd}/${path}`
-  const hasFile = await $.fs.exists(absolute).catch(() => true)
+  // A check that cannot be made is not an answer: it throws, and the guard refuses the call (see `failClosed`).
+  const hasFile = await $.fs.exists(absolute)
   const task = await read($, taskAtom)
   if (hasFile || task?.hasInstructionFileRequest === true) return null
   const name = basename(path)
@@ -2031,33 +2039,70 @@ const allowInstructionFile = async ($: EngineInterface, path: string): Promise<{
   }
 }
 
-/** The guards: a `{ deny }` when the call must not run, else null. */
+/** The guards: a `{ deny }` when the call must not run, else null. Each guard is judged on its own, and a guard that throws refuses. */
 const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } & Record<string, unknown>): Promise<{ deny: string } | null> => {
   if (e.tool === 'Bash') {
+    // a Bash call whose command is not text cannot be judged by any guard, so it is refused, not read as an empty command
+    if ((config.hasAttributionGuard || config.hasGuard) && typeof e['command'] !== 'string') {
+      return { deny: 'Cobalt Cockpit: this Bash call carries no command text the guards can read, so it did not run.' }
+    }
     const command = typeof e['command'] === 'string' ? e['command'] : ''
     if (config.hasAttributionGuard) {
-      const found = attributionInCommand(command)[0]
-      if (found !== undefined) return attributionDeny(found, 'this command')
-      for (const path of instructionFilesWritten(command)) {
-        const refusal = await allowInstructionFile($, path)
-        if (refusal !== null) return refusal
-      }
+      const attribution = await failClosed('attribution', 'Bash', async () => {
+        const found = attributionInCommand(command)[0]
+
+        return found === undefined ? null : attributionDeny(found, 'this command')
+      })
+      if (attribution !== null) return attribution
+      const instruction = await failClosed('instruction-file', 'Bash', async () => {
+        for (const path of instructionFilesWritten(command)) {
+          const refusal = await allowInstructionFile($, path)
+          if (refusal !== null) return refusal
+        }
+
+        return null
+      })
+      if (instruction !== null) return instruction
     }
     if (config.hasGuard) {
-      const findings = assessCommand(command, { cwd, home })
-      if (findings.length > 0 && !(await confirmDestructive($, command, findings, e.agentId !== undefined))) {
-        return {
-          deny: `Cobalt Cockpit: the user did not approve this destructive command (${findings
-            .map(one => one.title)
-            .join(', ')}). It did not run. Do not retry it or reach the same effect another way; ask the user how to proceed.`,
+      return failClosed('destructive-command', 'Bash', async () => {
+        const findings = assessCommand(command, { cwd, home })
+        if (findings.length > 0 && !(await confirmDestructive($, command, findings, e.agentId !== undefined))) {
+          return {
+            deny: `Cobalt Cockpit: the user did not approve this destructive command (${findings
+              .map(one => one.title)
+              .join(', ')}). It did not run. Do not retry it or reach the same effect another way; ask the user how to proceed.`,
+          }
         }
-      }
+
+        return null
+      })
     }
 
     return null
   }
 
-  if (!config.hasAttributionGuard || (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit')) return null
+  if (!config.hasAttributionGuard || (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit' && e.tool !== 'MultiEdit')) return null
+  const attribution = await failClosed('attribution', e.tool, async () => {
+    if (e.tool !== 'MultiEdit') return editGuard($, e)
+    if (!Array.isArray(e['edits'])) throw new TypeError('MultiEdit without a list of edits')
+    for (const one of e['edits'] as Record<string, unknown>[]) {
+      const refusal = await editGuard($, { tool: 'Edit', file_path: e['file_path'], old_string: one['old_string'], new_string: one['new_string'] })
+      if (refusal !== null) return refusal
+    }
+
+    return null
+  })
+  if (attribution !== null || e.tool !== 'Write') return attribution
+
+  return failClosed('instruction-file', e.tool, async () => {
+    const path = String(e['file_path'] ?? '')
+    return path === '' || path.startsWith(`${$.plugin.root}/`) || !isInstructionFile(path) ? null : allowInstructionFile($, path)
+  })
+}
+
+/** The attribution guard over one Edit, Write or NotebookEdit. */
+const editGuard = async ($: EngineInterface, e: { tool: string } & Record<string, unknown>): Promise<{ deny: string } | null> => {
   const path = String(e['file_path'] ?? e['notebook_path'] ?? '')
   // this plugin's own sources and tests spell the patterns out
   if (path === '' || path.startsWith(`${$.plugin.root}/`)) return null
@@ -2066,6 +2111,7 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
   if (e.tool === 'Edit') {
     added = addedAttribution(String(e['old_string'] ?? ''), after)
   } else if (findAttribution(after).length > 0) {
+    // an unreadable file reads as empty, which counts every attribution line as added: the stricter reading
     const before = e.tool === 'Write' ? await $.fs.read(path).catch(() => '') : ''
     added = addedAttribution(before, after)
   }
@@ -2081,8 +2127,6 @@ const guard = async ($: EngineInterface, e: { tool: string; agentId?: string } &
     )
     if (answer !== 'Allow once') return attributionDeny(phrase, `this edit to ${basename(path)}`)
   }
-  if (e.tool === 'Write' && isInstructionFile(path)) return allowInstructionFile($, path)
-
   return null
 }
 
@@ -3814,7 +3858,8 @@ export const register: Register = (on, options) => {
 
       return { drop: `${BLOCK_LINE}. This session is set to use Fable${isAdvisorFable && !isFable(model) ? ' as its advisor' : ''}, which this workflow never runs. Nothing was sent. Switch with /model opus${isAdvisorFable ? ' and turn the advisor off (/advisor)' : ''}.` }
     }
-    if (await isApiRefused($).catch(() => false)) return { drop: API_REFUSAL }
+    const apiDrop = await apiRefusal($)
+    if (apiDrop !== null) return { drop: apiDrop }
     if (!isSupported) return next(e)
     // a task saved before the hold was a field of its own is settled before this prompt can start another task
     await hush(() => reconcileCompletion($))
@@ -3900,7 +3945,8 @@ export const register: Register = (on, options) => {
         return { drop: `${BLOCK_LINE}. This session is set to use Fable, which this workflow never runs. Nothing was sent.` }
       }
     }
-    if (await isApiRefused($).catch(() => false)) return { drop: API_REFUSAL }
+    const apiDrop = await apiRefusal($)
+    if (apiDrop !== null) return { drop: apiDrop }
 
     return next(e)
   })
@@ -3987,8 +4033,9 @@ export const register: Register = (on, options) => {
     if (swarmRefusal) { await ledgerToolEnd($, call, { deny: swarmRefusal }); return { deny: swarmRefusal } }
     if (e.tool === TOOL) { const r = await serveProgress($, call as ProgressInput & { agentId?: string }); await ledgerToolEnd($, call, r); await raiseAlerts($, false); return r }
 
-    // a guard that fails must not take every tool call down with it
-    const refusal = await guard($, call).catch(() => null)
+    // A guard that fails refuses the call it guards (see `failClosed`) and nothing else. This catch is the last net: whatever
+    // escapes the guards is still a refusal, never a pass.
+    const refusal = await guard($, call).catch((error: unknown) => guardFailure('tool', String(e.tool), error))
     if (refusal !== null) { await ledgerToolEnd($, call, refusal); return refusal }
 
     if (config.hasOrchestration && e.agentId && e.tool === 'Bash' && (gitPlan.pin !== undefined || agentInspection(String(call['command'] ?? '')))) {
@@ -4203,8 +4250,9 @@ export const register: Register = (on, options) => {
       return { turnId: e.turnId, index: e.index, answer: BLOCK_LINE, toolUses: [], stopReason: 'end_turn', usage: null }
     }
     // The same for a session that is not on the subscription.
-    if (await isApiRefused($).catch(() => false)) {
-      const text = 'AUTH / API DETECTED'
+    const apiStep = await apiRefusal($)
+    if (apiStep !== null) {
+      const text = apiStep === API_REFUSAL ? 'AUTH / API DETECTED' : 'AUTH / STATE UNREADABLE'
       yield { kind: 'text', index: 0, text }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null }
 
