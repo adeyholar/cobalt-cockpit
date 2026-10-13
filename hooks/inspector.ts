@@ -10,34 +10,22 @@
 // engine applied; a result an agent reported is not a result anyone verified; a task nobody has seen move has no "last activity".
 // What is unknown says so.
 
-import { admissionReason, limitsOf, occupancyOf } from './swarm'
-import type { LedgerAgent, Swarm, SwarmTask } from '../types'
+import { admissionReason, limitsOf, occupancyOf, routingOf } from './swarm'
+import { shortenPaths, shortResource } from './paths'
+import type { LedgerAgent, ModelTier, RouteCounts, Swarm, SwarmTask } from '../types'
+
+export { shortenPaths, shortResource } from './paths'
 
 const UNKNOWN = 'unknown'
 const known = (v: unknown): v is string => typeof v === 'string' && v !== UNKNOWN && v !== ''
 const clip = (text: string, n: number): string => (text.length <= n ? text : `${text.slice(0, Math.max(0, n - 1))}…`)
 const one = (text: string): string => text.replace(/\s+/g, ' ').trim()
-/** Free text written by the commander or an agent, with any path in it cut to its last two segments, as claims are. */
-export const shortenPaths = (text: string): string => text.replace(/(?<![\w:/])(?:~|\.{1,2})?\/(?:[^\s/'"`]+\/)+[^\s/'"`]*/g, m => {
-  const parts = m.split('/').filter(p => p !== '' && p !== '~' && p !== '.' && p !== '..')
-  // a home directory names a person: the name after /home or /Users is never shown, however deep the path
-  if (/^\/(?:home|Users)\//.test(m)) { const rest = parts.slice(2); return rest.length === 0 ? '…/' : `…/${rest.slice(-2).join('/')}` }
-  return parts.length <= 2 ? m : `…/${parts.slice(-2).join('/')}`
-})
-
 /** How long ago, in the coarsest honest unit; null when the clock is behind the moment. */
 export const ageOf = (ms: number): string | null => (ms < 0 ? null : ms < 60_000 ? 'just now' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)}m ago` : ms < 172_800_000 ? `${Math.floor(ms / 3_600_000)}h ago` : `${Math.floor(ms / 86_400_000)}d ago`)
 
 const TERMINAL: readonly string[] = ['completed', 'failed', 'cancelled']
 const isLive = (t: SwarmTask): boolean => t.endedAt === null && !TERMINAL.includes(t.state) && (t.state === 'reserved' || t.state === 'running' || t.agentId !== null || (t.state === 'stalled' && t.startedAt !== null))
 
-/** A resource claim shortened to its last two segments: the claim is the commander's, and a long path is not needed to tell claims apart. */
-export const shortResource = (r: string): string => {
-  if (r === '*') return 'the whole repository'
-  const parts = r.split('/').filter(p => p !== '')
-
-  return parts.length <= 2 ? `/${parts.join('/')}` : `…/${parts.slice(-2).join('/')}`
-}
 const ownsText = (t: SwarmTask, max: number): string => {
   const list = t.owned.map(shortResource)
 
@@ -150,7 +138,55 @@ const activityText = (t: SwarmTask, now: number): string => {
 
   return age === null ? 'observed (time not comparable)' : `last observed ${age}`
 }
+/** One tier's funnel in as many words as the width allows. The six figures are six different facts and are never merged. */
+const routeLine = (tier: ModelTier, c: RouteCounts, columns: number): string =>
+  columns >= 96 ? `ROUTE ${tier} · suggested ${c.suggested} · requested ${c.requested} · admitted ${c.admitted} · spawned ${c.spawned} · completed ${c.completed} · verified ${c.verified}`
+    : columns >= 64 ? `ROUTE ${tier} · sug ${c.suggested} · req ${c.requested} · adm ${c.admitted} · spawn ${c.spawned} · done ${c.completed} · ver ${c.verified}`
+      : `${tier} sug${c.suggested} req${c.requested} adm${c.admitted} spn${c.spawned} done${c.completed} ver${c.verified}`
+const ROUTE_ORDER: readonly ModelTier[] = ['HAIKU', 'SONNET', 'OPUS']
+/** The delegation funnel, one line per tier that has anything to show, then what differs from the suggestion. */
+const routeLines = (s: Swarm, columns: number): string[] => {
+  const { tiers, differing, unrecorded } = routingOf(s)
+  const lines = ROUTE_ORDER.filter(tier => tiers[tier].requested > 0 || tiers[tier].suggested > 0).map(tier => clip(routeLine(tier, tiers[tier], columns), columns))
+  if (differing > 0) lines.push(clip(`  ${differing} assignment${differing === 1 ? ' differs' : 's differ'} from the route's suggestion; the commander's tier stands`, columns))
+  if (unrecorded > 0) lines.push(clip(`  ${unrecorded} task${unrecorded === 1 ? ' carries' : 's carry'} no suggestion (assigned before v0.6.1)`, columns))
+
+  return lines
+}
+const routeText = (t: SwarmTask): string =>
+  t.suggestedTier === undefined ? 'no suggestion recorded (assigned before v0.6.1)'
+    : t.suggestedTier === t.tier ? `${t.tier}, as the route suggested (${t.routeReason ?? 'no reason recorded'})`
+      : `requested ${t.tier}; the route suggested ${t.suggestedTier} (${t.routeReason ?? 'no reason recorded'}). The commander's tier stands`
 const depText = (s: Swarm, t: SwarmTask): string => t.dependencies.map(d => `${d} ${s.tasks.find(x => x.id === d)?.state ?? 'unknown'}`).join(' · ')
+
+/**
+ * The HUD's one line about the swarm, and null when nothing in it needs anyone: tasks that are blocked (admission refused
+ * them: a dependency, a full pool or an ownership conflict), quiet (the swarm's `stalled` mark: no activity observed for
+ * the stall threshold, which is not proof an agent stopped) or escalated (the agent stopped with an unresolved question).
+ * A queued task is assigned and not yet tried: it is not a problem and is not counted. Every figure is recorded state,
+ * read as it is; nothing is timed or inferred here. The widest form that fits is used, and the states stay apart until
+ * only a total fits.
+ */
+export const swarmHint = (s: Swarm, columns: number): string | null => {
+  const count = (state: string): number => s.tasks.filter(t => t.state === state).length
+  const blocked = count('blocked')
+  const quiet = count('stalled')
+  const escalated = count('escalated')
+  const total = blocked + quiet + escalated
+  if (total === 0) return null
+  const threshold = s.config.stallMs >= 60_000 ? `${Math.round(s.config.stallMs / 60_000)}m+` : `${Math.max(1, Math.round(s.config.stallMs / 1000))}s+`
+  const parts = (b: string, q: string, e: string): string => [blocked > 0 ? `${blocked} ${b}` : '', quiet > 0 ? `${quiet} ${q}` : '', escalated > 0 ? `${escalated} ${e}` : ''].filter(p => p !== '').join(' · ')
+  const where = ' · /cockpit agents'
+  const forms = [
+    `SWARM: ${parts('BLOCKED', `QUIET ${threshold}`, 'ESCALATED')}${where}`,
+    `SWARM: ${parts('BLOCKED', 'QUIET', 'ESCALATED')}${where}`,
+    `SWARM: ${parts('BLK', 'QUIET', 'ESC')}${where}`,
+    `SWARM: ${total} ATTN${where}`,
+    `SWARM: ${total} ATTN`,
+  ]
+
+  return forms.find(form => form.length <= columns) ?? clip(forms[forms.length - 1] as string, Math.max(1, columns))
+}
 
 export type AgentsView = { swarm: Swarm; agents: readonly LedgerAgent[]; now: number; columns: number }
 
@@ -165,10 +201,12 @@ export const agentsText = (v: AgentsView): string => {
   const waiting = count('queued') + count('blocked')
   const head = columns >= 90
     ? `AGENTS · wave ${s.wave} · ${used.total} active · ${waiting} waiting · ${count('stalled')} stalled · ${count('escalated')} escalated · ${count('completed')} completed of ${s.tasks.length}`
-    : `AGENTS · ${used.total} active · ${waiting} waiting · ${count('stalled') + count('escalated')} stuck · ${count('completed')}/${s.tasks.length} done · ${s.wave}`
+    // a stalled mark is silence, not a stopped agent, so it is never merged into a word that says more
+    : `AGENTS · ${used.total} active · ${waiting} waiting · ${count('stalled')} stalled · ${count('escalated')} esc · ${count('completed')}/${s.tasks.length} done · ${s.wave}`
   const lines = [clip(head, columns)]
   lines.push(clip(`CAPACITY · ${used.counted} of ${lim.total} slots · SONNET ${used.sonnet}/${lim.sonnet} · HAIKU ${used.haiku}/${lim.haiku}${lim.opus > 0 ? ` · OPUS ${used.opus}/${lim.opus}` : ' · OPUS in the main loop'}${s.conflicts > 0 ? ` · ${s.conflicts} ownership conflict${s.conflicts === 1 ? '' : 's'} recorded` : ''}`, columns))
   if (s.tasks.length === 0) lines.push('No tasks assigned in this session. The commander assigns work with the swarm tool; Cockpit invents none.')
+  lines.push(...routeLines(s, columns))
   const sorted = [...s.tasks].sort(byAttention)
   for (const t of sorted.slice(0, MAX_LISTED)) {
     const blocker = blockerOf(s, t, now)
@@ -179,7 +217,7 @@ export const agentsText = (v: AgentsView): string => {
     if (blocker !== null && blocker.kind !== 'unverified') lines.push(clip(`    ↳ ${blocker.why}`, columns))
     else if (blocker !== null && wide) lines.push(clip(`    ↳ ${outcomeText(t)}`, columns))
   }
-  if (sorted.length > MAX_LISTED) lines.push(`  +${sorted.length - MAX_LISTED} more (${sorted.slice(MAX_LISTED).filter(t => t.state === 'completed').length} completed); /cockpit agents <task> shows any one`)
+  if (sorted.length > MAX_LISTED) lines.push(clip(`  +${sorted.length - MAX_LISTED} more (${sorted.slice(MAX_LISTED).filter(t => t.state === 'completed').length} completed); /cockpit agents <task> shows any one`, columns))
   const bound = new Set(s.tasks.map(t => t.agentId).filter((x): x is string => x !== null))
   const untracked = v.agents.filter(a => !bound.has(a.id))
   if (untracked.length > 0) {
@@ -206,6 +244,7 @@ export const taskText = (v: AgentsView, wanted: string): string => {
   lines.push(clip(`objective: ${clip(shortenPaths(one(t.objective)), 120)}`, columns))
   lines.push(clip(`agent: ${t.agentId === null ? 'none bound' : `${t.agentId.slice(0, 8)}… · ${a === undefined ? 'not in the Ledger' : `host status ${a.status}`}`}`, columns))
   lines.push(clip(`model: ${modelText(t, a)}`, columns))
+  lines.push(clip(`route: ${routeText(t)}`, columns))
   lines.push(clip(`effort: ${effortText(t, a)}`, columns))
   lines.push(clip(`wave: ${t.wave}${t.wave === s.wave ? '' : ` (the swarm is in ${s.wave})`}${t.parentTask === null ? '' : ` · parent ${t.parentTask}`}`, columns))
   lines.push(clip(`owns: ${ownsText(t, 4)}`, columns))

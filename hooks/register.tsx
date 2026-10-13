@@ -10,7 +10,7 @@
 
 import { emptySwarm, configureSwarm, submitTask, admitTask, bindAgent, finishTask, resolveEscalation, setWave, escalateTask, verifyTask, reportResult, acknowledgeHandback, requestCancel, releaseReservation, summarizeSwarm, markStalled, heartbeat, normalizeOwned, overlaps, ownershipAllows, setAppliedEffort, setLaunchEffort, SONNET_LED_SWARM } from './swarm'
 import type { Swarm, SwarmTask, ModelTier, Wave, Verification } from './swarm'
-import { agentsText, taskText } from './inspector'
+import { agentsText, shortResource, swarmHint, taskText } from './inspector'
 import { readyText } from './readiness'
 import { textOf } from './ledger'
 import { atom, read, update } from 'claude-code'
@@ -69,7 +69,9 @@ import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
 import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
 import type { Cue, ProgressInput } from './model'
-import { basename, parseShell, unwrap } from './shell'
+import { basename } from './shell'
+import { agentInspection, readOnlyShell, rebuildGit, scopedGit, SCOPED_FORM } from './git-inspect'
+import type { ScopedPin } from './git-inspect'
 import { COLORS, fit, heading, hudRows, paneRows, visualStateOf } from './view'
 import {
   FOLD_MS,
@@ -234,14 +236,15 @@ const SWARM_TOOL = {
   }, required: ['action'] },
 } as const
 // Canonicalize both assignment and use. Unknown aliases conservatively lock all.
-const canonicalResource = async ($: EngineInterface, path: string): Promise<string> => {
+const canonicalIn = async ($: EngineInterface, base: string, path: string): Promise<string> => {
   // `~` is the engine's to expand, not a directory under cwd: it is unknown, so everything.
   if (!path || /[*?\[\]{}]/.test(path) || path.startsWith('~')) return '*'
   try {
-    const r = await $.process.run(['realpath','-m','--', path.startsWith('/') ? path : `${cwd}/${path}`], { timeoutMs: 2000 })
+    const r = await $.process.run(['realpath','-m','--', path.startsWith('/') ? path : `${base}/${path}`], { timeoutMs: 2000 })
     return r.exitCode === 0 && !r.isStdoutTruncated ? normalizeOwned(r.stdout.trim()) : '*'
   } catch { return '*' }
 }
+const canonicalResource = async ($: EngineInterface, path: string): Promise<string> => canonicalIn($, cwd, path)
 const swarmState = (l: Ledger): Swarm => l.swarm ?? emptySwarm()
 const changeSwarm = async ($: EngineInterface, f: (s: Swarm) => Swarm): Promise<Swarm> => {
   const l = await update($, ledgerAtom, old => ({ ...old, schema: 2 as const, swarm: f(swarmState(old)) }))
@@ -265,7 +268,7 @@ const finishObserved = (s: Swarm, id: string, reason: string, conclusion: string
 type Candidate = { sha: string } | { sha: null; why: 'dirty' | 'unknown' }
 /** Match Git's root + relative prefix to the actual session directory. A linked worktree or a session
  * below the root is valid; core.worktree / environment redirection to a different directory is not. */
-const verifiedGitRoot = async ($: EngineInterface): Promise<string | null> => {
+const verifiedGitPlace = async ($: EngineInterface): Promise<{ root: string; dir: string } | null> => {
   const intended = await $.session.cwd()
   if (!intended) return null
   const top = await $.process.run(['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd: intended, timeoutMs: GIT_TIMEOUT_MS })
@@ -278,7 +281,12 @@ const verifiedGitRoot = async ($: EngineInterface): Promise<string | null> => {
   const reported = await $.process.run(['realpath', '-e', '--', `${root}/${relative}`], { timeoutMs: GIT_TIMEOUT_MS })
   if (actual.exitCode !== 0 || reported.exitCode !== 0 || actual.isStdoutTruncated || reported.isStdoutTruncated || actual.isStderrTruncated || reported.isStderrTruncated || actual.stderr.trim() !== '' || reported.stderr.trim() !== '') return null
   const canonical = (value: string) => value.replace(/\n$/, '').replace(/\/+$/, '') || '/'
-  return canonical(actual.stdout) === canonical(reported.stdout) ? root : null
+  return canonical(actual.stdout) === canonical(reported.stdout) ? { root, dir: intended } : null
+}
+const verifiedGitRoot = async ($: EngineInterface): Promise<string | null> => {
+  const place = await verifiedGitPlace($)
+
+  return place === null ? null : place.root
 }
 /** Check attributes before status/diff can run a repository-controlled clean/process command. The effective
  * command value wins; dormant filters (for example globally installed LFS) do not make ordinary trees unknown. */
@@ -595,7 +603,7 @@ const serveSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
     if (agent && (!task || task.agentId !== agent || !['result','escalate','status'].includes(action))) throw new Error('Only commander assigns, verifies, cancels or changes waves; agents report their own task only')
     if (action === 'status') {
       const selected = id ? s.tasks.filter(t=>t.id===id) : [...s.tasks.filter(t=>!['completed','failed','cancelled'].includes(t.state)), ...s.tasks.filter(t=>['completed','failed','cancelled'].includes(t.state)).slice(-8)].slice(0,32)
-      return { result: JSON.stringify({ ...summarizeSwarm(s), tasks: selected.map(t => ({ id:t.id, tier:t.tier, role:t.role, state:t.state, reason:t.reason, agent:t.agentId, effort:t.requestedEffort, launchEffort:t.launchEffort ?? null, appliedEffort:t.appliedEffort, effortReason:t.effortReason, result:t.result ? { conclusion:t.result.conclusion.slice(0,160), evidence:t.result.evidence.slice(0,3).map(x=>x.slice(0,160)), unresolved:t.result.unresolved.slice(0,3).map(x=>x.slice(0,160)) } : null, escalation:t.escalation ? { to:t.escalation.to, effort:t.escalation.effort ?? null, question:t.escalation.question.slice(0,160), risk:t.escalation.risk.slice(0,160) } : null, verification:t.verification, resultDelivery:t.resultDelivery ?? 'unavailable' })) }) }
+      return { result: JSON.stringify({ ...summarizeSwarm(s), tasks: selected.map(t => ({ id:t.id, tier:t.tier, suggested:t.suggestedTier ?? null, role:t.role, state:t.state, reason:t.reason, agent:t.agentId, effort:t.requestedEffort, launchEffort:t.launchEffort ?? null, appliedEffort:t.appliedEffort, effortReason:t.effortReason, result:t.result ? { conclusion:t.result.conclusion.slice(0,160), evidence:t.result.evidence.slice(0,3).map(x=>x.slice(0,160)), unresolved:t.result.unresolved.slice(0,3).map(x=>x.slice(0,160)) } : null, escalation:t.escalation ? { to:t.escalation.to, effort:t.escalation.effort ?? null, question:t.escalation.question.slice(0,160), risk:t.escalation.risk.slice(0,160) } : null, verification:t.verification, resultDelivery:t.resultDelivery ?? 'unavailable' })) }) }
     }
     if (action === 'assign') {
       if (typeof e['objective'] !== 'string' || !e['objective'].trim()) throw new Error('Bounded objective required')
@@ -604,7 +612,9 @@ const serveSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
       const owned = await Promise.all(list('owned_resources').map(p => canonicalResource($, p)))
       const assignedSwarm = await changeSwarm($, held => { const submitted = submitTask(held, { id, tier: e['tier'] as ModelTier, role: str('role'), objective: str('objective'), scope: str('scope'), dependencies:list('dependencies'), owned, mode: e['mode'] === 'write' ? 'write' : 'read', parentTask: typeof e['parent_task'] === 'string' ? e['parent_task'] : null, spawnReason: str('spawn_reason'), ...(isEffortRequest(e['effort']) ? { effort: e['effort'] } : {}), ...(typeof e['effort_reason'] === 'string' ? { effortReason: str('effort_reason') } : {}) }, at).swarm; if (jsonBytes(submitted.tasks.map(t=>({ ...t,result:null,escalation:null }))) > 192_000) throw new Error('Ownership metadata storage budget reached; finish/archive work before assigning more'); return submitted })
       const assigned = assignedSwarm.tasks.find(t => t.id === id)
-      return { result: assigned ? `Task ${id} ${assigned.state}; use Agent description [task:${id}]. OPUS tasks stay in main.` : 'Duplicate suppressed; see swarm status for existing task.' }
+      // the route's reading of the assignment is advice beside the commander's choice: it changes no tier and starts nothing
+      const advice = assigned && assigned.suggestedTier !== undefined && assigned.suggestedTier !== assigned.tier ? ` ROUTE / ${assigned.suggestedTier} suggested (${assigned.routeReason ?? 'no reason recorded'}); ${assigned.tier} kept as assigned. The choice is yours: cancel and assign again to change the tier.` : ''
+      return { result: assigned ? `Task ${id} ${assigned.state}; use Agent description [task:${id}]. OPUS tasks stay in main.${advice}` : 'Duplicate suppressed; see swarm status for existing task.' }
     }
     if (action === 'consult') { const reply = await serveConsult($, e, at); await persist($); return { result: reply } }
     if (action === 'wave') { if (!['RECONNAISSANCE','ENGINEERING','REVIEW','INTEGRATION','VERIFICATION'].includes(String(e['wave']))) throw new Error('Valid wave required'); await changeSwarm($, held => setWave(held, e['wave'] as Wave, at)) }
@@ -665,31 +675,41 @@ const serveSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
     return { result: `Swarm ${action} recorded; host completion and commander verification remain distinct.` }
   } catch (error) { return { result: `SWARM / ${error instanceof Error ? error.message : 'invalid input'}`, isError: true } }
 }
-// Bounded inspection shell compatibility. No substitutions, redirects, wrappers,
-// output flags or arbitrary commands; scoped writes still require Edit/Write.
-const readOnlyShell = (command: string): boolean => {
-  if (/[<>`\n]/.test(command) || command.includes('$') || /--(?:output|ext-diff|textconv)|--no-index/.test(command)) return false
+// Read-only Git inspection for subagents. The two rules are in ./git-inspect (pure); what needs the host is here: the
+// verified repository, canonical paths checked against the task's ownership, and proof that each revision is a commit.
+const GIT_IDENTITY_DENY = 'SWARM / read-only Git inspection cannot establish safe repository identity and filter configuration; use the host Read/Grep tools instead'
+const SEARCH_HINT = ' To search or list inside your scope: git grep -n <pattern> -- <path>, git ls-files -- <path>; to read a file: the Read tool.'
+type GitPlan = { pin?: ScopedPin; root?: string }
+const ownedText = (task: SwarmTask): string => `${task.owned.slice(0, 4).map(shortResource).join(', ')}${task.owned.length > 4 ? ` +${task.owned.length - 4}` : ''}`
+/**
+ * A narrowly scoped task's Git inspection: accepted only when the command has the allowed shape, every path it names is
+ * inside the task's owned resources, and every revision is a commit (so none addresses a tree or a file). Nothing is
+ * widened: a path outside the scope is refused with the scope named, and the commander is the one who can change it.
+ */
+const scopedGitPlan = async ($: EngineInterface, s: Swarm, task: SwarmTask, command: string): Promise<{ pin: ScopedPin; root: string } | { deny: string; isGit: boolean }> => {
+  const vetted = scopedGit(command)
+  if (!vetted.ok) return { deny: `SWARM / ${vetted.reason}. Owned: ${ownedText(task)}.`, isGit: vetted.isGit }
   try {
-    const parsed = parseShell(command)
-    if (!parsed.pipelines.length || parsed.substitutions.length) return false
-    return parsed.pipelines.every(p => p.commands.every(c => {
-      const r = unwrap(c.argv)
-      return !!r && r.program === 'git' && ['diff','status','log','show','ls-files','rev-parse','grep'].includes(r.args[0] ?? '') && !r.args.some(a=>a.includes('%G') || (a.startsWith('--') && ['--show-signature', '--pretty', '--format'].some(option => option.startsWith(a.split('=')[0]!))) || a === '-c' || a.startsWith('--output') || a === '--exec' || a === '--help' || a === '-h' || a.startsWith('--open') || a.startsWith('-O') || a.startsWith('--out') || a.startsWith('--ext') || a.startsWith('--text')) && r.wrappers.length === 0 && c.argv[0] === 'git'
-    }))
-  } catch { return false }
-}
-/** Rebuild accepted literal Git inspections so quoted arguments stay data and every invocation carries safe flags. */
-const safeGitInspection = (command: string): string => {
-  const quote = (word: string) => `'${word.replace(/'/g, "'\\''")}'`
-  return parseShell(command).pipelines.map(p => {
-    const pipeline = p.commands.map(c => {
-      const args = c.argv.slice(1)
-      const sub = args.shift()!
-      const noDrivers = ['diff', 'show', 'log'].includes(sub) ? ['--no-ext-diff', '--no-textconv'] : []
-      return ['git', '--no-pager', ...GIT_SAFE, sub, ...noDrivers, ...args].map(quote).join(' ')
-    }).join(' | ')
-    return pipeline + (p.next === null ? '' : ` ${p.next} `)
-  }).join('')
+    const place = await verifiedGitPlace($)
+    if (place === null) return { deny: GIT_IDENTITY_DENY, isGit: true }
+    const outside = (shown: string): { deny: string; isGit: boolean } => ({ deny: `SWARM / read outside owned resources: ${shown} is not inside this task's scope (owned: ${ownedText(task)}). A read-only Git command does not widen a scope; ask the commander to assign the path.`, isGit: true })
+    const paths: string[] = []
+    for (const path of vetted.git.paths) {
+      const canonical = await canonicalIn($, place.dir, path)
+      if (canonical === '*' || !ownershipAllows(s, task.id, canonical, 'read')) return outside(canonical === '*' ? 'a path that could not be resolved' : shortResource(canonical))
+      paths.push(canonical)
+    }
+    for (const object of vetted.git.objects) {
+      const canonical = await canonicalIn($, place.root, object.path)
+      if (canonical === '*' || !ownershipAllows(s, task.id, canonical, 'read')) return outside(canonical === '*' ? 'a path that could not be resolved' : shortResource(canonical))
+    }
+    for (const name of vetted.git.commits) {
+      const peeled = await $.process.run(['git', ...GIT_SAFE, '-C', place.dir, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`], { timeoutMs: GIT_TIMEOUT_MS })
+      if (!gitAnswered(peeled) || hashesOf(peeled.stdout, 1) === null) return { deny: `SWARM / "${name.slice(0, 60)}" does not name a commit here. Under a narrow scope a revision must be a branch, tag or commit id that resolves to a commit; a tree, a file or an unknown name is refused.`, isGit: true }
+    }
+
+    return { pin: { git: vetted.git, dir: place.dir, paths }, root: place.root }
+  } catch { return { deny: GIT_IDENTITY_DENY, isGit: true } }
 }
 /**
  * Sets the reasoning level on an Agent call natively, on the tool's own
@@ -757,7 +777,7 @@ const taskOfAgent = async ($: EngineInterface, agentId: string): Promise<SwarmTa
 
   return id === undefined ? undefined : tasks.find(t => t.id === id && t.agentId === null && !['completed', 'failed', 'cancelled'].includes(t.state))
 }
-const guardSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promise<string | null> => {
+const guardSwarm = async ($: EngineInterface, e: Record<string, unknown>, plan: GitPlan = {}): Promise<string | null> => {
   if (!config.hasOrchestration) return null
   const agent = typeof e['agentId'] === 'string' ? e['agentId'] : undefined
   const s = swarmState(await read($, ledgerAtom)), task = s.tasks.find(t => t.agentId === agent && agent !== undefined)
@@ -774,8 +794,18 @@ const guardSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
   if (agent && (tool === 'Agent' || tool === 'Task')) return 'SWARM / only commander delegates; escalate instead'
   const write = ['Edit','Write','MultiEdit','NotebookEdit'].includes(tool)
   if (!agent && ['Agent','Task','TaskOutput','TaskStop','SendMessage'].includes(tool)) return null
-  const readTool = ['Read','Grep','Glob','WebFetch','WebSearch'].includes(tool) || (tool === 'Bash' && readOnlyShell(String(e['command'] ?? '')))
-  if (task && task.mode === 'read' && !readTool) return 'SWARM / read-only tasks may use inspection tools only; shell/custom effects require commander investigation'
+  const command = tool === 'Bash' ? String(e['command'] ?? '') : ''
+  // A task with named paths, not `*`: its shell is read-only Git inspection of those paths and nothing else.
+  const isScopedShell = task !== undefined && tool === 'Bash' && !task.owned.includes('*')
+  if (task !== undefined && isScopedShell) {
+    const scoped = await scopedGitPlan($, s, task, command)
+    if ('pin' in scoped) { plan.pin = scoped.pin; plan.root = scoped.root }
+    // a Git inspection this scope cannot run is told exactly why; any other command meets the rules below
+    else if (scoped.isGit) return scoped.deny
+  }
+  // a subagent's inspection is rebuilt before it runs, so quoted text in it is data; the commander's runs as typed
+  const readTool = ['Read','Grep','Glob','WebFetch','WebSearch'].includes(tool) || plan.pin !== undefined || (tool === 'Bash' && !isScopedShell && (agent ? agentInspection(command) : readOnlyShell(command)))
+  if (task && task.mode === 'read' && !readTool) return `SWARM / read-only tasks may use inspection tools only; shell/custom effects require commander investigation.${SEARCH_HINT}`
   if (task && ['Read','Grep','Glob'].includes(tool)) {
     // Grep and Glob without a path search the working directory: that is the claim checked, not everything.
     const path = String(e['file_path'] ?? e['path'] ?? (tool !== 'Read' && cwd ? cwd : '*'))
@@ -785,7 +815,7 @@ const guardSwarm = async ($: EngineInterface, e: Record<string, unknown>): Promi
     const resource = await canonicalResource($, path)
     if (!ownershipAllows(s, task.id, resource, 'read')) return 'SWARM / read outside owned resources'
   }
-  if (task && tool === 'Bash' && !task.owned.includes('*')) return 'SWARM / shell inspection requires declared wildcard read scope'
+  if (isScopedShell && plan.pin === undefined) return `SWARM / shell inspection requires declared wildcard read scope; under a narrow scope the shell runs only read-only Git inspection of owned paths (${SCOPED_FORM})`
   if (write) {
     const paths = tool === 'MultiEdit' && Array.isArray(e['edits']) ? (e['edits'] as Record<string,unknown>[]).map(x=>String(x['file_path'] ?? e['file_path'] ?? '')) : [String(e['file_path'] ?? e['notebook_path'] ?? '')]
     for (const path of paths) {
@@ -3936,7 +3966,8 @@ export const register: Register = (on, options) => {
     try {
     await ledgerToolStart($, call)
     if (String(e.tool) === SWARM_TOOL_NAME) { const r = await serveSwarm($, call); await ledgerToolEnd($, call, r); await raiseAlerts($, false); return r }
-    const swarmRefusal = await guardSwarm($, call)
+    const gitPlan: GitPlan = {}
+    const swarmRefusal = await guardSwarm($, call, gitPlan)
     if (swarmRefusal) { await ledgerToolEnd($, call, { deny: swarmRefusal }); return { deny: swarmRefusal } }
     if (e.tool === TOOL) { const r = await serveProgress($, call as ProgressInput & { agentId?: string }); await ledgerToolEnd($, call, r); await raiseAlerts($, false); return r }
 
@@ -3944,14 +3975,16 @@ export const register: Register = (on, options) => {
     const refusal = await guard($, call).catch(() => null)
     if (refusal !== null) { await ledgerToolEnd($, call, refusal); return refusal }
 
-    if (config.hasOrchestration && e.agentId && e.tool === 'Bash' && readOnlyShell(String(call['command'] ?? ''))) {
-      const root = await verifiedGitRoot($)
+    if (config.hasOrchestration && e.agentId && e.tool === 'Bash' && (gitPlan.pin !== undefined || agentInspection(String(call['command'] ?? '')))) {
+      // a scoped command's repository was verified when its paths were checked; a wildcard one's is verified here
+      const root = gitPlan.root ?? await verifiedGitRoot($)
       if (root === null || !(await gitFiltersReliable($, root))) {
-        const deny = 'SWARM / read-only Git inspection cannot establish safe repository identity and filter configuration; use the host Read/Grep tools instead'
+        const deny = GIT_IDENTITY_DENY
         await ledgerToolEnd($, call, { deny })
         return { deny }
       }
-      (call as Record<string, unknown>)['command'] = safeGitInspection(String(call['command']))
+      // what runs is never the text the agent typed: every word is quoted again behind the safe flags
+      (call as Record<string, unknown>)['command'] = rebuildGit(String(call['command']), gitPlan.pin)
     }
     // A subagent's reasoning level goes on its own Agent call: the engine's
     // native, per-invocation setting, so nothing global moves under a sibling.
@@ -4760,6 +4793,8 @@ export const register: Register = (on, options) => {
         try { version = /"version"\s*:\s*"([^"]+)"/.exec(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))?.[1] ?? UNKNOWN } catch { /* manifest unreadable: version stays unknown */ }
         const observed = Object.entries(await read($, effortKnownAtom))
         const model = await $.session.model().catch(() => '')
+        // the path is the point of this line, so it stays whole but for a personal directory's name
+        const sourceHome = (await $.env.get('HOME').catch(() => undefined)) ?? null
         const meter = await read($, meterAtom)
         // What AUTO would name for the commander is advice only, and only when
         // no selection of the person's was seen: the level stays the host's.
@@ -4770,7 +4805,7 @@ export const register: Register = (on, options) => {
         return {
           text: [
             `PLUGIN / ${$.plugin.name} ${version}`,
-            `SOURCE / ${$.plugin.root}`,
+            `SOURCE / ${shownPath($.plugin.root, sourceHome)}`,
             `SESSION MODEL / ${model === '' ? UNKNOWN : model}`,
             ...(config.hasOrchestration ? [`PROFILE / ${config.profile}${isSonnetLed() ? ` · main ${AGENT_MODEL} · Opus on admission · budget ${config.maxSubagents} (Sonnet ${String(config.maxSonnet)} · Haiku ${String(config.maxHaiku)} · Opus 1)` : ` · main ${MAIN_MODEL}`}`] : []),
             `ROUTER / ${routerLine(await read($, routerAtom))}`,
@@ -4834,7 +4869,11 @@ export const register: Register = (on, options) => {
     const flowInput = flowInputOf(input, session.agents, e.props.isWorking)
     const flowWidth = e.props.bodyColumns
     const flowWanted = config.hasFlow && input.task !== null && e.props.maxRows >= 4 && flowLayout(flowWidth) !== null
-    const room = Math.max(0, e.props.maxRows - 1 - (layout.columns >= 44 ? 1 : 0) - (flowWanted ? 1 : 0))
+    // The swarm's recorded state, from the Ledger this render reads anyway: no timer, no poll, no new subscription. One
+    // static line, only while a task is blocked, quiet or escalated, paid for out of the strips' rows like the crew line.
+    const runLedger = await read($, ledgerAtom)
+    const swarmNote = e.props.maxRows >= 2 ? swarmHint(swarmState(runLedger), layout.columns) : null
+    const room = Math.max(0, e.props.maxRows - 1 - (layout.columns >= 44 ? 1 : 0) - (flowWanted ? 1 : 0) - (swarmNote === null ? 0 : 1))
     // The orchestration line sits above the strips and is paid for out of their
     // rows, so the band is never taller for it; with one row to spare the strips
     // keep it and the line is left out.
@@ -4883,7 +4922,6 @@ export const register: Register = (on, options) => {
     // derived from what the host really reported, so the field and the rail can
     // never disagree about what is happening.
     const control = await read($, controlAtom)
-    const runLedger = await read($, ledgerAtom)
     const graph: Graph | null = orchestrationGraph(runLedger, now) ?? graphOf(control.lastPrune, control.lastDecision)
     const tape = orchestrationTape(runLedger, e.props.bodyColumns, now) ?? tapeOf(liveOf(await read($, eventsAtom), now), e.props.bodyColumns)
     const fieldRowsWanted = fieldRowsOf(tape, graph, now, EVENT_TTL_MS)
@@ -4939,6 +4977,7 @@ export const register: Register = (on, options) => {
     const guardLine = guardText1 === null ? null : pinned === null || pinned.level === 'INFO'
       ? <Text key="guard" dimColor wrap="truncate-end">{guardText1}</Text>
       : <Text key="guard" color={pinned.level === 'CRITICAL' ? COLORS.bad : COLORS.warn} bold={pinned.level !== 'NORMAL'} wrap="truncate-end">{guardText1}</Text>
+    const swarmLine = swarmNote === null ? null : <Text key="swarm-hint" color={COLORS.warn} wrap="truncate-end">{swarmNote}</Text>
     const startupRows: Row[] = startup.active && layout.columns >= 44 ? [[{ text: startup.line, color: COLORS.steel, isBold: true }]] : []
     let rail: RenderElement
     if (e.surface === 'terminal' && Raster) {
@@ -4997,6 +5036,7 @@ export const register: Register = (on, options) => {
           ))}
           {flowEl}
           {guardLine}
+          {swarmLine}
         </Box>
       )
     }
@@ -5020,6 +5060,7 @@ export const register: Register = (on, options) => {
         {secondary && e.props.maxRows > 1 ? <Text dimColor wrap="truncate-end">{secondary}</Text> : null}
         {flowEl}
         {guardLine}
+        {swarmLine}
         {startupRows.map((row, at) => (
           <Text key={`startup-${at}`} wrap="truncate-end">
             {row.map((segment, n) => (

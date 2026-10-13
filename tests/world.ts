@@ -96,6 +96,8 @@ export type World = {
   head: string
   /** The work tree git reports for `rev-parse --show-toplevel`. */
   top: string
+  /** Names that do not resolve to a commit: `rev-parse --verify <name>^{commit}` fails for each (a tree, a blob, an unknown name). */
+  nonCommits: string[]
   gitPrefix: string
   gitFilterConfig: string
   gitFilterAttributes: string
@@ -220,6 +222,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     tree: {},
     head: 'a'.repeat(40),
     top: '/work/example',
+    nonCommits: [],
     statusHidden: false,
     statusWarning: '',
     statusStderrTruncated: false,
@@ -439,6 +442,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       if (git[0] === 'config') return git.includes('--get-regexp') && w.gitFilterConfig !== '' ? ran(0, w.gitFilterConfig) : w.gitConfig[git.at(-1)!] !== undefined ? ran(0, w.gitConfig[git.at(-1)!] + '\n') : ran(1)
       if (git[0] === 'check-attr') return ran(0, w.gitFilterAttributes)
       if (git[0] === 'rev-parse' && git.includes('--show-prefix')) return ran(0, w.gitPrefix + '\n')
+      if (git[0] === 'rev-parse' && git.includes('--verify') && w.nonCommits.some(name => git.at(-1) === `${name}^{commit}`)) return ran(1)
       if (git[0] === 'rev-parse') return ran(0, git.includes('--verify') ? `${w.head}\n` : `${w.top}\n`)
       if (git[0] === 'diff') {
         // like git, `diff` does not see a path the index is told to ignore (assume-unchanged: lowercase tag; skip-worktree: S)

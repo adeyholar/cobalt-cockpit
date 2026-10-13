@@ -4,6 +4,7 @@
 // of any setting but the one prompt-cache TTL. Home directories are shown as ~.
 // What the host does not tell a plugin is reported as UNKNOWN, not guessed.
 
+import { withoutHomeName } from './paths'
 import { RESTART_TEXT, recommendation, sourceText } from './cache'
 import type { Agents, CacheReading } from './cache'
 
@@ -48,7 +49,8 @@ export type StopFacts = {
 type Level = 'OK' | 'WARN' | 'INFO'
 const line = (level: Level, text: string): string => `  ${level.padEnd(4)} ${text}`
 
-export const shown = (path: string, home: string | null): string => (home !== null && home !== '' && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path)
+/** A path for a diagnostic: relative to the session's own home where it is inside it, and otherwise whole but for a personal directory's name. */
+export const shown = (path: string, home: string | null): string => (home !== null && home !== '' && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : withoutHomeName(path))
 const within = (path: string, parent: string): boolean => path === parent || path.startsWith(`${parent.replace(/\/+$/, '')}/`)
 
 /** The installation checks, as findings (WARN is something the owner may want to act on). */

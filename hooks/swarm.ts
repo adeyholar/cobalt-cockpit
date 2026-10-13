@@ -2,9 +2,9 @@
  * reserves ownership first and never calls a model or a local-control writer.
  * Resource limits are configurable safety budgets, not a product agent ceiling.
  */
-import type { EffortLevel, ModelTier, Wave, TaskState, Verification, SwarmResult, Handoff, SwarmTask, SwarmEvent, SwarmConfig, Swarm, TaskInput } from '../types'
+import type { EffortLevel, EffortRequest, ModelTier, RouteCounts, Wave, TaskState, Verification, SwarmResult, Handoff, SwarmTask, SwarmEvent, SwarmConfig, Swarm, TaskInput } from '../types'
 export type { ModelTier, Wave, TaskState, Verification, SwarmResult, Handoff, SwarmTask, SwarmEvent, SwarmConfig, Swarm, TaskInput } from '../types'
-import { BASE_EFFORT, effortEscalation, isEffortLevel } from './effort'
+import { BASE_EFFORT, effortEscalation, effortRank, factsFromRole, isEffortLevel } from './effort'
 import { redactSecrets } from './secrets'
 export const DEFAULT_SWARM_CONFIG: SwarmConfig = { sonnet: 'AUTO', haiku: 'AUTO', total: 'AUTO', opus: 0, maxTasks: 512, maxEvents: 256, stallMs: 300_000 }
 /** SONNET_LED's conservative budget: four helpers in all, two Sonnet, two Haiku and one Opus within them. */
@@ -57,8 +57,9 @@ export const submitTask = (s: Swarm, raw: TaskInput, at: number): { swarm: Swarm
   if (s.tasks.length >= s.config.maxTasks) throw new Error('Task storage budget reached; archive this run before adding work')
   if (cycle(s, input)) throw new Error('Task dependency cycle')
   if (input.parentTask && !s.tasks.some(t => t.id === input.parentTask && !terminal(t))) throw new Error('Parent task missing or terminal')
-  const task: SwarmTask = { ...input, parentTask: input.parentTask ?? null, parentAgent: input.parentAgent ?? null, agentId: null, scope: input.scope ?? '', dependencies: [...new Set(input.dependencies ?? [])], owned, mode: input.mode ?? 'read', wave: input.wave ?? s.wave, spawnReason: input.spawnReason ?? 'Commander bounded assignment', requestedEffort: input.effort ?? 'AUTO', effortReason: input.effortReason ?? (input.effort !== undefined && input.effort !== 'AUTO' ? `named by the commander (${input.effort})` : 'AUTO: chosen from the task'), appliedEffort: null, launchEffort: null, effortEscalation: null, state: 'queued', cancellationRequested: false, escalation: null, result: null, verification: 'pending', createdAt: at, startedAt: null, endedAt: null, lastActivityAt: at, reason: null }
-  const swarm = event({ ...s, tasks: [...s.tasks, task], requested: s.requested + 1 }, 'assignment', task.id, at, `${task.tier} ${task.role}: ${task.spawnReason}`)
+  const route = suggestRoute({ tier: input.tier, role: input.role, mode: input.mode ?? 'read', effort: input.effort ?? 'AUTO', wave: input.wave ?? s.wave })
+  const task: SwarmTask = { ...input, suggestedTier: route.tier, routeReason: route.reason, parentTask: input.parentTask ?? null, parentAgent: input.parentAgent ?? null, agentId: null, scope: input.scope ?? '', dependencies: [...new Set(input.dependencies ?? [])], owned, mode: input.mode ?? 'read', wave: input.wave ?? s.wave, spawnReason: input.spawnReason ?? 'Commander bounded assignment', requestedEffort: input.effort ?? 'AUTO', effortReason: input.effortReason ?? (input.effort !== undefined && input.effort !== 'AUTO' ? `named by the commander (${input.effort})` : 'AUTO: chosen from the task'), appliedEffort: null, launchEffort: null, effortEscalation: null, state: 'queued', cancellationRequested: false, escalation: null, result: null, verification: 'pending', createdAt: at, startedAt: null, endedAt: null, lastActivityAt: at, reason: null }
+  const swarm = event({ ...s, tasks: [...s.tasks, task], requested: s.requested + 1 }, 'assignment', task.id, at, `${task.tier} ${task.role}: ${task.spawnReason}${route.tier === task.tier ? '' : ` · route suggested ${route.tier}`}`)
   return { swarm, task, duplicate: false }
 }
 /** The limits admission applies, with AUTO resolved: the one place the numbers live, read by admission and by the agent inspector. */
@@ -170,9 +171,52 @@ export const resolveEscalation = (s: Swarm, id: string, result: Partial<SwarmRes
   if (!result.conclusion?.trim() || !result.evidence?.some(e => e.trim())) throw new Error('Resolution requires commander conclusion and evidence')
   return event(update(s, id, { state: 'completed', result: compressResult(result), verification: 'pending', reason: null }), 'escalation_resolved', id, at, result.conclusion)
 }
-export const summarizeSwarm = (s: Swarm) => ({ wave: s.wave, parallelism: active(s).length, queue: s.tasks.filter(t => t.state === 'queued').length, blocked: s.tasks.filter(t => t.state === 'blocked' || t.state === 'stalled').length, completed: s.tasks.filter(t => t.state === 'completed').length, total: s.tasks.length, sonnet: s.tasks.filter(t => t.tier === 'SONNET' && occupied(t)).length, haiku: s.tasks.filter(t => t.tier === 'HAIKU' && occupied(t)).length, opus: (s.config.opus ?? 0) > 0 ? s.tasks.filter(t => t.tier === 'OPUS' && occupied(t)).length : 0, escalations: s.tasks.filter(t => t.escalation !== null).map(t => ({ task: t.id, from: t.tier, to: t.escalation!.to })), effortEscalations: s.tasks.filter(t => t.effortEscalation !== null).map(t => ({ task: t.id, from: t.effortEscalation!.from, to: t.effortEscalation!.to })), conflicts: s.conflicts, requested: s.requested, actual: s.actual, highWater: s.highWater, tokens: null, cost: null })
+export const summarizeSwarm = (s: Swarm) => ({ wave: s.wave, parallelism: active(s).length, queue: s.tasks.filter(t => t.state === 'queued').length, blocked: s.tasks.filter(t => t.state === 'blocked').length, stalled: s.tasks.filter(t => t.state === 'stalled').length, escalated: s.tasks.filter(t => t.state === 'escalated').length, completed: s.tasks.filter(t => t.state === 'completed').length, total: s.tasks.length, sonnet: s.tasks.filter(t => t.tier === 'SONNET' && occupied(t)).length, haiku: s.tasks.filter(t => t.tier === 'HAIKU' && occupied(t)).length, opus: (s.config.opus ?? 0) > 0 ? s.tasks.filter(t => t.tier === 'OPUS' && occupied(t)).length : 0, escalations: s.tasks.filter(t => t.escalation !== null).map(t => ({ task: t.id, from: t.tier, to: t.escalation!.to })), effortEscalations: s.tasks.filter(t => t.effortEscalation !== null).map(t => ({ task: t.id, from: t.effortEscalation!.from, to: t.effortEscalation!.to })), conflicts: s.conflicts, requested: s.requested, actual: s.actual, highWater: s.highWater, routing: routingOf(s), tokens: null, cost: null })
 /** Semantic evidence, not keyword routing. Explicit commander choice wins. */
 export const routeTask = (facts: { commanderChoice?: ModelTier; trivial?: boolean; coupled?: boolean; architecture?: boolean; ambiguous?: boolean; highRisk?: boolean; extractive?: boolean; bounded?: boolean }): ModelTier => facts.commanderChoice ?? (facts.trivial || facts.coupled || facts.architecture || facts.ambiguous || facts.highRisk ? 'OPUS' : facts.extractive && facts.bounded ? 'HAIKU' : 'SONNET')
+/**
+ * The tier the route would suggest for an assignment, and why. Read only from fields the commander set on purpose (the
+ * mode, the role's class, a named effort, the wave), never from the objective's words: a suggestion is advice shown
+ * beside the commander's own choice, which stands. Writing, reviewing and work the commander named heavy are never
+ * suggested to Haiku; a read is suggested to Haiku when its role is extractive, the commander named it light, or the
+ * swarm is in reconnaissance and the role is not an investigator's.
+ */
+export const suggestRoute = (a: { tier: ModelTier; role: string; mode: 'read' | 'write'; effort: EffortRequest; wave: Wave }): { tier: ModelTier; reason: string } => {
+  if (a.tier === 'OPUS') return { tier: 'OPUS', reason: 'commander work, as assigned' }
+  const facts = factsFromRole(a.role, a.mode)
+  const isArchitecture = /architect/i.test(a.role)
+  const isHeavyEffort = isEffortLevel(a.effort) && effortRank(a.effort) >= effortRank('high')
+  const heavy = a.mode === 'write' ? 'a write task is engineering work' : facts.verification === true ? 'independent review needs engineering judgement' : isHeavyEffort ? `the commander named heavy reasoning (${a.effort})` : null
+  // an explorer or a researcher was named for investigation: the wave alone does not make that a lookup
+  const isInvestigator = /^(explore|research|claude-code-guide)/.test(a.role.toLowerCase().replace(/^.*:/, ''))
+  const light = facts.inventory === true || facts.extraction === true ? 'bounded extractive read (the role)' : a.effort === 'low' ? 'read-only work the commander named light' : a.wave === 'RECONNAISSANCE' && !isInvestigator ? 'read-only reconnaissance' : null
+  const tier = routeTask({ architecture: isArchitecture, extractive: light !== null, bounded: heavy === null })
+
+  return { tier, reason: tier === 'OPUS' ? 'architecture belongs with the commander' : tier === 'HAIKU' ? light as string : heavy ?? 'read-only investigation' }
+}
+const NO_ROUTE: RouteCounts = { suggested: 0, requested: 0, admitted: 0, spawned: 0, completed: 0, verified: 0 }
+/**
+ * The delegation funnel by tier, counted from the tasks as recorded: suggested by the route, requested by the commander,
+ * admitted (a slot and ownership were reserved), spawned (the host reported an agent), completed (the host reported the
+ * end) and verified (the commander recorded a pass). Each is a different fact; none stands in for the next.
+ */
+export const routingOf = (s: Swarm): { tiers: Record<ModelTier, RouteCounts>; differing: number; unrecorded: number } => {
+  const tiers: Record<ModelTier, RouteCounts> = { HAIKU: { ...NO_ROUTE }, SONNET: { ...NO_ROUTE }, OPUS: { ...NO_ROUTE } }
+  let differing = 0
+  let unrecorded = 0
+  for (const t of s.tasks) {
+    const row = tiers[t.tier]
+    row.requested++
+    if (t.startedAt !== null || t.agentId !== null) row.admitted++
+    if (t.agentId !== null) row.spawned++
+    if (t.state === 'completed') row.completed++
+    if (t.verification === 'pass') row.verified++
+    if (t.suggestedTier === undefined) unrecorded++
+    else { tiers[t.suggestedTier].suggested++; if (t.suggestedTier !== t.tier) differing++ }
+  }
+
+  return { tiers, differing, unrecorded }
+}
 
 /** Cancellation intent is observable; live ownership remains until host completion. */
 export const requestCancel = (s: Swarm, id: string, at: number): Swarm => {
