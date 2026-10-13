@@ -23,6 +23,7 @@ import type { Simple } from './shell'
 const WILDCARD_SUBCOMMANDS: readonly string[] = ['diff', 'status', 'log', 'show', 'ls-files', 'rev-parse', 'grep']
 const NAMED_UNSAFE = /--(?:output|ext-diff|textconv)|--no-index/
 const CONTROL = /[\x00-\x08\x0a-\x1f\x7f]/
+const REVISION_BRACES = /[@^]\{[A-Za-z0-9_ :\/+-]*(?:\.[A-Za-z0-9_ :\/+-]+)*\}/g
 
 /** The text outside single quotes, with each quoted run reduced to `''`; null when a quote never closes. */
 const outsideSingleQuotes = (command: string): string | null => {
@@ -58,6 +59,11 @@ const isLexicallyPlain = (command: string, quotedLiterals: boolean): boolean => 
   // No second line and no control character at all (tab apart). A carriage return is a blank to the reader in ./shell
   // and a word character to bash, and a NUL can hide inside an option's name: neither is ever needed in an inspection.
   if (CONTROL.test(command) || NAMED_UNSAFE.test(command)) return false
+  // As typed, bash expands braces, and it decides that on the text before quotes and backslashes are removed: a quoted
+  // or escaped brace inside a group (`--{output=x\\},}`, `--{output=x,'{'}`) still leaves a group to expand. So no brace
+  // at all is accepted in such a command, except a revision's own (`HEAD@{1}`, `stash@{0}`, `HEAD^{tree}`), which holds
+  // no comma and no `..` and is left alone by bash.
+  if (!quotedLiterals && /[{}]/.test(command.replace(REVISION_BRACES, ''))) return false
   const seen = quotedLiterals ? outsideSingleQuotes(command) : command
 
   return seen !== null && !/[<>`]/.test(seen) && !seen.includes('$')
@@ -84,13 +90,12 @@ const isRefusedOption = (a: string): boolean => {
 
   return a === '-c' || a === '-h' || (a.startsWith('-') && a.includes('O'))
 }
-// What only bash would do to a word, and the reader in ./shell does not model: brace expansion (`--{output=x,}` is
-// `--output=x --`), and a filename pattern that could become an option: one inside an option, or one that begins a word
-// (`*` matches a file called `--output=x` as readily as any other). A command that runs as typed must contain none of
-// them; a rebuilt one cannot, because every word of it is quoted again. A pattern after a directory (`hooks/*.ts`)
-// expands only to names that begin with that directory, and is left alone.
-const BRACE_EXPANSION = /\{[^{}]*(?:,|\.\.)[^{}]*\}/
-const expandsInBash = (word: string): boolean => BRACE_EXPANSION.test(word) || /^[*?[]/.test(word) || (word.startsWith('-') && /[*?[]/.test(word))
+// What only bash would do to a word, and the reader in ./shell does not model: a filename pattern that could become an
+// option, either inside an option or at the start of a word (`*` matches a file called `--output=x` as readily as any
+// other). A command that runs as typed must contain neither; a rebuilt one cannot, because every word of it is quoted
+// again. A pattern after a directory (`hooks/*.ts`) expands only to names that begin with that directory, and is left
+// alone. (Brace expansion is refused earlier, on the text itself: see `isLexicallyPlain`.)
+const expandsInBash = (word: string): boolean => /^[*?[]/.test(word) || (word.startsWith('-') && /[*?[]/.test(word))
 
 /** `git <subcommand> …` typed plainly: no wrapper, assignment, redirect or here-document. Its arguments, or null. */
 const plainGitArgs = (c: Simple): string[] | null => {

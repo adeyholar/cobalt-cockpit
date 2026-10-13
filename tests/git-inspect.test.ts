@@ -167,8 +167,13 @@ describe('the commander\'s rule: read-only Git inspection as typed', () => {
     for (const command of ['git log --{output=/tmp/canary,}', 'git diff --o{utput=/tmp/canary,}', 'git log -{p,O/etc/passwd}', 'git log --since={1..2}', 'git log --outpu* x', 'git log --grep=fix*', 'git log -[pO]', "git grep 'a{2,3}' hooks"]) expect([command, readOnlyShell(command)]).toEqual([command, false])
     // a pattern that begins a word matches a file whose name begins with a dash as readily as any other
     for (const command of ['git diff *', 'git diff -- *', 'git log -- *.ts', 'git grep x ?', 'git diff [a-z]*', "git log -- '*.md'"]) expect([command, readOnlyShell(command)]).toEqual([command, false])
-    // a brace with nothing to expand is a revision like any other
-    for (const command of ['git diff HEAD@{1}', 'git log stash@{0}', 'git show HEAD^{tree}', 'git log -- hooks/*.ts']) expect([command, readOnlyShell(command)]).toEqual([command, true])
+    // bash decides on the text, before quotes and backslashes are removed: a quoted or escaped brace still leaves a group
+    for (const command of [
+      'git log --{output=/tmp/canary\\},}', 'git log --{output=/tmp/canary,\\{}', "git log --{output=/tmp/canary,'{'}", 'git log --{output=/tmp/canary,"}"}', "git log --'{'output=/tmp/canary,}", 'git log --\\{output=/tmp/canary,}',
+      'git log --{output=/tmp/canary,HEAD@{1}}', 'git log HEAD@{1..2}', 'git log HEAD@{a,b}', 'git diff {a..c}', 'git log }{', "git grep '{' hooks", 'git log --grep={',
+    ]) expect([command, readOnlyShell(command)]).toEqual([command, false])
+    // a revision's own braces hold nothing bash expands
+    for (const command of ['git diff HEAD@{1}', 'git log stash@{0}', 'git show HEAD^{tree}', 'git log HEAD@{1}..HEAD', 'git log HEAD@{2.days.ago}', 'git log "HEAD@{2 days ago}"', 'git diff @{u}', 'git log HEAD^{/fix}', 'git diff @{-1} HEAD^{}', 'git log -- hooks/*.ts']) expect([command, readOnlyShell(command)]).toEqual([command, true])
   })
   test('a harmless value that looks like a refused option is refused too: the rule follows how Git reads, not what was meant', () => {
     for (const command of ['git log -SOWNER', 'git grep -eTODO hooks', 'git grep --extended-regexp x', 'git log --output-indicator-new=x']) expect([command, readOnlyShell(command), agentInspection(command)]).toEqual([command, false, false])
@@ -186,6 +191,12 @@ describe('a wildcard subagent\'s rule: the same, with single-quoted text as data
     for (const command of ["git grep -n '\\$\\.process' -- hooks", "git grep '=>' -- hooks", "git grep 'a < b' hooks", "git grep '`x`' -- docs", "git grep '$(id)' -- hooks"]) expect([command, agentInspection(command)]).toEqual([command, true])
   })
   test('a word bash would have expanded is only text once the command is rebuilt', () => {
+    // the escaped and quoted forms as well: each is one literal word to Git, which knows no such option
+    for (const [typed, word] of [['git log --{output=/tmp/canary\\},}', '--{output=/tmp/canary},}'], ['git log --{output=/tmp/canary,\\{}', '--{output=/tmp/canary,{}'], ["git log --{output=/tmp/canary,'{'}", '--{output=/tmp/canary,{}']] as const) {
+      expect([typed, agentInspection(typed)]).toEqual([typed, true])
+      expect(argvOf(rebuildGit(typed)).at(-1)).toBe(word)
+      expect(parseShell(rebuildGit(typed)).pipelines).toHaveLength(1)
+    }
     const command = 'git log --{output=/tmp/canary,}'
     expect(agentInspection(command)).toBe(true)
     // Git is handed the braces themselves, as one word, and refuses the option it does not know
