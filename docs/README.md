@@ -21,7 +21,7 @@ The root [README](../README.md) is the front page. These files hold the detail.
 | Page | What it covers |
 | --- | --- |
 | [PRIVACY.md](../PRIVACY.md) | What Cockpit observes, what is kept and where, retention, deletion, telemetry, the router, exports |
-| [SECURITY.md](../SECURITY.md) | Local persistence, environment and process access, hooks that refuse, agent identity, guard limitations, reporting a vulnerability, secret scanning |
+| [SECURITY.md](../SECURITY.md) | Local persistence, environment and process access, working-tree measurement limits, hooks that refuse, agent identity, guard limitations, reporting a vulnerability, secret scanning |
 | [CHANGELOG.md](../CHANGELOG.md) | Changes by version |
 | [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) | Adapted work and upstream MIT notices |
 
@@ -29,6 +29,7 @@ The root [README](../README.md) is the front page. These files hold the detail.
 
 | Version | Page |
 | --- | --- |
+| 0.6.4 | [Fingerprint resource hardening (security)](implementation-v0.6.4.md) |
 | 0.6.3 | [Cobalt Guard Calibration](implementation-v0.6.3.md) |
 | 0.6.2 | [Persistent Attention](implementation-v0.6.2.md) |
 | 0.6.1 | [Smarter swarm operations](implementation-v0.6.1.md) |
