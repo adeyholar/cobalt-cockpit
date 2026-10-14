@@ -477,3 +477,43 @@ test('a record-only incident is simulated as the live pass would have treated it
   expect(await say($, 'alerts calibration')).toContain('would notify 0 · would defer for quiet hours 1 · would not notify 0')
   expect(w.notified).toEqual([])
 })
+
+// A session that still holds an occurrence keeps its label, even after another session pruned the occurrence's key at the bound.
+test('a label survives the sweep while another session\'s persisted records hold its occurrence, and goes once none does', { options: OPTIONS }, async ($, on) => {
+  const project = await projectHash('/work/example')
+  const a = occurrence(1)
+  const x = occurrence(2)
+  const w = world(on, {}, { [occKeyOf(project, a.id)]: { v: 1, records: a.records } })
+  hostState(on, {})
+  await start($)
+  // session s9 recorded X, persisted its records, and this session never held X; s9 labels it as a person
+  w.store.set(occKeyOf(project, x.id), { v: 1, records: x.records })
+  w.store.set('ledger:s9', { sessionId: 's9', alertsProject: project, alerts: x.records })
+  w.store.set(labelKey(project, x.id), { v: 1, label: 'NOTIFY', at: 7 })
+  // a third session prunes X's own key at the bound; s9 still holds X and will write it again
+  w.store.delete(occKeyOf(project, x.id))
+  expect(await say($, `alerts label ${a.id} notify`)).toContain('is labelled NOTIFY')
+  expect(w.store.get(labelKey(project, x.id))).toEqual({ v: 1, label: 'NOTIFY', at: 7 })
+  w.store.set(occKeyOf(project, x.id), { v: 1, records: x.records })
+  expect(await say($, 'alerts review')).toMatch(new RegExp(`^  ${x.id} .* labelled NOTIFY$`, 'm'))
+  // once no session holds it and its key is gone, the next accepted label command removes the label
+  w.store.delete(occKeyOf(project, x.id))
+  w.store.set('ledger:s9', { sessionId: 's9', alertsProject: project, alerts: [] })
+  expect(await say($, `alerts label ${a.id} record`)).toContain('is labelled RECORD_ONLY')
+  expect(w.store.has(labelKey(project, x.id))).toBe(false)
+})
+
+test('a session\'s persisted records of another project protect nothing in this one', { options: OPTIONS }, async ($, on) => {
+  const project = await projectHash('/work/example')
+  const a = occurrence(1)
+  const x = occurrence(2)
+  const w = world(on, {}, {
+    [occKeyOf(project, a.id)]: { v: 1, records: a.records },
+    'ledger:s9': { sessionId: 's9', alertsProject: 'ffffffffffff', alerts: x.records },
+    [labelKey(project, x.id)]: { v: 1, label: 'NOISE', at: 7 },
+  })
+  hostState(on, {})
+  await start($)
+  await say($, `alerts label ${a.id} notify`)
+  expect(w.store.has(labelKey(project, x.id))).toBe(false)
+})

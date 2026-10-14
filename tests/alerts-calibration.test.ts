@@ -5,7 +5,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { EMPTY_GUARD, KINDS, PRIORITY, bounded, decide, episodesOf, guardConfigOf, holdOf, occKeyOf, occurrencesOf } from '../hooks/alerts'
 import type { AlertKind, AlertRecord, GuardConfig, Occurrence } from '../hooks/alerts'
-import { LABELS, LABEL_MEANING, LABEL_PREFIX, MIN_DENOMINATOR, NOT_SIMULATED, calibrationOf, calibrationText, labelKeyOf, labelOfValue, labelOfWord, labelValueOf, labelledIdsOf, legacyIdsOf, observedOf, orphanLabelKeys, parseLabelKey, policyText, rateOf, reviewOrder, reviewText, simulate, simulationConfigOf, wilson } from '../hooks/calibration'
+import { LABELS, LABEL_MEANING, LABEL_PREFIX, MIN_DENOMINATOR, NOT_SIMULATED, calibrationOf, calibrationText, labelKeyOf, labelOfValue, labelOfWord, labelValueOf, labelledIdsOf, ledgerIdsOf, legacyIdsOf, observedOf, orphanLabelKeys, parseLabelKey, policyText, rateOf, reviewOrder, reviewText, simulate, simulationConfigOf, wilson } from '../hooks/calibration'
 import type { Label, Reviewed } from '../hooks/calibration'
 import { QUIET_OFF, isQuiet } from '../hooks/quiet'
 
@@ -128,6 +128,17 @@ describe('earlier-format histories', () => {
   test('a value that cannot be read is null, so nothing of its project is called an orphan', () => {
     for (const bad of [null, undefined, 'x', 7, { v: 2, alerts: records }, { v: 1, alerts: 'no' }, { v: 1 }]) expect(legacyIdsOf(bad, P, false)).toBeNull()
     for (const bad of [{ v: 1, projects: null }, { v: 1, projects: 'x' }, { v: 1, projects: { [P]: 'no' } }, { v: 2, projects: { [P]: records } }]) expect(legacyIdsOf(bad, P, true)).toBeNull()
+  })
+})
+
+describe('a session\'s persisted records', () => {
+  const records = [...bounded([], rec(keyOf(1, 'run-blocked'), { at: 1000 })), ...bounded([], rec(keyOf(2, 'review-hold'), { kind: 'review-hold', taskId: 2, at: 2000 }))]
+  test('the ids of the occurrences it holds for that project, and none for another', () => {
+    expect([...ledgerIdsOf({ sessionId: 's1', alertsProject: P, alerts: records }, P)].sort()).toEqual(episodesOf(records).map(e => e.id).sort())
+    expect([...ledgerIdsOf({ sessionId: 's1', alertsProject: Q, alerts: records }, P)]).toEqual([])
+  })
+  test('anything else holds nothing', () => {
+    for (const bad of [null, undefined, 'x', 7, [], {}, { alertsProject: P }, { alertsProject: P, alerts: 'no' }, { alerts: records }]) expect([...ledgerIdsOf(bad, P)]).toEqual([])
   })
 })
 

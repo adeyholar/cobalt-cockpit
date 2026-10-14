@@ -40,11 +40,12 @@ const versions = (held: Map<string, { version: unknown }>): unknown[] => [...hel
 const idOf = (text: string): string => /^\s*([0-9a-f]{8})\b/m.exec(text)?.[1] ?? 'missing!'
 
 // A. Human authority and spoofing
+/** An origin whose kind says sdk on the first read and composer on the second, and how often it was read. */
 const getterOrigin = () => {
-  let reads = 0
-  const o: Record<string, unknown> = {}
-  Object.defineProperty(o, 'kind', { get: () => (++reads === 2 ? 'composer' : 'sdk') })
-  return o
+  const seen = { reads: 0 }
+  const origin: Record<string, unknown> = {}
+  Object.defineProperty(origin, 'kind', { enumerable: true, get: () => (++seen.reads === 2 ? 'composer' : 'sdk') })
+  return { origin, seen }
 }
 const BAD: [string, unknown][] = [
   ['sdk', { kind: 'sdk' }], ['plugin', { kind: 'plugin', name: 'x' }], ['future', { kind: 'future' }],
@@ -80,22 +81,19 @@ for (const [name, origin] of BAD) {
   })
 }
 
-test('an origin whose kind reads composer only the second time never leaves a partial label', { options: REC }, async ($, on) => {
+test('an origin whose kind would read composer the second time is read once and refused', { options: REC }, async ($, on) => {
   const { store, project, id } = await seedOne()
   const w = world(on, {}, store)
   hostState(on, {})
   await start($)
   const before = w.storeWrites.length
-  const text = await say($, `alerts label ${id} notify`, getterOrigin())
-  // Expected: refused, because the first read is the check. If a command reads kind twice and accepts,
-  // the only allowed outcome is one complete label write.
-  if (text === REFUSAL) {
-    expect(labelKeys(w)).toEqual([])
-    expect(w.storeWrites.length).toBe(before)
-  } else {
-    expect(labelKeys(w)).toEqual([`alert-label:${project}:${id}`])
-    expect(w.storeWrites.length).toBe(before + 1)
-  }
+  // the command is given the origin as the host stamped it: the kind is read once, so a second read cannot change the answer
+  const { origin, seen } = getterOrigin()
+  expect(await say($, `alerts label ${id} notify`, origin)).toBe(REFUSAL)
+  expect(seen.reads).toBe(1)
+  expect(labelKeys(w)).toEqual([])
+  expect(w.storeWrites.length).toBe(before)
+  expect(w.store.has(`alert-label:${project}:${id}`)).toBe(false)
 })
 
 for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }]) {

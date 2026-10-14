@@ -66,7 +66,7 @@ import { redactSecrets } from './secrets'
 import type { Observation } from './alerts'
 import { exportOf, hudCountsOf, standingOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, ID_RE, OCC_PER_PROJECT, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
-import { LABEL_MEANING, LABEL_USAGE, calibrationOf, calibrationText, labelKeyOf, labelOfValue, labelOfWord, labelValueOf, labelledIdsOf, legacyIdsOf, observedOf, orphanLabelKeys, parseLabelKey, reviewText, simulationConfigOf } from './calibration'
+import { LABEL_MEANING, LABEL_USAGE, calibrationOf, calibrationText, labelKeyOf, labelOfValue, labelOfWord, labelValueOf, labelledIdsOf, ledgerIdsOf, legacyIdsOf, observedOf, orphanLabelKeys, parseLabelKey, reviewText, simulationConfigOf } from './calibration'
 import type { Reviewed } from './calibration'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
@@ -3345,24 +3345,30 @@ const calibrationView = async ($: EngineInterface): Promise<{ project: string; i
 /**
  * Forgets the label keys whose occurrence is gone, after a person set or removed a label: besides the removal a person asks
  * for, the only place a label key is ever deleted. A label is kept while the store lists its occurrence's key, while this
- * session reads the occurrence (`own`), and while an earlier-format history of its project holds it or cannot be read. The key
- * list is read again before anything is deleted, so an occurrence written meanwhile keeps its label. Another session's label
- * of an occurrence the store still holds is never among them.
+ * session reads the occurrence (`own`), while any session's persisted Ledger of its project holds it (another session can
+ * have pruned the occurrence's key at the bound while one that still holds it will write it again), and while an earlier-format
+ * history of its project holds it. A value that cannot be read keeps every label of the projects in question. The key list is
+ * read again before anything is deleted, so an occurrence written meanwhile keeps its label. Another session's label of an
+ * occurrence that the store or a session still holds is never among them.
  */
 const sweepLabels = async ($: EngineInterface, project: string, own: ReadonlySet<string>): Promise<void> => {
   const isMine = (p: string, id: string): boolean => p === project && own.has(id)
   const keys = await $.store.keys()
   const candidates = orphanLabelKeys(keys, isMine)
   if (candidates.length === 0) return
-  const earlier = new Map<string, (Set<string> | null)[]>()
-  for (const p of new Set(candidates.flatMap(k => parseLabelKey(k)?.project ?? []))) {
-    const held: (Set<string> | null)[] = []
-    if (keys.includes(historyKeyOf(p))) held.push(legacyIdsOf(await $.store.get(historyKeyOf(p)).catch(() => undefined), p, false))
-    if (keys.includes(LEGACY_HISTORY_KEY)) held.push(legacyIdsOf(await $.store.get(LEGACY_HISTORY_KEY).catch(() => undefined), p, true))
-    earlier.set(p, held)
+  const projects = [...new Set(candidates.flatMap(k => parseLabelKey(k)?.project ?? []))]
+  const elsewhere = new Map<string, (Set<string> | null)[]>(projects.map(p => [p, []]))
+  const readOrNull = async (key: string, of: (value: unknown, p: string) => Set<string> | null): Promise<void> => {
+    let value: unknown
+    try { value = await $.store.get(key) } catch { for (const p of projects) elsewhere.get(p)?.push(null); return }
+    for (const p of projects) elsewhere.get(p)?.push(of(value, p))
   }
+  // what the sessions of the last few runs still hold, as they last persisted it
+  for (const k of keys.filter(x => x.startsWith('ledger:'))) await readOrNull(k, ledgerIdsOf)
+  for (const p of projects) if (keys.includes(historyKeyOf(p))) elsewhere.get(p)?.push(legacyIdsOf(await $.store.get(historyKeyOf(p)).catch(() => undefined), p, false))
+  if (keys.includes(LEGACY_HISTORY_KEY)) await readOrNull(LEGACY_HISTORY_KEY, (value, p) => legacyIdsOf(value, p, true))
   // a project first seen in the second listing was not looked up: its labels are kept
-  const isKept = (p: string, id: string): boolean => isMine(p, id) || (earlier.get(p) ?? [null]).some(ids => ids === null || ids.has(id))
+  const isKept = (p: string, id: string): boolean => isMine(p, id) || (elsewhere.get(p) ?? [null]).some(ids => ids === null || ids.has(id))
   const still = new Set(orphanLabelKeys(await $.store.keys(), isKept))
   for (const k of orphanLabelKeys(keys, isKept)) {
     if (!still.has(k)) continue

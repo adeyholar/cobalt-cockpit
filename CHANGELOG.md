@@ -11,7 +11,7 @@ Design, the simulation, the figures, departures from the proposal and limits: [d
 - **Figures and thresholds.** Counts first; a rate needs at least 10 labelled incidents and carries a 95% Wilson score interval; below that the report says `INSUFFICIENT EVIDENCE`, which is not a finding about the policy. Unreviewed incidents are in no figure, and the missed-wanted share is not detection recall.
 - **Read-only and silent.** Review and the report write nothing and send nothing, change no setting, gate, hold or enforcement, and recommend no setting. `security-failure` stays a notified kind.
 - **The export is unchanged.** `/cockpit alerts export` stays at schema version 2 and carries no labels.
-- Tests: `tests/alerts-calibration.test.ts` (52), `tests/alerts-labels.test.ts` (90) and `tests/alerts-labels-shared.test.ts` (40) are new, with seeded sweeps and a check against the live alert pass; `scripts/acceptance-harness.sh` gains eight two-process checks, and `scripts/acceptance-interactive.sh` launch profiles and an `sdk` probe.
+- Tests: `tests/alerts-calibration.test.ts` (54), `tests/alerts-labels.test.ts` (90) and `tests/alerts-labels-shared.test.ts` (42) are new, with seeded sweeps and a check against the live alert pass; `scripts/acceptance-harness.sh` gains eight two-process checks, and `scripts/acceptance-interactive.sh` launch profiles and an `sdk` probe.
 - Documentation: three stale v0.6.2 lines corrected (the roadmap's status, its index entry and a test count).
 
 ## Unreleased (0.6.2) — Persistent Attention

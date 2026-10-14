@@ -82,6 +82,16 @@ export const legacyIdsOf = (value: unknown, project: string, isShared: boolean):
 
   return Array.isArray(records) ? new Set(episodesOf(validAlerts(records)).map(e => e.id)) : null
 }
+/**
+ * The occurrence ids a session's persisted Ledger (`ledger:<session>`) holds for a project: what that session still reads and
+ * may write again, even where another session pruned the occurrence's own key at the bound. Empty for any other value.
+ */
+export const ledgerIdsOf = (value: unknown, project: string): Set<string> => {
+  if (value === null || typeof value !== 'object') return new Set()
+  const v = value as { alertsProject?: unknown; alerts?: unknown }
+
+  return v.alertsProject === project ? new Set(episodesOf(validAlerts(v.alerts)).map(e => e.id)) : new Set()
+}
 
 // --- The observed set: the project's bounded history, as one session can read it ---
 
@@ -275,7 +285,7 @@ export const calibrationText = (c: Calibration, cfg: GuardConfig, real: RealSett
   lines.push(`  wanted, would not notify (a missed wanted notification): ${c.missed}`)
   lines.push(`  not wanted, would not notify: ${c.spared}`)
   lines.push(`  deferred for quiet hours: ${c.deferred.wanted + c.deferred.unwanted} (wanted ${c.deferred.wanted} · not wanted ${c.deferred.unwanted}) · in neither rate; whether one was told afterwards is not simulated`)
-  lines.push(`  labelled NOISE: ${c.labels.NOISE} · judged not useful as an incident, which is about what is recorded, not about notifying`)
+  lines.push(`  labelled NOISE: ${c.labels.NOISE} · judged not useful as an incident: counted above as not wanted, and also a judgement about what is recorded, not only about notifying`)
   lines.push(`Unreviewed ${c.unreviewed} · in no figure below, and not assumed to be any label.${c.unreadable > 0 ? ` ${plural(c.unreadable, 'stored label', 'stored labels')} could not be read and ${c.unreadable === 1 ? 'is' : 'are'} counted here.` : ''}`)
   lines.push(rateLine('Simulated notification precision', c.precision, `${c.precision.k} wanted of ${plural(c.precision.n, 'reviewed incident', 'reviewed incidents')} the policy would notify`))
   lines.push(rateLine('Missed-wanted share', c.missedShare, `${c.missedShare.k} not notified of ${plural(c.missedShare.n, 'reviewed incident', 'reviewed incidents')} labelled NOTIFY, deferred ones apart`))

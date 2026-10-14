@@ -15,7 +15,7 @@ The Stop guard's and the alerts' settings (`stopGuard`, `verify*`, `stop*` and e
 
 ## Calibrating alerts before turning them on
 
-No option was added for [Guard Calibration](implementation-v0.6.3.md). With `guardRecordOnly` on and `guardAlerts` off, incidents are recorded and nobody is told. Label some with `/cockpit alerts label`, read `/cockpit alerts calibration`, then compare by changing `guardNotifyKinds` or the quiet-hours options in `/config`, restarting Claude Code as for any option, and reading the report again. The report reads those options and writes none of them. `guardAlerts` stays as you set it, and `security-failure` stays notified.
+No option was added for [Guard Calibration](implementation-v0.6.3.md). With `guardRecordOnly` on and `guardAlerts` off, incidents are recorded and nobody is told. Label some with `/cockpit alerts label` and read `/cockpit alerts calibration`. To compare configurations you can change `guardNotifyKinds` or the quiet-hours options in `/config`, restart Claude Code as for any option, and read the report again. The report reads those options and writes none of them. `guardAlerts` stays as you set it, and `security-failure` stays notified.
 
 ## Every option and its default
 
