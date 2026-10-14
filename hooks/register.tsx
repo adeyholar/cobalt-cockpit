@@ -3347,9 +3347,10 @@ const calibrationView = async ($: EngineInterface): Promise<{ project: string; i
  * for, the only place a label key is ever deleted. A label is kept while the store lists its occurrence's key, while this
  * session reads the occurrence (`own`), while any session's persisted Ledger of its project holds it (another session can
  * have pruned the occurrence's key at the bound while one that still holds it will write it again), and while an earlier-format
- * history of its project holds it. A value that cannot be read keeps every label of the projects in question. The key list is
- * read again before anything is deleted, so an occurrence written meanwhile keeps its label. Another session's label of an
- * occurrence that the store or a session still holds is never among them.
+ * history of its project holds it. A store read that fails keeps the labels of every project that read was for, and an
+ * earlier-format history that is not understood keeps the labels of its project; a session's persisted Ledger that is not of
+ * this build's shape holds nothing. The key list is read again before anything is deleted, so an occurrence written meanwhile
+ * keeps its label. Another session's label of an occurrence that the store or a session still holds is never among them.
  */
 const sweepLabels = async ($: EngineInterface, project: string, own: ReadonlySet<string>): Promise<void> => {
   const isMine = (p: string, id: string): boolean => p === project && own.has(id)
