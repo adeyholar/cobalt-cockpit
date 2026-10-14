@@ -53,12 +53,14 @@ export const boundScript = (memory: boolean): string => `${LIMITS(memory)} && ex
 export const BOUND_PROBE_SET = (memory: boolean): string => `${LIMITS(memory)} && echo set`
 export const BOUND_PROBE_CONTROL = 'exec dd if=/dev/zero of=/dev/null bs=67108864 count=1'
 export const BOUND_PROBE_CAPPED = `${LOWER} && lower -v 32768 && exec dd if=/dev/zero of=/dev/null bs=67108864 count=1`
+/** No repository hooks, and no diff order file (read whole by status, diff and log; one pointed at a device exhausted memory). Also on a helper's rebuilt Git inspection. */
+export const GIT_OVERRIDES = ['-c', 'core.hooksPath=/dev/null', '-c', 'diff.orderFile=/dev/null']
 /**
  * Git settings that keep a legitimate command inside the cap: small pack windows, streaming for files over 16 MiB, no index
  * threads, no hooks, and no diff order file (status and diff read a configured one whole; measured: one pointed at a device
  * exhausted memory; the order of a listing never matters here).
  */
-export const GIT_BOUNDED = ['-c', 'core.hooksPath=/dev/null', '-c', 'diff.orderFile=/dev/null', '-c', 'core.packedGitWindowSize=32m', '-c', 'core.packedGitLimit=256m', '-c', 'core.deltaBaseCacheLimit=64m', '-c', 'core.bigFileThreshold=16m', '-c', 'core.preloadIndex=false', '-c', 'index.threads=1']
+export const GIT_BOUNDED = [...GIT_OVERRIDES, '-c', 'core.packedGitWindowSize=32m', '-c', 'core.packedGitLimit=256m', '-c', 'core.deltaBaseCacheLimit=64m', '-c', 'core.bigFileThreshold=16m', '-c', 'core.preloadIndex=false', '-c', 'index.threads=1']
 /** glibc reserves address space per malloc arena; two keep a bounded Git well inside its cap. */
 export const BOUND_ENV = { MALLOC_ARENA_MAX: '2' }
 

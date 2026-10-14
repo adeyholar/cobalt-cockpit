@@ -302,8 +302,9 @@ export const migrateStopHold = (task: Task, checks: readonly CheckRecord[], drop
 export type TreeVerdict = 'UNCHANGED' | 'CHANGED' | 'UNKNOWN'
 
 /**
- * The longest fingerprint this build writes and stores: a SHA-256 repository (64 hex), a nine-digit entry count, two 32-bit
- * content hashes and the 128-bit project identity come to 124 characters. Schema validation and storage use this one bound.
+ * The longest fingerprint this build writes and stores: a SHA-256 repository (64 hex), a nine-digit entry count, a 128-bit
+ * content digest (v0.6.4; two 32-bit hashes before) and the 128-bit project identity come to 140 characters. Schema validation
+ * and storage use this one bound.
  */
 export const STAMP_MAX = 160
 const PROJECT_ID = /^[0-9a-f]{32}$/

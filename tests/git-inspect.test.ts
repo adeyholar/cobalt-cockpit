@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { GIT_SAFE } from '../hooks/git-integrity'
+import { GIT_OVERRIDES, GIT_SAFE } from '../hooks/git-integrity'
 import { agentInspection, readOnlyShell, rebuildGit, scopedGit, SCOPED_MAX_COMMITS, SCOPED_MAX_PATHS } from '../hooks/git-inspect'
 import type { ScopedGit } from '../hooks/git-inspect'
 import { parseShell } from '../hooks/shell'
@@ -223,8 +223,8 @@ describe('a wildcard subagent\'s rule: the same, with single-quoted text as data
 describe('what runs is rebuilt, never the typed text', () => {
   test('every word is single-quoted behind --no-pager and the safe flags; diff, show and log lose their drivers', () => {
     const argv = argvOf(rebuildGit('git diff main...HEAD -- hooks/swarm.ts'))
-    expect(argv).toEqual(['git', '--no-pager', ...GIT_SAFE, 'diff', '--no-ext-diff', '--no-textconv', 'main...HEAD', '--', 'hooks/swarm.ts'])
-    expect(argvOf(rebuildGit('git grep -n x'))).toEqual(['git', '--no-pager', ...GIT_SAFE, 'grep', '-n', 'x'])
+    expect(argv).toEqual(['git', '--no-pager', ...GIT_SAFE, ...GIT_OVERRIDES, 'diff', '--no-ext-diff', '--no-textconv', 'main...HEAD', '--', 'hooks/swarm.ts'])
+    expect(argvOf(rebuildGit('git grep -n x'))).toEqual(['git', '--no-pager', ...GIT_SAFE, ...GIT_OVERRIDES, 'grep', '-n', 'x'])
     expect(rebuildGit('git status')).toMatch(/^'git' '--no-pager' /)
   })
   test('a substitution inside single quotes stays text after the rebuild', () => {
@@ -249,7 +249,7 @@ describe('what runs is rebuilt, never the typed text', () => {
   test('a scoped command is pinned to the verified directory and reads only the canonical paths it was checked for', () => {
     const git = accepted('git diff --stat main...HEAD -- hooks/swarm.ts ./tests')
     const argv = argvOf(rebuildGit('ignored: the pin is what runs', { git, dir: '/work/example', paths: ['/work/example/hooks/swarm.ts', '/work/example/tests'] }))
-    expect(argv).toEqual(['git', '--no-pager', ...GIT_SAFE, '-C', '/work/example', 'diff', '--no-ext-diff', '--no-textconv', '--stat', 'main...HEAD', '--', '/work/example/hooks/swarm.ts', '/work/example/tests'])
+    expect(argv).toEqual(['git', '--no-pager', ...GIT_SAFE, ...GIT_OVERRIDES, '-C', '/work/example', 'diff', '--no-ext-diff', '--no-textconv', '--stat', 'main...HEAD', '--', '/work/example/hooks/swarm.ts', '/work/example/tests'])
   })
   test('a file at a revision keeps its object name and still ends the options', () => {
     const git = accepted('git show HEAD~2:hooks/swarm.ts')

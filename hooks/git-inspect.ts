@@ -16,7 +16,7 @@
 // single quotes, behind `git --no-pager` and the safe flags, so a quoted argument stays data whatever it contains.
 // Nothing here calls a process, reads a file or holds state; the caller canonicalizes paths and applies ownership.
 
-import { GIT_SAFE } from './git-integrity'
+import { GIT_OVERRIDES, GIT_SAFE } from './git-integrity'
 import { parseShell, unwrap } from './shell'
 import type { Simple } from './shell'
 
@@ -300,14 +300,14 @@ export const scopedGit = (command: string): ScopedVerdict => {
 const quote = (word: string): string => `'${word.replace(/'/g, "'\\''")}'`
 const NO_DRIVERS: readonly string[] = ['diff', 'show', 'log']
 const hardened = (sub: string, before: readonly string[], rest: readonly string[]): string =>
-  ['git', '--no-pager', ...GIT_SAFE, ...before, sub, ...(NO_DRIVERS.includes(sub) ? ['--no-ext-diff', '--no-textconv'] : []), ...rest].map(quote).join(' ')
+  ['git', '--no-pager', ...GIT_SAFE, ...GIT_OVERRIDES, ...before, sub, ...(NO_DRIVERS.includes(sub) ? ['--no-ext-diff', '--no-textconv'] : []), ...rest].map(quote).join(' ')
 
 /** Where a scoped command runs and what it may read: the verified session directory and the canonical, owned paths. */
 export type ScopedPin = { git: ScopedGit; dir: string; paths: readonly string[] }
 
 /**
  * The command that runs in place of an accepted inspection: every word single-quoted, behind `--no-pager` and the safe
- * flags, external diff and textconv switched off. A scoped command is also pinned to the verified directory with `-C`
+ * flags, external diff and textconv switched off, repository hooks and a configured diff order file overridden (v0.6.4). A scoped command is also pinned to the verified directory with `-C`
  * and given its paths as the canonical absolute ones that were checked, after an explicit `--`.
  */
 export const rebuildGit = (command: string, pin?: ScopedPin): string => {

@@ -269,37 +269,56 @@ const finishObserved = (s: Swarm, id: string, reason: string, conclusion: string
 // BOUND_CPU_S of CPU, write files of at most 64 MiB and dump no core; the host's timeout ends it in any case. A limit
 // already stricter is kept. What the platform enforces is probed once a registration and reported by /cockpit doctor;
 // it is never assumed. Behind `sh`, the host's own git handling no longer applies, so GIT_BOUNDED turns repo hooks off.
-type BoundMode = 'full' | 'partial' | 'none'
+/**
+ * What the probe found. `script`: the limit script measurement runs under, with the address-space limit wherever `ulimit -v`
+ * is accepted (setting a limit a platform ignores is harmless), or none at all. `enforced`: whether a 64 MiB allocation really
+ * failed under a 32 MiB limit; null when a probe did not answer. A result in which a probe did not answer (a timeout under load,
+ * say) is used once and not kept: the next measurement probes again, so one slow moment cannot lower the rest of the session.
+ */
+type Bound = { script: 'memory' | 'basic' | null; enforced: boolean | null; settled: boolean }
 type RunInit = { cwd?: string; timeoutMs?: number; env?: Record<string, string>; stdin?: string }
-let boundMode: Promise<BoundMode> | null = null
-const probeBound = async ($: EngineInterface): Promise<BoundMode> => {
+let boundMode: Promise<Bound> | null = null
+const probeBound = async ($: EngineInterface): Promise<Bound> => {
   const sh = (script: string) => $.process.run(['sh', '-c', script], { timeoutMs: 5000, env: { LC_ALL: 'C' } }).then(r => r, () => null)
   const set = await sh(BOUND_PROBE_SET(true))
   if (set !== null && set.exitCode === 0 && set.stdout.trim() === 'set') {
     // accepted is not enforced: a 64 MiB allocation must succeed without the cap and fail under a 32 MiB one
     const control = await sh(BOUND_PROBE_CONTROL)
     const capped = await sh(BOUND_PROBE_CAPPED)
-    if (control !== null && control.exitCode === 0 && capped !== null && capped.exitCode !== 0) return 'full'
+    const enforced = control === null || capped === null ? null : control.exitCode === 0 && capped.exitCode !== 0
+    return { script: 'memory', enforced, settled: enforced !== null }
   }
-  const partial = await sh(BOUND_PROBE_SET(false))
-  return partial !== null && partial.exitCode === 0 && partial.stdout.trim() === 'set' ? 'partial' : 'none'
+  const basic = await sh(BOUND_PROBE_SET(false))
+  const settled = set !== null && basic !== null
+  return basic !== null && basic.exitCode === 0 && basic.stdout.trim() === 'set' ? { script: 'basic', enforced: false, settled } : { script: null, enforced: false, settled }
+}
+const boundOf = async ($: EngineInterface): Promise<Bound> => {
+  const probing = (boundMode ??= probeBound($))
+  const found = await probing
+  if (!found.settled && boundMode === probing) boundMode = null
+  return found
 }
 const bounded = async ($: EngineInterface, argv: string[], init: RunInit = {}) => {
-  boundMode ??= probeBound($)
-  const mode = await boundMode
+  const { script } = await boundOf($)
   const inner = argv[0] === 'git' ? ['git', ...GIT_BOUNDED, ...argv.slice(1)] : argv
   const run = { ...init, env: { ...BOUND_ENV, ...(init.env ?? {}) } }
-  return mode === 'none' ? $.process.run(inner, run) : $.process.run(['sh', '-c', boundScript(mode === 'full'), BOUND_TAG, ...inner], run)
+  return script === null ? $.process.run(inner, run) : $.process.run(['sh', '-c', boundScript(script === 'memory'), BOUND_TAG, ...inner], run)
 }
 /** For /cockpit doctor: what limits measurement processes run under here, in words. */
 const boundWords = async ($: EngineInterface): Promise<{ enforced: boolean; text: string }> => {
-  boundMode ??= probeBound($)
-  const mode = await boundMode
-  return mode === 'full' ? { enforced: true, text: `working-tree measurement runs under kernel limits: memory ${BOUND_AS_KIB / 1024} MiB, CPU ${BOUND_CPU_S} s, files written at most 64 MiB, no core dump, and the host's timeout` }
-    : mode === 'partial' ? { enforced: false, text: `working-tree measurement runs under CPU ${BOUND_CPU_S} s, files written at most 64 MiB and the host's timeout; this platform does NOT enforce the memory limit, so only the type and size checks before each read bound it` }
-      : { enforced: false, text: 'working-tree measurement runs under the host\'s timeout only: no shell here could set kernel limits, so only the type and size checks before each read bound it' }
+  const found = await boundOf($)
+  const rest = `files written at most 64 MiB, no core dump, and the host's timeout`
+  const gap = 'Cockpit still never opens a device, FIFO or oversized file itself, but a file Git reads on its own (a linked worktree\'s commondir, a configuration include, grafts, sparse-checkout) is bounded only by CPU time and the timeout'
+  if (found.script === 'memory' && found.enforced === true) return { enforced: true, text: `working-tree measurement runs under kernel limits: memory ${BOUND_AS_KIB / 1024} MiB, CPU ${BOUND_CPU_S} s, ${rest}` }
+  if (found.script === 'memory' && found.enforced === null) return { enforced: false, text: `working-tree measurement sets memory ${BOUND_AS_KIB / 1024} MiB, CPU ${BOUND_CPU_S} s, ${rest}, but whether the memory limit is enforced could not be confirmed (the probe did not answer; it runs again at the next measurement)` }
+  if (found.script === 'memory') return { enforced: false, text: `working-tree measurement runs under CPU ${BOUND_CPU_S} s, ${rest}; this platform does NOT enforce the memory limit it accepts. ${gap}` }
+  if (found.script === 'basic') return { enforced: false, text: `working-tree measurement runs under CPU ${BOUND_CPU_S} s, ${rest}; no memory limit could be set here. ${gap}` }
+  return { enforced: false, text: `working-tree measurement runs under the host's timeout only: no shell here could set kernel limits. ${gap}` }
 }
 
+/** One line of a `stat` error whose cause is a path that is not there (C locale), the cause read after the path, as the line ends. */
+const ENOENT = /^[^\n]*: No such file or directory$/
+const MISSING: Inspected = { kind: 'missing', mode: 0, size: 0, identity: 'missing' }
 /**
  * Inspects paths without following a final link (`follow`: following it, for configured files a person may keep
  * as links), in order, through bounded GNU or BSD `stat`. A path that does not exist is 'missing'; any other failure,
@@ -316,13 +335,20 @@ const inspectPaths = async ($: EngineInterface, cwd: string, paths: string[], fo
     return out.every((x): x is Inspected => x !== null) ? out : null
   }
   // GNU first, all at once. Its records name the path they answer for, so where some paths could not be inspected (one is
-  // missing, say) the others still count, and only those are asked about again, one at a time.
+  // missing, say) the others still count. When every error is "No such file or directory" and there is one for each path
+  // not answered, those are missing; otherwise only those are asked about again, one at a time. An error line ends with
+  // the system's own words after the path, so a path cannot pass for another error.
   const known = new Map<string, Inspected>()
   const gnu = await ask(paths, true)
   const rows = gnu !== null && !gnu.isStdoutTruncated && !gnu.isStderrTruncated ? records(gnu.stdout, true) : null
   if (gnu !== null && gnu.exitCode === 0 && gnu.stderr.trim() === '' && rows !== null && rows.length === paths.length && rows.every((s, k) => s.name === paths[k])) return rows
-  if (rows !== null && rows.length > 0) for (const s of rows) { if (paths.includes(s.name!)) known.set(s.name!, s) }
-  else {
+  if (gnu !== null && rows !== null) {
+    for (const s of rows) if (paths.includes(s.name!)) known.set(s.name!, s)
+    const open = paths.filter(p => !known.has(p))
+    const errors = gnu.stderr.split('\n').filter(Boolean)
+    if (gnu.exitCode !== 0 && open.length > 0 && errors.length === open.length && errors.every(line => ENOENT.test(line))) return paths.map(p => known.get(p) ?? MISSING)
+  }
+  if (known.size === 0) {
     // no GNU answer at all: BSD stat, all at once (its records carry no name, so only a complete answer counts)
     const bsd = await ask(paths, false)
     const all = bsd !== null && gitAnswered(bsd) ? records(bsd.stdout, false) : null
@@ -336,7 +362,7 @@ const inspectPaths = async ($: EngineInterface, cwd: string, paths: string[], fo
       const r = await ask([path], isGnu)
       if (r === null) return null
       if (gitAnswered(r)) { const one = records(r.stdout, isGnu); got = one !== null && one.length === 1 && (!isGnu || one[0]!.name === path) ? one[0]! : null }
-      else if (r.exitCode !== 0 && !r.isStderrTruncated && /No such file or directory/.test(r.stderr)) got = { kind: 'missing', mode: 0, size: 0, identity: 'missing' }
+      else if (r.exitCode !== 0 && !r.isStderrTruncated && ENOENT.test(r.stderr.replace(/\n$/, ''))) got = MISSING
     }
     if (got === null) return null
     out.push(got)
@@ -493,7 +519,7 @@ const measureCommit = async ($: EngineInterface, root: string, sha: string, budg
       // A file replaced (by a link to a device, say) or rewritten between the inspection and the read is not believed.
       if (regular.length) {
         const again = await inspectPaths($, root, regular.map(n => `./${chunk[n]!.path}`))
-        if (again === null || again.some((s, k) => s.identity !== seen[regular[k]!]!.identity)) return { why: 'a tracked file changed while it was being measured' }
+        if (again === null || again.some((s, k) => s.identity !== seen[regular[k]!]!.identity)) return { why: TRACKED_RACE }
       }
       let at = 0
       for (let n = 0; n < chunk.length; n++) {
@@ -2310,9 +2336,14 @@ const FINGERPRINT_BUDGET_MS = 25_000
 const FINGERPRINT_DEADLINE_MS = 90_000
 /** Why the latest fingerprint was unknown, in words for the Ledger and HUD. Empty after a known one. */
 let treeWhy = ''
+/** Whether the latest fingerprint was unknown only because a file changed or vanished while it was read (a race, not a hazard). */
+let treeRaced = false
+/** measureCommit's reason for a tracked file that changed while it was read. */
+const TRACKED_RACE = 'a tracked file changed while it was being measured'
 const treeStamp = async ($: EngineInterface, base?: string): Promise<string | null> => {
   treeWhy = ''
-  const unknown = (why: string): null => { treeWhy = why; return null }
+  treeRaced = false
+  const unknown = (why: string, raced = false): null => { treeWhy = why; treeRaced = raced; return null }
   try {
     const began = await $.clock.now()
     const overdue = async () => (await $.clock.now()) - began > FINGERPRINT_DEADLINE_MS
@@ -2342,7 +2373,7 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const budget: ReadBudget = { bytes: 0 }
     // Reads regular files already inspected, then inspects them again: a file replaced (by a link to a device, say) or rewritten in
     // between is not believed. `follow` as when they were inspected.
-    const hashFiles = async (names: string[], seen: Inspected[], follow: boolean): Promise<string[] | { why: string }> => {
+    const hashFiles = async (names: string[], seen: Inspected[], follow: boolean): Promise<string[] | { why: string; raced?: true }> => {
       if (names.length === 0) return []
       for (const s of seen) {
         if (s.size > FINGERPRINT_FILE_BYTES) return { why: `a file is larger than ${FINGERPRINT_FILE_BYTES / GIB} GiB, more than the fingerprint reads` }
@@ -2353,7 +2384,7 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       const hashes = gitAnswered(r) ? hashesOf(r.stdout, names.length) : null
       if (hashes === null) return { why: 'a file could not be hashed (deleted meanwhile, unreadable, not present in a sparse checkout, or its process reached a time or memory limit)' }
       const again = await inspectPaths($, top, names, follow)
-      if (again === null || again.some((s, k) => s.identity !== seen[k]!.identity)) return { why: 'a file changed while it was being measured' }
+      if (again === null || again.some((s, k) => s.identity !== seen[k]!.identity)) return { why: 'a file changed while it was being measured', raced: true }
       return hashes
     }
     // The files (and links) under a directory, for what git cannot hash or list file by file. A directory that exists but cannot be read
@@ -2364,14 +2395,14 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       // "missing" only when the system says there is no such file: a path that is there but cannot be entered (permission denied on a
       // parent) must not become a constant "missing" that a writer can keep equal at both measurements. C locale: stable wording.
       const there = await bounded($, ['stat', '--', dir], { timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
-      if (f !== null && f.exitCode !== 0 && there !== null && there.exitCode !== 0 && /No such file or directory/.test(there.stderr)) return { missing: true }
+      if (f !== null && f.exitCode !== 0 && there !== null && there.exitCode !== 0 && !there.isStderrTruncated && ENOENT.test(there.stderr.replace(/\n$/, ''))) return { missing: true }
 
       return { why: `${dir} exists but could not be listed in full (unreadable, too large or timed out)` }
     }
     const head = base ?? (await at('rev-parse', '--verify', 'HEAD'))?.trim()
     if (!head) return unknown('no commit to measure against')
     const tracked = await measureCommit($, top, head, budget)
-    if ('why' in tracked) return unknown(tracked.why)
+    if ('why' in tracked) return unknown(tracked.why, tracked.why === TRACKED_RACE)
     if (!(await gitFiltersReliable($, top, tracked.entries.map(e => e.path)))) return unknown('active commit-path filters make the working tree unreliable')
     if (await overdue()) return unknown(late)
     // -O/dev/null: a configured diff.orderFile is read whole (measured: one pointed at a device exhausted memory); no order is needed here.
@@ -2396,7 +2427,7 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const sourceList = inputs.filter(n => n.source)
     const readable = sourceList.filter((n): n is GitInput & { path: string; seen: Inspected } => n.seen?.kind === 'file')
     const sourceHashes = await hashFiles(readable.map(n => n.path), readable.map(n => n.seen), true)
-    if ('why' in sourceHashes) return unknown(`the excludes or attributes files: ${sourceHashes.why}`)
+    if ('why' in sourceHashes) return unknown(`the excludes or attributes files: ${sourceHashes.why}`, sourceHashes.raced)
     const sources = sourceList.map(n => (n.path === null ? '-' : n.seen?.kind === 'file' ? sourceHashes[readable.indexOf(n as typeof readable[number])]! : 'none'))
     // Operator-authorized volatile directories (caches, build output) leave the IGNORED part of the stamp; nothing else is excluded.
     const ignoredNames = ignored.split('\0').filter(Boolean).sort().filter(name => !stopCfg.volatile.some(v => name.startsWith(v) || `${name}/` === v))
@@ -2409,7 +2440,7 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       if (await overdue()) return unknown(late)
       const listed = await walk(`${top}/${entry.replace(/\/+$/, '')}`)
       if ('why' in listed) return unknown(listed.why)
-      if ('missing' in listed) return unknown(`${entry} vanished while it was listed`)
+      if ('missing' in listed) return unknown(`${entry} vanished while it was listed`, true)
       embedded.push(...listed.names)
       if (embedded.length + ignoredNames.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored files (list the generated directories in stopVolatile, or the check runs every time)`)
     }
@@ -2428,7 +2459,7 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       if (s.kind === 'missing') { watched.push(`W\0${file}\0none`); continue }
       if (s.kind === 'file') {
         const got = await hashFiles([full], [s], true)
-        if ('why' in got) return unknown(`the watched path ${file}: ${got.why}`)
+        if ('why' in got) return unknown(`the watched path ${file}: ${got.why}`, got.raced)
         watched.push(`W\0${file}\0${got[0]}`)
         continue
       }
@@ -2452,13 +2483,16 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       if ((await $.clock.now()) - ignoredBegan > FINGERPRINT_BUDGET_MS) return unknown(`measuring the ignored files took longer than ${FINGERPRINT_BUDGET_MS / 1000}s`)
       if (await overdue()) return unknown(late)
       const chunk = toMeasure.slice(i, i + HASH_CHUNK)
-      let r = await bounded($, ['stat', '--printf', '%i %s %.9Y %.9Z %n\\0', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
+      const first = await bounded($, ['stat', '--printf', '%i %s %.9Y %.9Z %n\\0', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
+      let r = first
       let lines: string[] = r.exitCode === 0 ? r.stdout.split('\0').filter(Boolean) : []
       if (r.exitCode !== 0) {
         r = await bounded($, ['stat', '-f', '%i %z %m %c %N', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
         lines = r.exitCode === 0 ? r.stdout.split('\n').filter(Boolean) : []
       }
-      if (r.exitCode !== 0 || r.isStdoutTruncated || lines.length !== chunk.length) return unknown('ignored entries could not be measured (stat failed, or an entry vanished meanwhile)')
+      // each record must be the form asked for: GNU `stat -f` is another command (file system status), not BSD's format
+      const form = r === first ? /^\d+ \d+ \d+(?:\.\d+)? \d+(?:\.\d+)? / : /^\d+ \d+ \d+ \d+ /
+      if (r.exitCode !== 0 || r.isStdoutTruncated || lines.length !== chunk.length || !lines.every(line => form.test(line))) return unknown('ignored entries could not be measured (stat failed, or an entry vanished meanwhile)', true)
       measured.push(...lines)
     }
     const committedPaths = new Set(tracked.entries.map(e => e.path))
@@ -2478,10 +2512,10 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
         const s = seen[n]!
         if (s.kind === 'file') regular.push(n)
         else if (s.kind === 'dir') return unknown('a changed or untracked path is a directory (a nested repository?), which is not measured')
-        else if (s.kind === 'missing') return unknown('a changed or untracked file vanished while it was measured')
+        else if (s.kind === 'missing') return unknown('a changed or untracked file vanished while it was measured', true)
       }
       const hashes = await hashFiles(regular.map(n => `./${chunk[n]}`), regular.map(n => seen[n]!), false)
-      if ('why' in hashes) return unknown(hashes.why)
+      if ('why' in hashes) return unknown(hashes.why, hashes.raced)
       let next = 0
       for (let n = 0; n < chunk.length; n++) {
         const path = chunk[n]!, s = seen[n]!
@@ -2503,28 +2537,37 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     }
     if (await overdue()) return unknown(late)
     const text = lines.join('\n')
-    // FNV-1a twice with different seeds: a change detector, not a security boundary. Paths and hashes never leave this function.
-    let a = 0x811c9dc5, b = 0x01000193
-    for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); a = Math.imul(a ^ c, 0x01000193) >>> 0; b = Math.imul(b + c, 0x85ebca6b) >>> 0 }
+    // SHA-256, cut to 128 bits (v0.6.4; two 32-bit FNV hashes before). Paths, link texts and kinds are chosen by whoever writes the
+    // tree, and a fast non-cryptographic hash let a chosen change keep the stamp equal. Paths and hashes never leave this function.
+    const digest = (await sha256Text(`cobalt-cockpit/tree/v2\0${text}`)).slice(0, 32)
 
     // The project is part of the fingerprint: the same measurement from another checkout, worktree or repository is another project
     // and compares UNKNOWN (see compareTree), never as an unchanged tree. A SHA-256 of the work tree path, cut to 128 bits: the path
     // itself is never stored.
     const id = (await sha256Text(`cobalt-cockpit/project/v1\0${top}`)).slice(0, 32)
 
-    return `${head}:${lines.length}.${a.toString(16)}${b.toString(16)}@${id}`
+    return `${head}:${lines.length}.${digest}@${id}`
   } catch {
     return unknown('git raised an error or timed out')
   }
 }
-const baseOf = (stamp: string | undefined): string | undefined => (typeof stamp === 'string' && stamp.includes(':') ? stamp.slice(0, stamp.indexOf(':')) : undefined)
+/** The commit a stored fingerprint was taken against; only a full commit id is passed back to Git, anything else measures against HEAD. */
+const baseOf = (stamp: string | undefined): string | undefined => (typeof stamp === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64}):/.test(stamp) ? stamp.slice(0, stamp.indexOf(':')) : undefined)
+/**
+ * A fingerprint, taken once more when the first was cut short only by a race (a file that changed or vanished while it was
+ * read): a tree in use is not called unmeasurable for one unlucky moment. A second race, and every other failure, stand.
+ */
+const settledStamp = async ($: EngineInterface, base?: string): Promise<string | null> => {
+  const first = await treeStamp($, base)
+  return first !== null || !treeRaced ? first : treeStamp($, base)
+}
 
 /** If a goal check was accepted for another working tree than the present one, it is stale now. */
 const reconcileOnce = async ($: EngineInterface): Promise<void> => {
   const task = await read($, taskAtom)
   const accepted = task?.alignment?.tree
   if (task?.alignment?.state !== 'ALIGNED' || typeof accepted !== 'string') return
-  const tree = await treeStamp($, baseOf(accepted))
+  const tree = await settledStamp($, baseOf(accepted))
   // at once: another measurement may replace it
   const why = treeWhy
   if (tree === accepted) return
@@ -2563,9 +2606,9 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
   // the tree an accepted goal check is about, taken before the answer is recorded
   const before = e.action === 'align' || e.action === 'gate' || (e.action as string) === 'gates' ? await read($, taskAtom) : null
   const goalChecked = before !== null && needsAlignment(before)
-  const stamp = goalChecked && e.action === 'align' ? await treeStamp($, baseOf(before.gateTree)) : null
+  const stamp = goalChecked && e.action === 'align' ? await settledStamp($, baseOf(before.gateTree)) : null
   const stampWhy = treeWhy
-  const gateStamp = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') ? await treeStamp($, baseOf(before.gateTree)) : null
+  const gateStamp = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') ? await settledStamp($, baseOf(before.gateTree)) : null
   // why the gate measurement failed, when it was taken and failed; undefined when none was taken
   const gateWhy = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') && gateStamp === null ? treeWhy : undefined
   // A model's "read-only" is a claim. With the Stop guard enforcing, it is accepted only when the tree is still the one the task
@@ -2725,7 +2768,7 @@ const noteEnd = async (
       : []
 
   const measuring = readings.some(r => r.state === 'pass')
-  const observed = measuring ? await treeStamp($, baseOf((await read($, taskAtom))?.gateTree)) : null
+  const observed = measuring ? await settledStamp($, baseOf((await read($, taskAtom))?.gateTree)) : null
   const observedWhy = measuring && observed === null ? treeWhy : undefined
   if (edits.length > 0 || readings.length > 0) {
     await change($, (task, now) => {

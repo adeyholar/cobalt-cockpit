@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { GIT_SAFE } from '../hooks/git-integrity'
+import { GIT_OVERRIDES, GIT_SAFE } from '../hooks/git-integrity'
 import { parseShell } from '../hooks/shell'
 import { start, world } from './world'
 
@@ -22,7 +22,7 @@ const reviewer = async ($: Engine, owned: string[] = SCOPE, mode: 'read' | 'writ
   return (await spawn($, 'rev', mode === 'write' ? 'cobalt-cockpit:worker' : 'cobalt-cockpit:reviewer')).agentId!
 }
 const sentOf = (w: ReturnType<typeof world>): string[][] => w.ran.filter(call => call['tool'] === 'Bash').map(call => parseShell(String(call['command'])).pipelines[0]!.commands[0]!.argv)
-const HEAD = ['git', '--no-pager', ...GIT_SAFE, '-C', ROOT]
+const HEAD = ['git', '--no-pager', ...GIT_SAFE, ...GIT_OVERRIDES, '-C', ROOT]
 
 describe('a scoped reviewer inspects Git inside its scope', () => {
   test('diff, log, show, status, grep and ls-files reach the host pinned, hardened and with canonical paths', options, async ($, on) => {
@@ -82,9 +82,9 @@ describe('what a scoped inspection costs the host', () => {
     const wildcard = await cost(wide, 'git diff main...HEAD -- hooks/swarm.ts')
     const scoped = await cost(narrow, 'git diff main...HEAD -- hooks/swarm.ts')
     // repository identity (two git, two realpath), Git's excludes and attributes files checked before Git reads them (v0.6.4: one
-    // rev-parse, two config, one stat, and one more for the alternates file that is usually absent) and the filter check are what a
-    // wildcard inspection already paid
-    const inputs = ['git rev-parse', 'git config', 'git config', 'stat', 'stat']
+    // rev-parse, two config and one stat, which also answers for the absent attributes and alternates files) and the filter check
+    // are what a wildcard inspection already paid
+    const inputs = ['git rev-parse', 'git config', 'git config', 'stat']
     expect(wildcard).toEqual(['git rev-parse', 'git rev-parse', 'realpath', 'realpath', ...inputs, 'git config'])
     expect(scoped).toEqual(['git rev-parse', 'git rev-parse', 'realpath', 'realpath', 'realpath', 'git rev-parse --verify', 'git rev-parse --verify', ...inputs, 'git config'])
     // a command refused for its shape, or for a path outside the scope, runs no revision proof at all
@@ -239,9 +239,9 @@ describe('a wildcard reader keeps the v0.6.0 rule, with the path separator', () 
     expect((await git($, a, "git grep -n '\\$\\.process' -- hooks")).deny).toBeUndefined()
     expect((await git($, a, 'git log --oneline -5')).deny).toBeUndefined()
     expect(sentOf(w)).toEqual([
-      ['git', '--no-pager', ...GIT_SAFE, 'diff', '--no-ext-diff', '--no-textconv', 'main...HEAD', '--', 'hooks/swarm.ts'],
-      ['git', '--no-pager', ...GIT_SAFE, 'grep', '-n', '\\$\\.process', '--', 'hooks'],
-      ['git', '--no-pager', ...GIT_SAFE, 'log', '--no-ext-diff', '--no-textconv', '--oneline', '-5'],
+      ['git', '--no-pager', ...GIT_SAFE, ...GIT_OVERRIDES, 'diff', '--no-ext-diff', '--no-textconv', 'main...HEAD', '--', 'hooks/swarm.ts'],
+      ['git', '--no-pager', ...GIT_SAFE, ...GIT_OVERRIDES, 'grep', '-n', '\\$\\.process', '--', 'hooks'],
+      ['git', '--no-pager', ...GIT_SAFE, ...GIT_OVERRIDES, 'log', '--no-ext-diff', '--no-textconv', '--oneline', '-5'],
     ])
   })
   test('what it refused before it refuses still, and the pager and output options in every form Git reads', options, async ($, on) => {

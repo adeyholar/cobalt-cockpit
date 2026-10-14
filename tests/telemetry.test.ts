@@ -5,6 +5,7 @@ import { SEGMENT_CAP_BYTES, TOTAL_CAP_BYTES, aggregate, cleanEvent, encode, expi
 import type { TEvent } from '../hooks/telemetry'
 import { resetStore } from '../hooks/telemetry-store'
 import { command, planAndComplete, prompt, start, world } from './world'
+import { INSPECT_BSD, INSPECT_GNU } from '../hooks/git-integrity'
 
 // built at run time: the fixtures are synthetic and nothing here is a real path or key
 const HOMEDIR = ['', 'home', 'someone'].join('/')
@@ -182,7 +183,8 @@ describe('through the host', () => {
       expect(files(w)).toHaveLength(1)
       // (v0.6.4: the fingerprint's own read-only `stat` of the work tree is no route to the telemetry directory)
       expect(w.runs.some(r => ['mkdir', 'chmod', 'sh', 'bash', 'python3', 'install'].includes(r[0] ?? ''))).toBe(false)
-      expect(w.runs.some(r => r[0] === 'stat' && r.some(a => a.includes('cobalt-cockpit')))).toBe(false)
+      // the only stat left is the fingerprint's inspection of the work tree, in its own fixed form
+      expect(w.runs.filter(r => r[0] === 'stat' && !r.includes(INSPECT_GNU) && !r.includes(INSPECT_BSD))).toEqual([])
     })
   }
   // Forty prompts run through the whole prompt hook at once, about 5 git calls and a ledger write each. Measured in isolation: 1.4 s on a

@@ -96,19 +96,34 @@ describe('every measurement process is bounded', () => {
     expect(w.runs.filter(r => r[0] === 'git' && r.includes('config')).every(r => r.some(a => a === '--get' || a === '--get-regexp'))).toBe(true)
     expect(w.runs.filter(r => !MEASURING.includes(r[0]!) && r[0] !== SCRIPT)).toEqual([])
   })
-  test('partial: where the memory cap is accepted but not enforced, CPU and file limits still apply and doctor says so', guard(), async ($, on) => {
+  test('partial: where the memory cap is accepted but not enforced, it is still set, and doctor says it is not enforced', guard(), async ($, on) => {
     const { w } = fixture(on); busyTree(w); w.boundMode = 'partial'
     await begun($); await stop($)
     const scripts = new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))
-    expect([...scripts]).toEqual([boundScript(false)])
+    expect([...scripts]).toEqual([boundScript(true)])
     const out = String((await command($, 'doctor')).text)
-    expect(out).toContain('WARN working-tree measurement runs under CPU 20 s, files written at most 64 MiB and the host\'s timeout; this platform does NOT enforce the memory limit')
+    expect(out).toContain('WARN working-tree measurement runs under CPU 20 s, files written at most 64 MiB, no core dump, and the host\'s timeout; this platform does NOT enforce the memory limit it accepts')
+    expect(out).toContain('a file Git reads on its own (a linked worktree\'s commondir, a configuration include, grafts, sparse-checkout) is bounded only by CPU time and the timeout')
   })
-  test('none: with no shell to set limits the commands run directly, and doctor warns', guard(), async ($, on) => {
+  test('basic: where no memory limit can be set, CPU, file size and core still apply', guard(), async ($, on) => {
+    const { w } = fixture(on); busyTree(w); w.boundMode = 'basic'
+    await begun($); await stop($)
+    expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(false)])
+    expect(String((await command($, 'doctor')).text)).toContain('no memory limit could be set here')
+  })
+  test('none: with no shell to set limits the commands run directly, the probe is tried again, and doctor warns', guard(), async ($, on) => {
     const { w } = fixture(on); busyTree(w); w.boundMode = 'none'
     await begun($); await stop($)
     expect(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)).every(s => s === null)).toBe(true)
+    expect(w.boundProbes.length).toBeGreaterThan(2)                               // not answered is not kept: probed again
     expect(String((await command($, 'doctor')).text)).toContain('WARN working-tree measurement runs under the host\'s timeout only')
+  })
+  test('a probe that does not answer lowers nothing: the memory limit is still set, and the probe runs again until it answers', guard(), async ($, on) => {
+    const { w } = fixture(on); busyTree(w); w.boundMode = 'flaky'
+    await begun($); await stop($)
+    expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(true)])
+    expect(w.boundProbes.filter(p => p === BOUND_PROBE_CAPPED)).toHaveLength(2)    // once without an answer, once settled
+    expect(String((await command($, 'doctor')).text)).toContain('OK   working-tree measurement runs under kernel limits')
   })
   test('full: doctor reports the enforced limits', async ($, on) => {
     world(on); await start($)
@@ -164,9 +179,9 @@ describe('vector 2: configuration redirecting an input to an unbounded device', 
     { name: 'core.excludesFile = /dev/zero', set: w => { w.gitConfig['core.excludesFile'] = '/dev/zero'; w.kinds['/dev/zero'] = 'char' }, why: 'core.excludesFile is a character device, not an ordinary file', read: '/dev/zero' },
     { name: 'core.attributesFile = /dev/zero', set: w => { w.gitConfig['core.attributesFile'] = '/dev/zero'; w.kinds['/dev/zero'] = 'char' }, why: 'core.attributesFile is a character device', read: '/dev/zero' },
     { name: 'core.attributesFile = a FIFO', set: w => { w.gitConfig['core.attributesFile'] = '/tmp/attr-fifo'; w.kinds['/tmp/attr-fifo'] = 'fifo' }, why: 'core.attributesFile is a FIFO', read: '/tmp/attr-fifo' },
-    { name: '.git/info/attributes linked to /dev/zero', set: w => { w.kinds['.git/info/attributes'] = 'link'; w.followKinds['.git/info/attributes'] = 'char' }, why: 'info/attributes is a character device', read: '/work/example/.git/info/attributes' },
-    { name: '.git/info/exclude linked to a block device', set: w => { w.kinds['.git/info/exclude'] = 'link'; w.followKinds['.git/info/exclude'] = 'block' }, why: 'info/exclude is a block device', read: '/work/example/.git/info/exclude' },
-    { name: 'objects/info/alternates linked to /dev/zero', set: w => { w.kinds['.git/objects/info/alternates'] = 'link'; w.followKinds['.git/objects/info/alternates'] = 'char' }, why: 'objects/info/alternates is a character device', read: '/work/example/.git/objects/info/alternates' },
+    { name: '.git/info/attributes linked to /dev/zero', set: w => { w.kinds['.git/info/attributes'] = 'link'; w.followKinds['.git/info/attributes'] = 'char' }, why: 'info/attributes is a character device', read: '.git/info/attributes' },
+    { name: '.git/info/exclude linked to a block device', set: w => { w.kinds['.git/info/exclude'] = 'link'; w.followKinds['.git/info/exclude'] = 'block' }, why: 'info/exclude is a block device', read: '.git/info/exclude' },
+    { name: 'objects/info/alternates linked to /dev/zero', set: w => { w.kinds['.git/objects/info/alternates'] = 'link'; w.followKinds['.git/objects/info/alternates'] = 'char' }, why: 'objects/info/alternates is a character device', read: '.git/objects/info/alternates' },
     { name: 'a 200 MB core.excludesFile', set: w => { w.gitConfig['core.excludesFile'] = '/home/tester/huge-ignore'; w.sizes['/home/tester/huge-ignore'] = 200_000_000 }, why: `core.excludesFile is larger than ${SOURCE_BYTES / 1024 / 1024} MiB`, read: '/home/tester/huge-ignore' },
   ]
   for (const c of cases) {
@@ -336,10 +351,17 @@ describe('a file swapped while it is measured is not believed', () => {
   test('an excludes file replaced by a link to a device after it was checked: UNKNOWN', guard(), async ($, on) => {
     const { w, h } = fixture(on)
     await begun($)
-    swapDuringHash(w, '/work/example/.git/info/exclude', () => { w.kinds['.git/info/exclude'] = 'link'; w.followKinds['.git/info/exclude'] = 'char' })
+    swapDuringHash(w, '.git/info/exclude', () => { w.kinds['.git/info/exclude'] = 'link'; w.followKinds['.git/info/exclude'] = 'char' })
     await stop($)
     notBelieved(h, 'the excludes or attributes files: a file changed while it was being measured')
     unidentified(h, 'info/exclude is a character device')                         // and once it settled on a device, never measured
+  })
+  test('a tracked file rewritten in place (same size and inode, new modification time) while it is read: UNKNOWN', guard(), async ($, on) => {
+    const { w, h } = fixture(on); w.headBlobs['src/a.ts'] = blobOf('a'); w.watched['src/a.ts'] = 'a'
+    await begun($)
+    swapDuringHash(w, 'src/a.ts', () => { w.mtimes['src/a.ts'] = '2.000000000' })
+    await stop($)
+    notBelieved(h, 'a tracked file changed while it was being measured')
   })
   test('the release check: a changed file swapped while it is re-read is no candidate', { options: { orchestration: true, profile: 'SONNET_LED' } }, async ($, on) => {
     const w = world(on); hostState(on, {})
@@ -371,7 +393,23 @@ describe('an unmeasurable tree never keeps a goal check or a passing check', () 
   test('a transient failure counts the same: it is not a clean tree', async ($, on) => {
     const w = world(on); await toDone($)
     w.gitHangs = 'diff'
-    expect(await progress($, { action: 'status' })).not.toStartWith('DONE')
+    const status = await progress($, { action: 'status' })
+    expect(status).not.toStartWith('DONE')
+    expect(status).toContain('TEST pending')
+  })
+  test('one file changing while it is read is measured once more: a settled, unchanged tree keeps DONE', async ($, on) => {
+    const w = world(on); w.untracked = ['notes.md']; await toDone($)
+    let swaps = 0
+    w.duringRun = argv => { if (swaps === 0 && argv[0] === 'git' && argv.includes('hash-object') && argv.includes('./notes.md')) { swaps++; w.inodes['notes.md'] = 2 } }
+    expect(await progress($, { action: 'status' })).toStartWith('DONE 100%')
+    expect(swaps).toBe(1)
+  })
+  test('a file that changes at every read is not settled: DONE is withdrawn', async ($, on) => {
+    const w = world(on); w.untracked = ['notes.md']; await toDone($)
+    w.duringRun = argv => { if (argv[0] === 'git' && argv.includes('hash-object') && argv.includes('./notes.md')) w.inodes['notes.md'] = (w.inodes['notes.md'] ?? 1) + 1 }
+    const status = await progress($, { action: 'status' })
+    expect(status).not.toStartWith('DONE')
+    expect(status).toContain('TEST pending')
   })
   test('control: a measured tree that did not change keeps DONE', async ($, on) => {
     world(on); await toDone($)
@@ -413,6 +451,35 @@ describe('an unmeasurable tree never keeps a goal check or a passing check', () 
     await passAllGates($, { align: false })
     await bash($, 'npm test')
     expect(await progress($, { action: 'status' })).toContain('CODE pass')
+  })
+})
+
+describe('inspection reads the system\'s answer, not the path', () => {
+  test('a tracked path whose name reads like "No such file or directory", but cannot be inspected, is UNKNOWN, not a deletion', guard(), async ($, on) => {
+    const name = 'd/x: No such file or directory'
+    const { w, h } = fixture(on); w.headBlobs[name] = blobOf('x'); w.watched[name] = 'x'
+    await begun($); w.watchedDenied = [name]
+    await stop($)
+    unidentified(h, 'tracked files could not be inspected completely')
+  })
+  test('deleted tracked files cost one stat for the batch, not one each', guard(), async ($, on) => {
+    const { w } = fixture(on)
+    for (let i = 0; i < 60; i++) { w.headBlobs[`gone/f${i}.ts`] = blobOf('x'); w.watched[`gone/f${i}.ts`] = 'x' }
+    await begun($)
+    for (let i = 0; i < 60; i++) w.kinds[`gone/f${i}.ts`] = 'missing'
+    const before = w.inspectCalls
+    await stop($)
+    expect(checks(w)).toBe(1)                                                        // 60 deletions: a change, measured
+    expect(w.inspectCalls - before).toBeLessThan(20)
+  })
+  test('a linked worktree: Git\'s own files are where Git says, outside the work tree, and are checked there', guard(), async ($, on) => {
+    const { w, h } = fixture(on); w.gitPathBase = '/work/main/.git/'
+    await begun($)
+    expect((await stop($)).block).toBeUndefined()                                 // measured, unchanged
+    w.kinds['/work/main/.git/info/attributes'] = 'link'; w.followKinds['/work/main/.git/info/attributes'] = 'char'
+    await prompt($, 'again'); w.tree['a.ts'] = 'changed'
+    await stop($)
+    unidentified(h, 'info/attributes is a character device')
   })
 })
 

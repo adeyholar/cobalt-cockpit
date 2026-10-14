@@ -22,8 +22,12 @@ export type World = {
   wrappers: (string | null)[]
   /** The limit probes the plugin ran, as their scripts; they are not in `runs`. */
   boundProbes: string[]
-  /** What this host's `sh` makes of the limits: all enforced, accepted but no memory cap enforced, or no `sh` at all. */
-  boundMode: 'full' | 'partial' | 'none'
+  /**
+   * What this host's `sh` makes of the limits: all enforced (`full`); the memory limit accepted but not enforced (`partial`);
+   * no memory limit accepted (`basic`); no `sh` at all (`none`); `flaky`: the first enforcement probe does not answer, later ones
+   * are `full`.
+   */
+  boundMode: 'full' | 'partial' | 'basic' | 'none' | 'flaky'
   /**
    * What `stat` (without -L) sees at a path, relative to the work tree or absolute outside it; unset: from `diskModes`, a watched
    * or embedded directory, else an ordinary file (alternates: missing). `followKinds` is what `stat -L` sees through a link
@@ -33,6 +37,13 @@ export type World = {
   followKinds: Record<string, Kind>
   sizes: Record<string, number>
   inodes: Record<string, number>
+  /** A path's modification time as `stat` prints it (default 1.000000000). */
+  mtimes: Record<string, string>
+  /**
+   * What `rev-parse --git-path <name>` prefixes: `.git/` (relative, as real Git answers in a main worktree) by default, an
+   * absolute common directory for a linked worktree.
+   */
+  gitPathBase: string
   /** The text of a symbolic link, as `readlink` prints it (default `target`); `outputs.readlink` overrides it. */
   linkTargets: Record<string, string>
   /** Which `stat` this host has: GNU (`--printf`) or BSD (`-f`). */
@@ -219,6 +230,8 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     followKinds: {},
     sizes: {},
     inodes: {},
+    mtimes: {},
+    gitPathBase: '.git/',
     linkTargets: {},
     statFlavor: 'gnu',
     telemetryRuns: [],
@@ -443,7 +456,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     const bare = raw.replace(/^\.\//, ''), key = keyOf(raw)
     return key.endsWith('info/exclude') ? w.excludes : key.endsWith('info/attributes') ? w.attributes : w.watched[bare] ?? w.watched[key] ?? w.tree[key] ?? (w.untracked.includes(key) ? 'u' : '')
   }
-  const inspectOne = (raw: string, follow: boolean): { mode: number; size: number; ino: number } | 'missing' | 'denied' => {
+  const inspectOne = (raw: string, follow: boolean): { mode: number; size: number; ino: number; mtime: string } | 'missing' | 'denied' => {
     const bare = raw.replace(/^\.\//, ''), key = keyOf(raw)
     if (w.watchedDenied.includes(raw) || w.watchedDenied.includes(bare)) return 'denied'
     let kind: Kind | undefined = w.kinds[key] ?? w.kinds[bare]
@@ -451,14 +464,15 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       const m = w.diskModes[key]
       if (m !== undefined) kind = m === 0 ? 'missing' : KIND_OF[m & 0xf000] ?? 'file'
       else if (w.watchedDirs[raw] !== undefined || w.watchedDirs[bare] !== undefined || w.watchedUnreadable.includes(raw) || w.embeddedRepos[`${key}/`] !== undefined) kind = 'dir'
-      else kind = key.endsWith('objects/info/alternates') ? 'missing' : 'file'
+      // as in a new repository: an exclude file, no attributes file (unless a test wrote one), no alternates
+      else kind = key.endsWith('objects/info/alternates') || (key.endsWith('info/attributes') && w.attributes === '') ? 'missing' : 'file'
     }
     if (follow && kind === 'link') kind = w.followKinds[key] ?? w.followKinds[bare] ?? 'file'
     if (kind === 'missing') return 'missing'
     const disk = w.diskModes[key]
     const mode = kind === 'file' && disk !== undefined && (disk & 0xf000) === 0x8000 ? disk : KIND_MODE[kind]!
     const size = w.sizes[key] ?? w.sizes[bare] ?? (kind === 'file' ? new TextEncoder().encode(contentOf(raw)).length : kind === 'link' ? (w.linkTargets[key] ?? 'target').length : 0)
-    return { mode, size, ino: w.inodes[key] ?? w.inodes[bare] ?? 1 }
+    return { mode, size, ino: w.inodes[key] ?? w.inodes[bare] ?? 1, mtime: w.mtimes[key] ?? w.mtimes[bare] ?? '1.000000000' }
   }
   const PROBES = new Set([BOUND_PROBE_SET(true), BOUND_PROBE_SET(false), BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED])
 
@@ -476,8 +490,10 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       const script = String(e.argv[2])
       w.boundProbes.push(script)
       if (w.boundMode === 'none') throw new Error('spawn sh ENOENT')
+      if (w.boundMode === 'basic' && script === BOUND_PROBE_SET(true)) return ran(2)
+      if (w.boundMode === 'flaky' && script === BOUND_PROBE_CAPPED && w.boundProbes.filter(x => x === BOUND_PROBE_CAPPED).length === 1) throw new Error('sh was still running at the timeout')
 
-      return script === BOUND_PROBE_CAPPED ? ran(w.boundMode === 'full' ? 1 : 0) : script === BOUND_PROBE_CONTROL ? ran(0) : ran(0, 'set\n')
+      return script === BOUND_PROBE_CAPPED ? ran(w.boundMode === 'partial' ? 0 : 1) : script === BOUND_PROBE_CONTROL ? ran(0) : ran(0, 'set\n')
     }
     // A command started through the limit script is answered as itself; the script is recorded beside it.
     const isWrapped = e.argv[0] === 'sh' && e.argv[1] === '-c' && e.argv[3] === BOUND_TAG
@@ -495,7 +511,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       const names = argv.slice(argv.indexOf('--') + 1)
       const seen = names.map(n => inspectOne(n, argv.includes('-L')))
       const errors = names.flatMap((n, k) => (seen[k] === 'missing' ? [`stat: cannot statx '${n}': No such file or directory\n`] : seen[k] === 'denied' ? [`stat: cannot statx '${n}': Permission denied\n`] : []))
-      const stdout = seen.map((x, k) => (typeof x === 'string' ? '' : gnu ? `${x.mode.toString(16)} ${x.size} ${x.ino} 1.000000000 1.000000000 ${names[k]}\0` : `${x.mode.toString(8)} ${x.size} ${x.ino} 1 1\n`)).join('')
+      const stdout = seen.map((x, k) => (typeof x === 'string' ? '' : gnu ? `${x.mode.toString(16)} ${x.size} ${x.ino} ${x.mtime} 1.000000000 ${names[k]}\0` : `${x.mode.toString(8)} ${x.size} ${x.ino} ${x.mtime.split('.')[0]} 1\n`)).join('')
 
       return { value: { exitCode: errors.length > 0 ? 1 : 0, stdout, stderr: errors.join(''), isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -503,7 +519,8 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       w.statCalls++
       const names = argv.slice(argv.indexOf('--') + 1)
 
-      return ran(0, names.map(n => `${w.ignoredFiles[n] ?? w.dirMeta[n] ?? w.ignoredMeta[n] ?? '1 1'} ${n}\0`).join(''))
+      // the form `%i %s %.9Y %.9Z %n` prints: inode, then the test's `size mtime`, then a change time
+      return ran(0, names.map(n => `1 ${w.ignoredFiles[n] ?? w.dirMeta[n] ?? w.ignoredMeta[n] ?? '1 1'} 1.000000000 ${n}\0`).join(''))
     }
     if (program === 'readlink' && w.outputs['readlink'] === undefined) {
       const asked = String(argv.at(-1))
@@ -546,7 +563,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       const git = argv.slice(at)
       if (w.gitHangs !== null && git[0] === w.gitHangs) throw new Error('git was still running at the timeout')
       if (w.gitTruncates !== null && git[0] === w.gitTruncates) return { value: { exitCode: 0, stdout: 'cut', stderr: '', isStdoutTruncated: true, isStderrTruncated: false } }
-      if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, git.flatMap((a, i) => (a === '--git-path' ? [`/work/example/.git/${git[i + 1]}\n`] : [])).join(''))
+      if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, git.flatMap((a, i) => (a === '--git-path' ? [`${w.gitPathBase}${git[i + 1]}\n`] : [])).join(''))
       if (git[0] === 'config') return git.includes('--get-regexp') && w.gitFilterConfig !== '' ? ran(0, w.gitFilterConfig) : w.gitConfig[git.at(-1)!] !== undefined ? ran(0, w.gitConfig[git.at(-1)!] + '\n') : ran(1)
       if (git[0] === 'check-attr') return ran(0, w.gitFilterAttributes)
       if (git[0] === 'rev-parse' && git.includes('--show-prefix')) return ran(0, w.gitPrefix + '\n')
