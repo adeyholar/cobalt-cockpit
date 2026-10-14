@@ -484,11 +484,12 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   const KIND_MODE: Record<string, number> = { file: 0x81a4, link: 0xa1ff, dir: 0x41ed, fifo: 0x11a4, socket: 0xc1ed, char: 0x21b6, block: 0x61b0 }
   const KIND_OF: Record<number, Kind> = { 0x8000: 'file', 0xa000: 'link', 0x4000: 'dir', 0x1000: 'fifo', 0xc000: 'socket', 0x2000: 'char', 0x6000: 'block' }
   const keyOf = (raw: string): string => { const p = raw.replace(/^\.\//, ''); return p.startsWith(`${w.top}/`) ? p.slice(w.top.length + 1) : p }
-  const contentOf = (raw: string): string => {
+  // `untracked` is `w.untracked` as a set, made once per `stat` call: a lookup per path in the list itself made the model quadratic
+  const contentOf = (raw: string, untracked: ReadonlySet<string>): string => {
     const bare = raw.replace(/^\.\//, ''), key = keyOf(raw)
-    return key.endsWith('info/exclude') ? w.excludes : key.endsWith('info/attributes') ? w.attributes : w.watched[bare] ?? w.watched[key] ?? w.tree[key] ?? (w.untracked.includes(key) ? 'u' : '')
+    return key.endsWith('info/exclude') ? w.excludes : key.endsWith('info/attributes') ? w.attributes : w.watched[bare] ?? w.watched[key] ?? w.tree[key] ?? (untracked.has(key) ? 'u' : '')
   }
-  const inspectOne = (raw: string, follow: boolean): { mode: number; size: number; ino: number; mtime: string } | 'missing' | 'denied' => {
+  const inspectOne = (raw: string, follow: boolean, untracked: ReadonlySet<string>): { mode: number; size: number; ino: number; mtime: string } | 'missing' | 'denied' => {
     const bare = raw.replace(/^\.\//, ''), key = keyOf(raw)
     if (w.watchedDenied.includes(raw) || w.watchedDenied.includes(bare)) return 'denied'
     let kind: Kind | undefined = w.kinds[key] ?? w.kinds[bare]
@@ -506,7 +507,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     if (kind === 'missing') return 'missing'
     const disk = w.diskModes[key]
     const mode = kind === 'file' && disk !== undefined && (disk & 0xf000) === 0x8000 ? disk : KIND_MODE[kind]!
-    const size = w.sizes[key] ?? w.sizes[bare] ?? (kind === 'file' ? new TextEncoder().encode(contentOf(raw)).length : kind === 'link' ? (w.linkTargets[key] ?? 'target').length : 0)
+    const size = w.sizes[key] ?? w.sizes[bare] ?? (kind === 'file' ? new TextEncoder().encode(contentOf(raw, untracked)).length : kind === 'link' ? (w.linkTargets[key] ?? 'target').length : 0)
     return { mode, size, ino: w.inodes[key] ?? w.inodes[bare] ?? 1, mtime: w.mtimes[key] ?? w.mtimes[bare] ?? '1.000000000' }
   }
   const PROBES = new Set([BOUND_PROBE_SET(true), BOUND_PROBE_SET(false), BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED, BOUND_PROBE_GROUP])
@@ -550,7 +551,8 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       if ((w.statFlavor === 'gnu') !== gnu) return { value: { exitCode: 1, stdout: '', stderr: gnu ? 'stat: illegal option -- -\n' : 'stat: cannot read file system information\n', isStdoutTruncated: false, isStderrTruncated: false } }
       w.inspectCalls++
       const names = argv.slice(argv.indexOf('--') + 1)
-      const seen = names.map(n => inspectOne(n, argv.includes('-L')))
+      const untracked = new Set(w.untracked)
+      const seen = names.map(n => inspectOne(n, argv.includes('-L'), untracked))
       const errors = names.flatMap((n, k) => (seen[k] === 'missing' ? [`stat: cannot statx '${n}': No such file or directory\n`] : seen[k] === 'denied' ? [`stat: cannot statx '${n}': Permission denied\n`] : []))
       const stdout = seen.map((x, k) => (typeof x === 'string' ? '' : gnu ? `${x.mode.toString(16)} ${x.size} ${x.ino} ${x.mtime} 1.000000000 ${names[k]}\0` : `${x.mode.toString(8)} ${x.size} ${x.ino} ${x.mtime.split('.')[0]} 1\n`)).join('')
 

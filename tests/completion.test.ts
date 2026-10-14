@@ -588,7 +588,8 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     expect(taskOf(h).kind).toBe('coding')
     expect(taskOf(h).stopHold).toBeDefined()
   })
-  test('4 many untracked files: 5000 are measured in a bounded number of git calls, and still UNCHANGED', guard(), async ($, on) => {
+  // 4 and 4b measure 5000 untracked files; a shared CI runner has taken over 7 s for 4b, past the kit's 5 s default
+  test('4 many untracked files: 5000 are measured in a bounded number of git calls, and still UNCHANGED', { ...guard(), timeoutMs: 20000 }, async ($, on) => {
     const { w, h } = await readonlyTask($, on, w => { w.untracked = Array.from({ length: 5000 }, (_, i) => `gen/u${i}.txt`) })
     expect(taskOf(h).startTree).toEqual(expect.any(String))
     await finishAll($)
@@ -598,7 +599,7 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     expect(scriptRuns(w)).toBe(0)
     expect(taskOf(h).status).toBe('done')
   })
-  test('4b one more untracked file among 5000 is CHANGED', guard(), async ($, on) => {
+  test('4b one more untracked file among 5000 is CHANGED', { ...guard(), timeoutMs: 20000 }, async ($, on) => {
     const { w, h } = await readonlyTask($, on, w => { w.untracked = Array.from({ length: 5000 }, (_, i) => `gen/u${i}.txt`) })
     w.untracked.push('gen/new.txt')
     await finishAll($)
