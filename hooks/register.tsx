@@ -360,7 +360,8 @@ const MISSING: Inspected = { kind: 'missing', mode: 0, size: 0, identity: 'missi
 const inspectPaths = async ($: EngineInterface, cwd: string, paths: string[], follow = false): Promise<Inspected[] | null> => {
   if (paths.length === 0) return []
   const L = follow ? ['-L'] : []
-  const ask = async (names: string[], gnu: boolean) => bounded($, gnu ? ['stat', ...L, '--printf', INSPECT_GNU, '--', ...names] : ['stat', ...L, '-f', INSPECT_BSD, '--', ...names], { cwd, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
+  // not `ask`: that name is the dialog helper `$` is passed to, and the Directory reads a second binding of it as hiding the first
+  const runStat = async (names: string[], gnu: boolean) => bounded($, gnu ? ['stat', ...L, '--printf', INSPECT_GNU, '--', ...names] : ['stat', ...L, '-f', INSPECT_BSD, '--', ...names], { cwd, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
   const records = (text: string, gnu: boolean): Inspected[] | null => {
     const rows = text === '' ? [] : gnu ? (text.endsWith('\0') ? text.split('\0').slice(0, -1) : null) : text.endsWith('\n') ? text.split('\n').slice(0, -1) : null
     if (rows === null) return null
@@ -372,7 +373,7 @@ const inspectPaths = async ($: EngineInterface, cwd: string, paths: string[], fo
   // not answered, those are missing; otherwise only those are asked about again, one at a time. An error line ends with
   // the system's own words after the path, so a path cannot pass for another error.
   const known = new Map<string, Inspected>()
-  const gnu = await ask(paths, true)
+  const gnu = await runStat(paths, true)
   const rows = gnu !== null && !gnu.isStdoutTruncated && !gnu.isStderrTruncated ? records(gnu.stdout, true) : null
   if (gnu !== null && gnu.exitCode === 0 && gnu.stderr.trim() === '' && rows !== null && rows.length === paths.length && rows.every((s, k) => s.name === paths[k])) return rows
   if (gnu !== null && rows !== null) {
@@ -383,7 +384,7 @@ const inspectPaths = async ($: EngineInterface, cwd: string, paths: string[], fo
   }
   if (known.size === 0) {
     // no GNU answer at all: BSD stat, all at once (its records carry no name, so only a complete answer counts)
-    const bsd = await ask(paths, false)
+    const bsd = await runStat(paths, false)
     const all = bsd !== null && gitAnswered(bsd) ? records(bsd.stdout, false) : null
     if (all !== null && all.length === paths.length) return all
   }
@@ -392,7 +393,7 @@ const inspectPaths = async ($: EngineInterface, cwd: string, paths: string[], fo
     let got: Inspected | null = known.get(path) ?? null
     for (const isGnu of [true, false]) {
       if (got !== null) break
-      const r = await ask([path], isGnu)
+      const r = await runStat([path], isGnu)
       if (r === null) return null
       if (gitAnswered(r)) { const one = records(r.stdout, isGnu); got = one !== null && one.length === 1 && (!isGnu || one[0]!.name === path) ? one[0]! : null }
       else if (r.exitCode !== 0 && !r.isStderrTruncated && ENOENT.test(r.stderr.replace(/\n$/, ''))) got = MISSING
