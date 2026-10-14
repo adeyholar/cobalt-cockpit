@@ -47,9 +47,10 @@ const scan = (path, file, text) => {
   const passedTo = new Set()
   // functions the host's own package provides (`import { read, update } from 'claude-code'`): the documented way to pass `$`
   const hostApi = new Set()
+  const hostDecl = new Map() // name -> the identifier of its import
   for (const st of source.statements) {
     if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier) && /^claude-code(\/|$)/.test(st.moduleSpecifier.text) && st.importClause?.namedBindings && ts.isNamedImports(st.importClause.namedBindings)) {
-      for (const el of st.importClause.namedBindings.elements) hostApi.add(el.name.text)
+      for (const el of st.importClause.namedBindings.elements) { hostApi.add(el.name.text); hostDecl.set(el.name.text, el.name) }
     }
   }
   const isKnown = n => n !== null && (local.has(n) || hostApi.has(n))
@@ -90,7 +91,7 @@ const scan = (path, file, text) => {
     if (ts.isCallExpression(holder) && holder.arguments.includes(node)) {
       const name0 = calleeName(holder)
       if (!isKnown(name0)) return report(id, `\`${name}\` is passed to ${name0 === null ? 'a call the file does not declare' : `\`${name0}\`, which is not declared at the top level of this file`}`)
-      if (local.has(name0) && !hostApi.has(name0)) passedTo.add(name0)
+      passedTo.add(name0)
       // a file's own helper that receives `$` is hoisted into its own statement, not nested in the arguments of another call
       // (the host's `read` and `update` are the documented way to pass `$` and may sit anywhere)
       if (!local.has(name0) || hostApi.has(name0)) { shadowCheck(id, name, name0); return }
@@ -146,18 +147,22 @@ const scan = (path, file, text) => {
     ts.forEachChild(node, visit)
   }
   visit(source)
-  // File-wide, whatever the scope: a function `$` or `on` is passed to is bound once, at the top level, and in a registration
-  // file nothing but a parameter is named `on`. The Directory reported a second binding in a sibling scope (v0.6.4: a nested
-  // `ask` beside the top-level `ask` dialog helper; v0.5.3: `on` destructured in a callback), which the walk above, limited to
-  // the scopes around a use, does not reach.
+  // File-wide, whatever the scope: a function `$` or `on` is passed to is bound once, at the top level or by its import from
+  // the host, and in a registration file nothing but a parameter is named `on`. The Directory reported a second binding in a
+  // sibling scope (v0.6.4: a nested `ask` beside the top-level `ask` dialog helper; v0.5.3: `on` destructured in a callback),
+  // which the walk above, limited to the scopes around a use, does not reach.
+  // A parameter of a function type, a signature or an overload binds nothing at run time.
+  const isTypeOnly = fn => ts.isFunctionTypeNode(fn) || ts.isConstructorTypeNode(fn) || ts.isCallSignatureDeclaration(fn) || ts.isConstructSignatureDeclaration(fn) || ts.isMethodSignature(fn) || ts.isIndexSignatureDeclaration(fn) || ((ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn)) && fn.body === undefined)
   const isBindingName = node => {
     const p = node.parent
+    if (ts.isParameter(p) && isTypeOnly(p.parent)) return false
     return (ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p) || ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p) || ts.isClassDeclaration(p) || ts.isClassExpression(p) || ts.isEnumDeclaration(p) || ts.isImportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p)) && p.name === node
   }
   const rebinds = node => {
     if (ts.isIdentifier(node) && isBindingName(node)) {
       const name = node.text
-      if (passedTo.has(name) && node !== localDecl.get(name)) report(node, `\`${name}\` is declared again here, while \`$\` or \`on\` is passed to the top-level \`${name}\` (${at(localDecl.get(name))}): a second binding of that name, in any scope, hides which one receives it`)
+      const first = localDecl.get(name) ?? hostDecl.get(name)
+      if (passedTo.has(name) && node !== first) report(node, `\`${name}\` is declared again here, while \`$\` or \`on\` is passed to \`${name}\` (${at(first)}): a second binding of that name, in any scope, hides which one receives it`)
       else if (name === 'on' && isRegistrationFile && !(ts.isParameter(node.parent) && ts.isIdentifier(node.parent.name))) report(node, '`on` is bound here by something other than a parameter: in a registration file the name belongs to the registration function')
     }
     ts.forEachChild(node, rebinds)
@@ -178,6 +183,8 @@ const CASES = [
   ['$ in an object literal', `${HEAD}const c = async ($) => ({ $ })\n`, true],
   ['a helper name declared again where $ is passed to it', `${HEAD}const helper = async ($) => 1\nconst worse = async ($) => {\n  const helper = (y) => y\n  const z = await helper($)\n  return z\n}\n`, true],
   ['the v0.6.4 shape: a helper $ is passed to, declared again in a sibling function', `${HEAD}const helper = async ($) => 1\nconst other = async (x) => {\n  const helper = (y) => y\n  return helper(x)\n}\nconst uses = async ($) => {\n  const z = await helper($)\n  return z\n}\n`, true],
+  ['the host\'s read, which $ is passed to, declared again in a sibling function', `${HEAD}const atomA = 1\nconst other = async (x) => {\n  const read = x\n  return read\n}\nconst uses = async ($) => {\n  const v = await read($, atomA)\n  return v\n}\n`, true],
+  ['a helper $ is passed to, whose name is a parameter of a function type elsewhere', `${HEAD}type F = (helper: string) => void\nconst helper = async ($) => 1\nconst uses = async ($) => {\n  const z = await helper($)\n  return z\n}\n`, false],
   ['a helper $ is passed to, whose name is only a property name elsewhere', `${HEAD}const helper = async ($) => 1\nconst o = { helper: 1 }\nconst uses = async ($) => {\n  const z = await helper($)\n  return z + o.helper\n}\n`, false],
   ['the v0.5.3 shape: on destructured in a callback beside the registrations', `${HEAD}export const register = (on) => {\n  const kept = [['a', true]].filter(([key, on]) => key !== '')\n  on('session.start', async ($, e, next) => next(e))\n  return kept\n}\n`, true],
   ['a helper that takes on as a plain parameter', `${HEAD}const wire = (on) => {\n  on('session.start', async ($, e, next) => next(e))\n}\nexport const register = (on) => {\n  wire(on)\n}\n`, false],
