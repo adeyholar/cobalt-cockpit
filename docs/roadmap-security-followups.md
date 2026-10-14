@@ -1,6 +1,6 @@
 # Security follow-ups recorded after v0.6.1
 
-Status: the P0 below is fixed on the `security-hotfix-guard-fail-closed` line (see its section); the read-claim item is investigated and still not changed. Neither item was part of v0.6.1 as first released. That release fixed the three faults its review reproduced ([Corrections to earlier rules](implementation-v0.6.1.md#corrections-to-earlier-rules)) and changed neither of the things below. Each needs its own design, review and tests before any code.
+Status: the P0 below is fixed on `main` by the security hotfix in the CHANGELOG's 0.6.1 entry (see its section); the read-claim item is investigated and still not changed. Neither item was part of v0.6.1 as first released. That release fixed the three faults its review reproduced ([Corrections to earlier rules](implementation-v0.6.1.md#corrections-to-earlier-rules)) and changed neither of the things below. Each needs its own design, review and tests before any code.
 
 ## P0: a guard that throws refuses nothing
 
