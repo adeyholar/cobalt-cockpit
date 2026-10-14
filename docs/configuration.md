@@ -13,6 +13,10 @@ Restart Claude Code after changing configuration. To enable just Fable blocking 
 
 The Stop guard's and the alerts' settings (`stopGuard`, `verify*`, `stop*` and every `guard*` option) are the person's alone: they are accepted only from you in the config menu (`/config`), never from a plugin or a model, as [cobalt-guard.md](cobalt-guard.md) and [SECURITY.md](../SECURITY.md#hooks-that-refuse) describe. The blast-radius guard and the attribution guard are ordinary options.
 
+## Calibrating alerts before turning them on
+
+No option was added for [Guard Calibration](implementation-v0.6.3.md). With `guardRecordOnly` on and `guardAlerts` off, incidents are recorded and nobody is told. Label some with `/cockpit alerts label`, read `/cockpit alerts calibration`, then compare by changing `guardNotifyKinds` or the quiet-hours options in `/config`, restarting Claude Code as for any option, and reading the report again. The report reads those options and writes none of them. `guardAlerts` stays as you set it, and `security-failure` stays notified.
+
 ## Every option and its default
 
 43 options. "empty" is an empty string.

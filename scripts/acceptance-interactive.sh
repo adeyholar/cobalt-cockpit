@@ -5,6 +5,7 @@
 #   scripts/acceptance-interactive.sh setup  [--dir <new empty directory>]   build it and print the two launch commands
 #   scripts/acceptance-interactive.sh verify <dir>                           probe it with the host (no model, no login needed)
 #   scripts/acceptance-interactive.sh launch <dir> 1|2 [profile]             start session 1 or 2 (a terminal each)
+#   scripts/acceptance-interactive.sh sdk    <dir> <cockpit arguments>       one `claude -p` run of /cockpit: the sdk origin, not a person
 #   scripts/acceptance-interactive.sh clean  <dir>                           remove it
 #
 # Isolation: everything lives under one new private directory. It has its own CLAUDE_CONFIG_DIR and HOME, so the installed
@@ -97,10 +98,18 @@ case $cmd in
     [[ $n == 1 && ${CONTINUE:-0} == 1 ]] && local_args+=(--continue)
     in_host "$dir" "$claude_bin" "${local_args[@]}"
     ;;
+  sdk)
+    # an immediate command, no model and no sign-in: what a script or an agent-driven process would send, which is not a person
+    need_claude
+    dir=$(check_dir "${1:-}"); shift || true
+    [[ $# -ge 1 ]] || fail 'sdk <dir> <cockpit arguments>'
+    printf 'One claude -p run (origin sdk, not a person) of: /cockpit %s\n' "$*"
+    in_host "$dir" timeout 90 "$claude_bin" -p "/cockpit $*" --plugin-dir "$dir/plugin" --settings "$(settingsOf record)" < /dev/null
+    ;;
   clean)
     dir=$(check_dir "${1:-}")
     rm -rf -- "$dir"
     echo "removed $dir"
     ;;
-  *) fail 'usage: acceptance-interactive.sh setup [--dir D] | verify D | launch D 1|2 [record|kinds|quiet|alerts] | clean D' ;;
+  *) fail 'usage: acceptance-interactive.sh setup [--dir D] | verify D | launch D 1|2 [record|kinds|quiet|alerts] | sdk D <args> | clean D' ;;
 esac

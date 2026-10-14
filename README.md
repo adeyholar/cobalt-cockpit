@@ -339,6 +339,7 @@ Cobalt Guard tells a person when a run needs one, and can hold a stop until your
 
 - **Owner alerts** (`guardAlerts`, off by default). When on, a terminal notification (through Claude Code's own notification channel) tells you when a run needs a person: verification retries exhausted, a security check failed, a release NO-GO, an open mandatory review, or a blocked run. It never approves, releases or clears anything, and it cannot confirm that you saw it. No webhook, email or push.
 - **The alert inbox.** `/cockpit alerts` lists what Cobalt Guard recorded, so you can recover it after stepping away. With `guardRecordOnly` on and alerts off, incidents are written down for `/cockpit alerts` and the digest; no notification, sound, bell or reminder is ever sent for them.
+- **Calibration** (v0.6.3). `/cockpit alerts review`, `label` and `calibration` let you say which recorded incidents you would have wanted a notification for, and report how the alert policy would have done against your labels, as a simulation that sends nothing. It is an evaluation, not an automatic optimizer: it changes no setting, no notification and no enforcement. Details: [docs/implementation-v0.6.3.md](docs/implementation-v0.6.3.md).
 - **Stop-hook verification guard** (`stopGuard`, `OBSERVE` by default). `ENFORCE` runs your `verifyScript` when the agent tries to finish a task that changed files, and refuses the stop (up to the attempt limit) until the script exits 0. The script is not trusted until you enroll its sha-256 with `/cockpit guard trust`; it is re-hashed before every run and a changed script is not run.
 - **No verdict changes.** An alert, a reminder, an acknowledgment or a silence never changes a gate, a hold, a review, a release approval or the task's percentage.
 
@@ -641,7 +642,7 @@ Sounds try PipeWire, PulseAudio, ALSA, ffplay, mpv, SoX, Canberra, macOS afplay,
 <details>
 <summary><b>See advanced commands</b></summary>
 
-The complete reference. The `/cockpit guard` and `/cockpit alerts` commands that acknowledge, silence, enroll, release, test, export or delete are accepted only when typed by a person.
+The complete reference. The `/cockpit guard` and `/cockpit alerts` commands that acknowledge, label, silence, enroll, release, test, export or delete are accepted only when typed by a person.
 
 | Command | Action |
 | --- | --- |
@@ -660,6 +661,9 @@ The complete reference. The `/cockpit guard` and `/cockpit alerts` commands that
 | `/cockpit ready` | Which recorded conditions stand between the task and DONE: milestones, the six gates (with stale and reported-only evidence called out), the Stop guard, the Opus review, the goal check, and pending agent escalations. Read-only; approves nothing |
 | `/cockpit alerts export` / `/cockpit alerts legacy [delete <code>]` | A bounded, closed-vocabulary JSON export of this project's alert occurrences (typed by you; printed, never written or sent), and a dry-run-first cleanup of the v0.5.7/v0.5.8 history keys that deletes only what exists elsewhere |
 | `/cockpit alerts [page]` / `/cockpit alerts digest` / `/cockpit alerts ack <id>` | The alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open (or UNKNOWN, when another session raised it); `digest` adds an Attention section for acknowledged incidents still open; acknowledge exactly one occurrence. Person-only to acknowledge; changes no gate, hold, review, approval or verdict |
+| `/cockpit alerts review [page]` | The recorded incidents, unreviewed first, with any label. Read-only; writes no look marker and acknowledges nothing |
+| `/cockpit alerts label <id> notify\|record\|noise\|clear` | Say whether you would have wanted a notification for one recorded incident, or remove the label. Person-only; acknowledges, resolves and sends nothing |
+| `/cockpit alerts calibration` | Simulate the alert policy against your labels and print counts, with rates only from 10 labelled incidents. Read-only; sends nothing and recommends no setting |
 | `/cockpit guard test [sound]` / `/cockpit guard seen [code]` | Send one labelled TEST notification (and optionally the alert sound), then record that you saw it. Typed by a person only; changes no alert, budget, gate or approval |
 | `/cockpit flow` | Print the Neural Flow row in words |
 | `/ledger` | Open local Run Ledger |

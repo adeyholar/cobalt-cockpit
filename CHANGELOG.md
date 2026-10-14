@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased (0.6.3) — Cobalt Guard Calibration
+
+Design, the simulation, the figures, departures from the proposal and limits: [docs/implementation-v0.6.3.md](docs/implementation-v0.6.3.md).
+
+- **Three commands under `/cockpit alerts`.** `review [page]` lists recorded incidents, unreviewed first; `label <id> notify|record|noise|clear` records whether you would have wanted a notification; `calibration` prints the report. Review is not a look: it writes no look marker and takes up no acknowledgment.
+- **Only a person labels.** The terminal's own Enter or the Remote Control bridge; `claude -p` and Agent SDK turns, models, subagents, plugins, hooks and any other origin are refused before anything is read or written. A label acknowledges nothing, resolves nothing and sends nothing.
+- **One store key per label.** `alert-label:<project hash>:<occurrence id>` holds the label and a time and nothing else, written whole and never read back and rewritten, so two sessions cannot lose each other's labels. A label whose occurrence is gone is counted nowhere and is deleted by a later label command only under the orphan rule in the design page.
+- **A simulation of the live policy, with its gaps stated.** The report runs each recorded incident through the policy's own `decide` and `holdOf` on a copy of the configuration with alerts treated as on, covering notified kinds, quiet hours and level. The cooldown, the session budget, reminders, silence, send failures and the telling of a deferred alert are not simulated and the report names them.
+- **Figures and thresholds.** Counts first; a rate needs at least 10 labelled incidents and carries a 95% Wilson score interval; below that the report says `INSUFFICIENT EVIDENCE`, which is not a finding about the policy. Unreviewed incidents are in no figure, and the missed-wanted share is not detection recall.
+- **Read-only and silent.** Review and the report write nothing and send nothing, change no setting, gate, hold or enforcement, and recommend no setting. `security-failure` stays a notified kind.
+- **The export is unchanged.** `/cockpit alerts export` stays at schema version 2 and carries no labels.
+- Tests: `tests/alerts-calibration.test.ts` (52), `tests/alerts-labels.test.ts` (90) and `tests/alerts-labels-shared.test.ts` (40) are new, with seeded sweeps and a check against the live alert pass; `scripts/acceptance-harness.sh` gains eight two-process checks, and `scripts/acceptance-interactive.sh` launch profiles and an `sdk` probe.
+- Documentation: three stale v0.6.2 lines corrected (the roadmap's status, its index entry and a test count).
+
 ## Unreleased (0.6.2) — Persistent Attention
 
 Design, the observation rule, measurements, limits and the acceptance procedure: [docs/implementation-v0.6.2.md](docs/implementation-v0.6.2.md).

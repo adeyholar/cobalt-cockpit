@@ -59,6 +59,18 @@ HISTORY (recorded earlier; the condition no longer holds)
 - **Switching.** Turning `guardAlerts` on later does not announce an incident that was already recorded; a new one is told as usual. `/cockpit guard test`, which you type, still sends its one labelled test; nothing automatic does.
 - **`SINCE LAST LOOK: 1 CRITICAL · 2 HIGH · 3 NORMAL`** heads `/cockpit alerts`, with a second line of active versus history and what became of the notifications (recorded only, SENT, DEFERRED, NOT SENT, held back, acknowledged). It counts the occurrences not shown at your last look, by id. Displaying the inbox marks what it showed; the digest, the start-of-session line and anything that is not you mark nothing; looking never acknowledges. Across two sessions the marker is best effort: a read and a write of one key, which can show an occurrence as new again but never as seen when it was not shown. It counts records, not what anyone read.
 
+## Guard Calibration (v0.6.3)
+
+Calibration helps you judge whether notifications would be useful, using the incident history that record-only mode keeps. It is an evaluation, not an automatic alert optimizer: it changes no notification delivery, no security enforcement and none of your decisions. Design and limits: [implementation-v0.6.3.md](implementation-v0.6.3.md).
+
+- **Review.** `/cockpit alerts review [page]` lists the recorded incidents, unreviewed first, eight to a page. It is read-only, writes no look marker and takes up no acknowledgment.
+- **Label.** `/cockpit alerts label <id> notify|record|noise|clear` records whether you would have wanted a notification. It is accepted only from a person (the terminal's own Enter or the Remote Control bridge); `claude -p`, a model, a subagent, a plugin or a hook is refused before anything is read or written. A label acknowledges nothing, resolves nothing and sends nothing.
+- **Storage.** One plugin-store key per labelled occurrence (`alert-label:<project hash>:<id>`), holding the label and a time and nothing else, written whole and never read back and rewritten. It is separate from the occurrence's records and from its acknowledgment.
+- **Report.** `/cockpit alerts calibration` runs each recorded incident through the live policy's own decision code, on a copy of your configuration with alerts treated as on for the report only, and compares the result with your labels. It simulates the notified kinds, quiet hours and the level; it does not simulate the cooldown, the session budget, reminders, silence or retries.
+- **Figures.** Counts first. A rate needs at least 10 labelled incidents and is then shown with a 95% Wilson score interval; below that the report says `INSUFFICIENT EVIDENCE`, which is not a finding about the policy. Unreviewed incidents are in no figure.
+- **What the figures are not.** The missed-wanted share is a share of incidents Cockpit recorded and you reviewed. It is not detection recall: Cockpit cannot measure incidents it never recorded.
+- **Silent.** Review and the report write nothing and send no notification, sound or bell. The report recommends no setting. `security-failure` stays a notified kind whatever the report shows.
+
 ## Alert priorities, quiet hours and the pinned alert row (v0.5.6)
 
 With no new option set, alerts are sent exactly as in v0.5.5. Two things differ by default while alerts are on: the HUD's `GUARD` row now adds `transport not confirmed` until you confirm a test in the session and becomes a pin while a raised condition is open, and a condition raised while the session is silenced is recorded so it stays visible.

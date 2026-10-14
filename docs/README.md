@@ -9,7 +9,7 @@ The root [README](../README.md) is the front page. These files hold the detail.
 | [orchestration.md](orchestration.md) | Observation and enforcement, elastic execution, task ownership, waves and escalation, dynamic reasoning effort |
 | [sonnet-led.md](sonnet-led.md) | The `SONNET_LED` profile: Sonnet as the main loop, Opus as an admitted read-only consultation, setup and rollback |
 | [verification.md](verification.md) | Discovery levels, decision records, the goal check, what happens after DONE, and the limits of all of it |
-| [cobalt-guard.md](cobalt-guard.md) | Owner alerts: persistence, the inbox, shared history, record-only mode, priorities, quiet hours, the pinned row, notification transport |
+| [cobalt-guard.md](cobalt-guard.md) | Owner alerts: persistence, the inbox, shared history, record-only mode, priorities, quiet hours, the pinned row, notification transport, calibration |
 | [session-router.md](session-router.md) | The optional per-session router (NobodyWho or JEV), what it may recommend, what JEV sends, and the read-only NobodyWho telemetry |
 | [configuration.md](configuration.md) | Every option with its type, default and description, printed from the manifest |
 | [development.md](development.md) | Loading the plugin for development, the validation commands, the manual TypeScript gate |
@@ -29,6 +29,7 @@ The root [README](../README.md) is the front page. These files hold the detail.
 
 | Version | Page |
 | --- | --- |
+| 0.6.3 | [Cobalt Guard Calibration](implementation-v0.6.3.md) |
 | 0.6.2 | [Persistent Attention](implementation-v0.6.2.md) |
 | 0.6.1 | [Smarter swarm operations](implementation-v0.6.1.md) |
 | 0.6.0 | [Mission Control operations](implementation-v0.6.0.md) |
@@ -61,7 +62,7 @@ The root [README](../README.md) is the front page. These files hold the detail.
 | [delivery-sonnet-led.md](delivery-sonnet-led.md) | Delivery report: the Sonnet-led profile |
 | [roadmap-security-followups.md](roadmap-security-followups.md) | Security follow-ups recorded after v0.6.1: a P0 on a guard that throws refusing nothing, and read claims widening to `*` (neither implemented) |
 | [roadmap-v0.7.0-diff-aware-verification.md](roadmap-v0.7.0-diff-aware-verification.md) | Roadmap, v0.7.0: a design milestone for evidence that correlates changed lines with measured coverage (not implemented) |
-| [roadmap-v0.6.3-guard-calibration.md](roadmap-v0.6.3-guard-calibration.md) | Roadmap, proposed for v0.6.3: human labels on recorded incidents and a simulation of the alert policy against them, to inform the decision to enable alerts (not approved, not implemented) |
+| [roadmap-v0.6.3-guard-calibration.md](roadmap-v0.6.3-guard-calibration.md) | Roadmap, v0.6.3: human labels on recorded incidents and a simulation of the alert policy against them, to inform the decision to enable alerts (implemented in v0.6.3 on a candidate branch, pending the owner's approval to merge: [implementation-v0.6.3.md](implementation-v0.6.3.md)) |
 | [roadmap-v0.6.2-persistent-attention.md](roadmap-v0.6.2-persistent-attention.md) | Roadmap, v0.6.2: acknowledged incidents whose conditions are still open, in the alert digest (implemented in v0.6.2: [implementation-v0.6.2.md](implementation-v0.6.2.md)) |
 | [roadmap-v0.5.3-verification-intelligence.md](roadmap-v0.5.3-verification-intelligence.md) | A proposal for verification intelligence |
 

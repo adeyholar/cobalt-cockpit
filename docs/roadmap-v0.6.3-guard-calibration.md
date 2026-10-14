@@ -1,6 +1,6 @@
 # Proposed for v0.6.3: Cobalt Guard Calibration
 
-Status: a proposal for the roadmap. It is not approved for implementation, nothing here is implemented, and it adds nothing to the scope of v0.6.1 or of [v0.6.2 Persistent Attention](roadmap-v0.6.2-persistent-attention.md). The names of commands and keys below are proposals to be settled in design.
+Status: implemented in v0.6.3 on a candidate branch, pending the owner's approval to merge. What was built, and where it departs from this proposal, is in [implementation-v0.6.3.md](implementation-v0.6.3.md). Nothing here widened the scope of v0.6.1 or of [v0.6.2 Persistent Attention](roadmap-v0.6.2-persistent-attention.md).
 
 ## Purpose
 

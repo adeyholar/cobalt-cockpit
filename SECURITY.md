@@ -14,6 +14,8 @@ The alert history (v0.5.7 to v0.6.0) is kept in plugin-store keys too: one per a
 
 `/cockpit agents` and `/cockpit ready` (v0.6.0) read the swarm and the task and change nothing; they cannot admit, cancel or verify a task, lift a hold or clear a review.
 
+An alert label (v0.6.3, `alert-label:<project hash>:<id>`, a closed label and a time) is set or removed only by human authority: the terminal's own Enter or the Remote Control bridge. `sdk` turns and every other origin are refused before anything is read or written. `/cockpit alerts review` and `/cockpit alerts calibration` send nothing and change no setting, gate, hold or enforcement.
+
 ## Export and sharing
 
 `/cockpit alerts export` (typed by a person) prints this project's alert occurrences as schema-versioned JSON in a closed vocabulary: ids, levels, kinds, task numbers, times, the host's channel name, and separate notification and acknowledgment fields; no key, path or free text. `/ledger export json` removes replay bodies, agent descriptions and checkpoint prose, then strips control sequences and detected secrets from string values. Paths, branch names, identifiers and repository metadata may remain sensitive. Review every export and screenshot before sharing. Secrets should never be exported. Do not put credentials in milestone labels, file names or configuration prose.
