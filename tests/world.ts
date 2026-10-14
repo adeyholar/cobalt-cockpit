@@ -35,6 +35,8 @@ export type World = {
    * have one. A `.git` with no repository Git can read is a damaged repository, not a project outside Git.
    */
   dotGitPresent: boolean | null
+  /** What `git rev-parse` prints outside a repository (Git's own words; the mount-point form is the other real one). */
+  notRepository: string
   /**
    * What this host's `sh` makes of the limits: all enforced (`full`); the memory limit accepted but not enforced (`partial`);
    * no memory limit accepted (`basic`); no `sh` at all (`none`); `flaky`: the first enforcement probe does not answer, later ones
@@ -247,6 +249,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     peakRunning: 0,
     runDelayTicks: 0,
     dotGitPresent: null,
+    notRepository: 'fatal: not a git repository (or any of the parent directories): .git\n',
     boundProbes: [],
     boundMode: 'full',
     kinds: {},
@@ -589,7 +592,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       return ran(0, (link === undefined ? asked : `${w.links[link]}${asked.slice(link.length)}`) + '\n')
     }
     if (program === 'git') {
-      if (w.gitStatus === null) return { value: { exitCode: 128, stdout: '', stderr: argv.includes('rev-parse') ? 'fatal: not a git repository (or any of the parent directories): .git\n' : '', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (w.gitStatus === null) return { value: { exitCode: 128, stdout: '', stderr: argv.includes('rev-parse') ? w.notRepository : '', isStdoutTruncated: false, isStderrTruncated: false } }
 
       // global options (--no-optional-locks, --no-replace-objects, -c k=v) and -C <top> come before the subcommand
       let at = 1

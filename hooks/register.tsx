@@ -278,7 +278,11 @@ const finishObserved = (s: Swarm, id: string, reason: string, conclusion: string
 type Bound = { script: 'memory' | 'basic' | null; enforced: boolean | null; group: boolean; settled: boolean }
 /** A measurement that was not started because its limits could not be applied (v0.6.4): the caller's answer is UNKNOWN. */
 class BoundRefused extends Error {}
-/** Measurement processes running now, and those waiting for one of BOUND_SLOTS; a slot is handed straight to the next in line. */
+/**
+ * Measurement processes running now, and those waiting for one of BOUND_SLOTS; a slot is handed straight to the next in line.
+ * One pool for the whole process, never reset: every slot is given back in a `finally` when its run ends, and the host's
+ * `process.run` always ends (it rejects at its timeout).
+ */
 let boundRunning = 0
 const boundWaiting: (() => void)[] = []
 const boundSlot = async (): Promise<() => void> => {
@@ -2612,12 +2616,17 @@ const outsideGit = async ($: EngineInterface): Promise<boolean> => {
   if (!cwd || !cwd.startsWith('/')) return false
   const r = await bounded($, ['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
   if (r === null || r.exitCode === 0 || r.isStdoutTruncated || r.isStderrTruncated || !NOT_A_REPOSITORY.test(r.stderr)) return false
+  // Git searches up the physical path; the session may name it through a link. Both chains of parents are checked.
+  const real = await bounded($, ['realpath', '-e', '--', cwd], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+  if (real === null || !gitAnswered(real) || !real.stdout.startsWith('/')) return false
   const dotGit: string[] = []
-  for (let dir = cwd.replace(/\/+$/, '') || '/'; ; dir = dir.slice(0, dir.lastIndexOf('/')) || '/') {
-    dotGit.push(`${dir === '/' ? '' : dir}/.git`)
-    if (dir === '/' || dotGit.length > 256) break
+  for (const start of new Set([cwd, real.stdout.replace(/\n$/, '')])) {
+    for (let dir = start.replace(/\/+$/, '') || '/', depth = 0; depth < 256; dir = dir.slice(0, dir.lastIndexOf('/')) || '/', depth++) {
+      dotGit.push(`${dir === '/' ? '' : dir}/.git`)
+      if (dir === '/') break
+    }
   }
-  const seen = await inspectPaths($, '/', dotGit)
+  const seen = await inspectPaths($, '/', [...new Set(dotGit)])
 
   return seen !== null && seen.every(s => s.kind === 'missing')
 }
@@ -2641,6 +2650,21 @@ const settledReading = async ($: EngineInterface, base?: string): Promise<TreeRe
 const reconcileOnce = async ($: EngineInterface): Promise<void> => {
   const task = await read($, taskAtom)
   const accepted = task?.alignment?.tree
+  if (task?.alignment?.state === 'ALIGNED' && typeof accepted !== 'string' && task.alignment.protection === undefined && needsAlignment(task)) {
+    // Accepted without a fingerprint before v0.6.4, for a reason not recorded: measured once now. Outside Git (and not begun in a
+    // repository) it stands, marked UNPROTECTED; anywhere else nothing shows it still holds, so the goal check is pending again.
+    const reading = await settledReading($)
+    const now = await $.clock.now()
+    const held = await update($, taskAtom, t => {
+      if (t === null || t.alignment?.state !== 'ALIGNED' || typeof t.alignment.tree === 'string' || t.alignment.protection !== undefined) return t
+      if (reading.noRepo && typeof t.startTree !== 'string') return { ...t, alignment: { ...t.alignment, protection: { state: 'UNPROTECTED' as const, why: reading.why } } }
+
+      return settle(reopenVerification(t, reading.stamp === null ? unmeasuredWhy(reading.why) : 'the goal check was accepted without a working-tree fingerprint (before v0.6.4)')).task
+    })
+    if (held !== null) await quiet(async () => { await mutateLedger($, l => recordDiscovery(l, held, now)); await persist($) })
+
+    return
+  }
   if (task?.alignment?.state !== 'ALIGNED' || typeof accepted !== 'string') return
   const reading = await settledReading($, baseOf(accepted))
   const tree = reading.stamp
@@ -2740,7 +2764,10 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
     let stamped = stamp !== null && gated.alignment?.state === 'ALIGNED' ? { ...gated, alignment: { ...gated.alignment, tree: stamp } } : gated
     let notAccepted = ''
     if (goalChecked && e.action === 'align' && stamp === null && gated.alignment?.state === 'ALIGNED') {
-      if (stampNoRepo) {
+      // a task that began in a measured repository is not made unprotected by that repository going away
+      const leftGit = stampNoRepo && typeof gated.startTree === 'string'
+      const why = leftGit ? 'this task began in a measured Git repository that is no longer there' : stampWhy
+      if (stampNoRepo && !leftGit) {
         // outside every repository there is nothing to fingerprint: accepted as before, and marked so wherever it is shown
         stamped = { ...gated, alignment: { ...gated.alignment, protection: { state: 'UNPROTECTED', why: stampWhy } } }
         unprotected = 'UNPROTECTED: this project is not a Git repository, so no working-tree fingerprint protects this goal check; a later change outside Edit, Write and Bash edit diffs will not be noticed.'
@@ -2750,10 +2777,10 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
         const criteria = gated.discovery?.criteria.map(c => (c.status === 'met' ? { ...c, status: 'unresolved' as const } : c))
         stamped = {
           ...gated,
-          alignment: { ...gated.alignment, state: 'UNKNOWN', protection: { state: 'UNKNOWN', why: stampWhy }, note: oneLine(`working tree unmeasurable: ${stampWhy}`, 160) },
+          alignment: { ...gated.alignment, state: 'UNKNOWN', protection: { state: 'UNKNOWN', why }, note: oneLine(`working tree unmeasurable: ${why}`, 160) },
           ...(gated.discovery === undefined || criteria === undefined ? {} : { discovery: { ...gated.discovery, criteria } }),
         }
-        notAccepted = `error: ALIGNED not accepted: this Git repository's working tree cannot be measured safely (${stampWhy}), so the goal check is recorded as UNKNOWN, not ALIGNED. A measurement that fails says nothing of a clean or a changed tree. Resolve the cause, then align again.`
+        notAccepted = `error: ALIGNED not accepted: this Git repository's working tree cannot be measured safely (${why}), so the goal check is recorded as UNKNOWN, not ALIGNED. A measurement that fails says nothing of a clean or a changed tree. Resolve the cause, then align again.`
       }
     }
     const settled = settle(isLegacy ? stamped : withDiscovery(stamped, pin))
@@ -4186,8 +4213,7 @@ export const register: Register = (on, options) => {
   // what limits a measurement process runs under is probed again for this registration's host
   boundMode = null
   boundRetryAt = 0
-  boundRunning = 0
-  boundWaiting.length = 0
+  // the process slots are not reset: a measurement started before this registration still holds its slot until it ends
   // Before the first settings read the home directory is unknown, so `~/…` cannot be expanded: ENFORCE with a script named is
   // enforcing already (fail closed); loadStopCfg refines it once the configuration is read.
   setGuardRequired(stopCfg.policy === 'ENFORCE')
