@@ -547,8 +547,9 @@ const measureCommit = async ($: EngineInterface, root: string, sha: string, budg
         } else if (s.kind !== 'link' && s.kind !== 'missing') return { why: 'a tracked path is not an ordinary file or symbolic link (a directory, FIFO, socket or device), so it is not read' }
       }
       if (budget.bytes > FINGERPRINT_TOTAL_BYTES) return { why: `the working tree holds more than ${FINGERPRINT_TOTAL_BYTES / GIB} GiB to read, more than the fingerprint reads` }
-      const read = regular.length ? await git(['hash-object', '--no-filters', '--', ...regular.map(n => `./${chunk[n]!.path}`)]) : null
-      const hashes = read === null ? [] : gitAnswered(read) ? hashesOf(read.stdout, regular.length) : null
+      // not `read`: that is the host's own function `$` is passed to, and a second binding of it hides which one receives `$`
+      const hashing = regular.length ? await git(['hash-object', '--no-filters', '--', ...regular.map(n => `./${chunk[n]!.path}`)]) : null
+      const hashes = hashing === null ? [] : gitAnswered(hashing) ? hashesOf(hashing.stdout, regular.length) : null
       if (hashes === null) return { why: 'tracked working-tree bytes could not be hashed completely (a file could not be read, or its process reached a resource limit)' }
       // A file replaced (by a link to a device, say) or rewritten between the inspection and the read is not believed.
       if (regular.length) {
