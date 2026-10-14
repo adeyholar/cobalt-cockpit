@@ -889,10 +889,11 @@ export const digestToast = (occ: readonly Occurrence[]): string | null => {
   return `Cobalt alerts: ${d.unacked} unacknowledged recorded (${lv}) · /cockpit alerts digest`
 }
 
-const stamp = (at: number): string => {
+/** A recorded moment as `YYYY-MM-DD HH:MMZ`, and how long ago: the two forms every alert view uses (the review list in calibration.ts too). */
+export const stamp = (at: number): string => {
   try { return `${new Date(at).toISOString().slice(0, 16).replace('T', ' ')}Z` } catch { return 'time unknown' }
 }
-const ageOf = (ms: number): string => (ms < 0 ? '' : ms < 60_000 ? ' (just now)' : ms < 3_600_000 ? ` (${Math.floor(ms / 60_000)}m ago)` : ms < 172_800_000 ? ` (${Math.floor(ms / 3_600_000)}h ago)` : ` (${Math.floor(ms / 86_400_000)}d ago)`)
+export const ageOf = (ms: number): string => (ms < 0 ? '' : ms < 60_000 ? ' (just now)' : ms < 3_600_000 ? ` (${Math.floor(ms / 60_000)}m ago)` : ms < 172_800_000 ? ` (${Math.floor(ms / 3_600_000)}h ago)` : ` (${Math.floor(ms / 86_400_000)}d ago)`)
 const OUTCOME: Record<PinStatus, string> = { sent: 'notification SENT', 'not-sent': 'notification NOT SENT', deferred: 'DEFERRED, quiet hours', held: 'HELD BACK, cooldown or budget', 'kind-off': 'NOT NOTIFIED, kind off', silenced: 'NOT NOTIFIED, silenced', recorded: 'RECORDED only, no notification' }
 const STATE: Record<Occurrence['state'], string> = { open: 'condition OPEN now', resolved: 'condition no longer open (recorded resolved)', ended: 'condition no longer open (task replaced or gone)' }
 export const INBOX_PAGE = 8

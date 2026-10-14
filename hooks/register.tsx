@@ -64,8 +64,10 @@ import {
 import type { Attribution } from './hygiene'
 import { redactSecrets } from './secrets'
 import type { Observation } from './alerts'
-import { exportOf, hudCountsOf, standingOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
+import { exportOf, hudCountsOf, standingOf, isMigratedEpisode, legacyPlanOf, legacyPlanText, EMPTY_GUARD, ID_RE, OCC_PER_PROJECT, PROJECT_RE, ackKeyOf, ackOccurrence, ackedIdsOf, applyAcks, digestText, digestToast, excessAckKeys, excessOccKeys, excessSeenKeys, historyFrom, historyKeyOf, isRecording, occIdsOf, occKeyOf, pageIdsOf, pendingIdsOf, seenIdsOf, seenKeyOf, withSeen, episodesOf, inboxPages, inboxText, isAckedSince, noticedOf, occurrencesOf, validAlerts, withAck, closedOf, exhaustedBlocker, bounded as boundedAlerts, decide as decideAlert, deferredOf, digestOf, dueOf, episodeOf, guardConfigOf, guardText, hasWorkLeft, holdOf, isSettledQuietly, labelOf as guardLabel, lapsedOf, messageOf as alertMessage, pinLine, pinsOf, policyLines, remind, reminderOf } from './alerts'
 import type { Facts, GuardConfig, GuardView, Open, PinLine } from './alerts'
+import { LABEL_MEANING, LABEL_USAGE, calibrationOf, calibrationText, labelKeyOf, labelOfValue, labelOfWord, labelValueOf, labelledIdsOf, legacyIdsOf, observedOf, orphanLabelKeys, parseLabelKey, reviewText, simulationConfigOf } from './calibration'
+import type { Reviewed } from './calibration'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
 import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
@@ -937,7 +939,7 @@ const HELP =
   '/cockpit ready     which recorded conditions stand between the task and DONE: gates, review, goal check, guard, escalations (read-only; approves nothing)\n' +
   '/cockpit flow      the Neural Flow in words: which of input, discovery, routing, workers, verify and done are verified\n' +
   '/cockpit guard     Cobalt Guard owner alerts: status, priorities, quiet hours and active conditions; ack, silence or unsilence; test and seen check that a notification reaches you (none changes a verdict)\n' +
-  '/cockpit alerts   the alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; alerts digest summarises the unacknowledged and what is new since your last look; alerts ack <id> acknowledges one (changes no verdict)\n' +
+  '/cockpit alerts   the alert inbox: recorded alerts with their notification outcome, acknowledgment and whether the condition is still open; alerts digest summarises the unacknowledged and what is new since your last look; alerts ack <id> acknowledges one (changes no verdict); alerts review lists incidents to label, alerts label <id> notify|record|noise|clear records whether you would have wanted a notification, and alerts calibration reports how the alert policy would have done against your labels (simulated: nothing is sent and no setting changes)\n' +
   '/cockpit doctor    read-only checks: installs, profile, telemetry storage, host and prompt-cache policy\n' +
   '/cockpit sound      play both cues'
 
@@ -3308,6 +3310,65 @@ const markSeen = async ($: EngineInterface, project: string, prev: ReadonlySet<s
   await $.store.set(seenKeyOf(project), { v: 1, ids: withSeen(prev, shown) })
   for (const k of excessSeenKeys(await $.store.keys(), seenKeyOf(project))) await $.store.delete(k)
 }
+
+// --- Cobalt Guard Calibration (v0.6.3; labels, the simulation and the wording: calibration.ts). An evaluation: it reads the alert records and the configuration and changes neither. ---
+/**
+ * What the calibration commands read: this session's records and the occurrences other sessions keep for the project in keys of
+ * their own, with the acknowledgments and the labels the store holds, joined in memory. Read-only: nothing is written to the
+ * Ledger, the store or the look marker, and no acknowledgment is taken up. The project is the Ledger's, or the hash of the
+ * working directory when the Ledger has none; computing it ties nothing to a project.
+ */
+const calibrationView = async ($: EngineInterface): Promise<{ project: string; items: Reviewed[]; observation: Observation }> => {
+  const ledger = await read($, ledgerAtom)
+  const project = ledger.alertsProject !== undefined && PROJECT_RE.test(ledger.alertsProject) ? ledger.alertsProject : await alertProject($)
+  const keys = await $.store.keys().catch(() => [] as string[])
+  const own = ledger.alerts ?? []
+  const mine = new Set(episodesOf(own).map(e => e.id))
+  const stored: { id: string; records: AlertRecord[] }[] = []
+  // bounded as the history is: at most the newest 32 occurrence keys of the project are read, and none this session already holds
+  for (const id of occIdsOf(keys, project).filter(x => !mine.has(x)).slice(-OCC_PER_PROJECT)) {
+    const v = (await $.store.get(occKeyOf(project, id)).catch(() => undefined)) as { v?: unknown; records?: unknown } | undefined
+    const records = v?.v === 1 ? validAlerts(v.records) : []
+    if (records.length > 0 && episodesOf(records)[0]?.id === id) stored.push({ id, records })
+  }
+  const { open, observation } = await observeAlerts($, [...own, ...stored.flatMap(s => s.records)])
+  const labelled = labelledIdsOf(keys, project)
+  const items: Reviewed[] = []
+  for (const occurrence of observedOf(own, stored, ackedIdsOf(keys, project), open)) {
+    const hasKey = labelled.has(occurrence.id)
+    const value = hasKey ? await $.store.get(labelKeyOf(project, occurrence.id)).catch(() => undefined) : undefined
+    items.push({ occurrence, label: labelOfValue(value), hasKey })
+  }
+
+  return { project, items, observation }
+}
+/**
+ * Forgets the label keys whose occurrence is gone, after a person set or removed a label: besides the removal a person asks
+ * for, the only place a label key is ever deleted. A label is kept while the store lists its occurrence's key, while this
+ * session reads the occurrence (`own`), and while an earlier-format history of its project holds it or cannot be read. The key
+ * list is read again before anything is deleted, so an occurrence written meanwhile keeps its label. Another session's label
+ * of an occurrence the store still holds is never among them.
+ */
+const sweepLabels = async ($: EngineInterface, project: string, own: ReadonlySet<string>): Promise<void> => {
+  const isMine = (p: string, id: string): boolean => p === project && own.has(id)
+  const keys = await $.store.keys()
+  const candidates = orphanLabelKeys(keys, isMine)
+  if (candidates.length === 0) return
+  const earlier = new Map<string, (Set<string> | null)[]>()
+  for (const p of new Set(candidates.flatMap(k => parseLabelKey(k)?.project ?? []))) {
+    const held: (Set<string> | null)[] = []
+    if (keys.includes(historyKeyOf(p))) held.push(legacyIdsOf(await $.store.get(historyKeyOf(p)).catch(() => undefined), p, false))
+    if (keys.includes(LEGACY_HISTORY_KEY)) held.push(legacyIdsOf(await $.store.get(LEGACY_HISTORY_KEY).catch(() => undefined), p, true))
+    earlier.set(p, held)
+  }
+  // a project first seen in the second listing was not looked up: its labels are kept
+  const isKept = (p: string, id: string): boolean => isMine(p, id) || (earlier.get(p) ?? [null]).some(ids => ids === null || ids.has(id))
+  const still = new Set(orphanLabelKeys(await $.store.keys(), isKept))
+  for (const k of orphanLabelKeys(keys, isKept)) {
+    if (!still.has(k)) continue
+    try { await $.store.delete(k) } catch { /* left in place: the next sweep finds it */ }
+  }
+}
 const DIGEST_KEY = 'alert-digest'
 const DIGEST_RELOAD_MS = 30 * 60_000
 /**
@@ -4862,6 +4923,52 @@ export const register: Register = (on, options) => {
 
           return { text: `Cockpit: deleted ${removed.length === 0 ? 'nothing' : removed.join(', ')}; every occurrence they held was already held in full by a key of its own.${left.length > 0 ? ` Could not delete: ${left.join(', ')}.` : ''}${plan.kept.length > 0 ? ` Kept: ${plan.kept.join(', ')}.` : ''} No alert record, acknowledgment, gate or verdict was changed.` }
         }
+        if (arg === 'label') {
+          // a label is the person's judgment alone: nothing a plugin, a model, an SDK turn or an unknown origin sends can set, change or remove one
+          if (!isHumanAuthority(e.origin)) return { text: 'Cockpit: an alert is labelled only by a command you type; nothing was changed.' }
+          const label = labelOfWord(words[3])
+          if (words.length !== 4 || label === null) return { text: `${LABEL_USAGE}. Nothing was changed.` }
+          const id = words[2] as string
+          if (!ID_RE.test(id)) return { text: 'Cockpit: an alert id is 8 characters, 0-9 and a-f, as /cockpit alerts review lists it. Nothing was changed.' }
+          const view = await calibrationView($)
+          const item = view.items.find(x => x.occurrence.id === id)
+          // an id no record has, or one that expired from the bounded history: refused before anything is written
+          if (item === undefined) return { text: 'Cockpit: no recorded alert has that id. It may be mistyped, or it may have expired from the bounded history. Nothing was changed.' }
+          const o = item.occurrence
+          const named = `${id} (${o.level} ${o.kind}, task ${o.taskId})`
+          const key = labelKeyOf(view.project, id)
+          const own = new Set(view.items.map(x => x.occurrence.id))
+          const untouched = ' Nothing was acknowledged, resolved or sent, and no setting, gate, review, approval or verdict was changed.'
+          if (label === 'clear') {
+            if (!item.hasKey) return { text: `Cockpit: alert ${named} has no label. Nothing was changed.` }
+            try { await $.store.delete(key) } catch { return { text: `Cockpit: the label of alert ${named} could not be removed. Nothing was changed.` } }
+            await hush(() => sweepLabels($, view.project, own))
+
+            return { text: `Cockpit: the label of alert ${named} was removed${item.label === null ? '' : ` (it was ${item.label})`}; it is unreviewed again.${untouched}` }
+          }
+          if (item.label === label) return { text: `Cockpit: alert ${named} is already labelled ${label}. Nothing was changed.` }
+          // the label as a key of its own, written whole: one atomic set that no other session's write of another key can undo
+          try { await $.store.set(key, labelValueOf(label, await $.clock.now())) } catch { return { text: `Cockpit: the label of alert ${named} could not be recorded. Nothing was changed.` } }
+          await hush(() => sweepLabels($, view.project, own))
+
+          return { text: `Cockpit: alert ${named} is labelled ${label}: ${LABEL_MEANING[label]}.${item.label === null ? '' : ` It was ${item.label}.`} It is recorded for this project, so another session reads it too.${untouched}` }
+        }
+        if (arg === 'review') {
+          const page = words[2] === undefined ? 1 : /^\d{1,3}$/.test(words[2]) ? Number(words[2]) : -1
+          if (page < 1 || words.length > 3) return { text: 'Usage: /cockpit alerts review [page]' }
+          // read-only: no look marker is written, nothing is acknowledged, and another session's acknowledgments are applied in memory only
+          const view = await calibrationView($)
+
+          return { text: reviewText(view.items, page, await $.clock.now(), view.observation) }
+        }
+        if (arg === 'calibration') {
+          if (words.length > 2) return { text: 'Usage: /cockpit alerts calibration' }
+          const view = await calibrationView($)
+          // the policy is simulated on a frozen copy of the options with notifications on: the configuration is read, never written, and nothing is sent
+          const simulated = simulationConfigOf(stopOptions)
+
+          return { text: calibrationText(calibrationOf(view.items, simulated), simulated, { enabled: guardCfg.enabled, recording: guardCfg.recordOnly }) }
+        }
         await hush(() => syncAcks($))
         if (arg === 'digest') {
           if (words.length > 2) return { text: 'Usage: /cockpit alerts digest' }
@@ -4876,7 +4983,7 @@ export const register: Register = (on, options) => {
           return { text: digestText(occurrencesOf(recorded, openNow), at, guardCfg.enabled, { seen, recording: guardCfg.recordOnly, columns, observation }) }
         }
         const page = arg === '' ? 1 : /^\d{1,3}$/.test(arg) ? Number(arg) : -1
-        if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | digest | ack <id> | export | legacy [delete <code>]' }
+        if (page < 1 || words.length > 2) return { text: 'Usage: /cockpit alerts [page] | digest | ack <id> | review [page] | label <id> notify|record|noise|clear | calibration | export | legacy [delete <code>]' }
         const ledgerNow = await read($, ledgerAtom)
         const kept = ledgerNow.alerts ?? []
         const { open: openNow, observation } = await observeAlerts($, kept)
