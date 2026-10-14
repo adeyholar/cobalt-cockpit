@@ -2525,10 +2525,10 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       }
       const hashes = await hashFiles(regular.map(n => `./${chunk[n]}`), regular.map(n => seen[n]!), false)
       if ('why' in hashes) return unknown(hashes.why, hashes.raced)
-      let next = 0
+      let hashed = 0
       for (let n = 0; n < chunk.length; n++) {
         const path = chunk[n]!, s = seen[n]!
-        if (s.kind === 'file') { lines.push(`${hashes[next++]}\0${path}`); continue }
+        if (s.kind === 'file') { lines.push(`${hashes[hashed++]}\0${path}`); continue }
         if (s.kind === 'link') {
           const text = await linkText($, top, `./${path}`)
           if (text === null) return unknown('a changed or untracked symbolic link could not be read reliably')
