@@ -100,7 +100,7 @@ It stays the row's INFO level (never the pinned warning colour), static and neve
 | older histories (no ids, no marker) and malformed ones | loaded as before; malformed records dropped, nothing believed |
 | width 24 to 120 | no line wider than the width |
 
-`tests/alerts-attention.test.ts` (38 tests) covers these, with seeded sweeps for standing, the one-group rule and the no-notification rule, and cases for another session's pass, an unreadable release history, and the acknowledgment reply. Six earlier tests were updated for the intended wording, row and resolution changes (see the CHANGELOG).
+`tests/alerts-attention.test.ts` (40 tests) covers these, with seeded sweeps for standing, the one-group rule and the no-notification rule, and cases for another session's pass, an unreadable release history, and the acknowledgment reply. Six earlier tests were updated for the intended wording, row and resolution changes (see the CHANGELOG).
 
 ## Measurements
 
