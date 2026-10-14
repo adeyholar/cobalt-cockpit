@@ -50,8 +50,8 @@ import type { Player } from './audio'
 import { EMPTY_LOG, EVENT_TTL_MS, callOf, closeOf, liveOf, push } from './activity'
 import { activityOf, readBash } from './classify'
 import { parseStatus, projectOf, filterCommands, activeFilter } from './git'
-import { GIT_SAFE, commitEntries } from './git-integrity'
-import type { CommitEntry, DiskEntry, Measurement } from './git-integrity'
+import { GIT_SAFE, commitEntries, BOUND_AS_KIB, BOUND_CPU_S, BOUND_ENV, BOUND_PROBE_CAPPED, BOUND_PROBE_CONTROL, BOUND_PROBE_SET, BOUND_TAG, FINGERPRINT_FILE_BYTES, FINGERPRINT_TOTAL_BYTES, GIT_BOUNDED, INSPECT_BSD, INSPECT_GNU, SOURCE_BYTES, boundScript, inspectedOf } from './git-integrity'
+import type { CommitEntry, DiskEntry, Inspected, Kind, Measurement } from './git-integrity'
 import { assessCommand } from './guard'
 import { failClosed, guardFailure, isInsideFolder } from './guard-rules'
 import {
@@ -70,7 +70,7 @@ import { LABEL_MEANING, LABEL_USAGE, calibrationOf, calibrationText, labelKeyOf,
 import type { Reviewed } from './calibration'
 import { isQuiet } from './quiet'
 import { uidOf, attemptsOf, spentOf, boundedChecks, retainChecks, validChecks, configOf as stopConfigOf, hasChangeSummary, hasChanges, outputTail, migrateStopHold, verdictOf, compareTree, type CheckRecord, type StopConfig, type TreeVerdict } from './stopguard'
-import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved } from './model'
+import { applyAction, clearHold, reclassifyChanged, markEdited, setGuardRequired, isGuardOwned, withdrawDone, holdTask, isGuardHeld, releaseHold, newTask, noteFailure, oneLine, progressNudge, checkedAt, reopenVerification, setGate, settle, stampGates, summaryOf, touchFile, treeMoved, treeUnmeasured, unmeasuredWhy } from './model'
 import type { Cue, ProgressInput } from './model'
 import { basename } from './shell'
 import { agentInspection, readOnlyShell, rebuildGit, scopedGit, SCOPED_FORM } from './git-inspect'
@@ -263,6 +263,126 @@ const finishObserved = (s: Swarm, id: string, reason: string, conclusion: string
     return finishTask(s,id,'failed',{ ...result, unresolved:[...('unresolved' in result ? result.unresolved : []),'Host stopped with unresolved dependencies/child work; completion rejected'] },at)
   }
 }
+// --- Bounded measurement processes (v0.6.4; the limits and why: git-integrity.ts) ---
+// Every git, stat, find, readlink and realpath this file starts to measure or inspect the working tree goes through
+// `bounded`. Where the platform enforces it, a process may use at most BOUND_AS_KIB of memory; everywhere it may use
+// BOUND_CPU_S of CPU, write files of at most 64 MiB and dump no core; the host's timeout ends it in any case. A limit
+// already stricter is kept. What the platform enforces is probed once a registration and reported by /cockpit doctor;
+// it is never assumed. Behind `sh`, the host's own git handling no longer applies, so GIT_BOUNDED turns repo hooks off.
+type BoundMode = 'full' | 'partial' | 'none'
+type RunInit = { cwd?: string; timeoutMs?: number; env?: Record<string, string>; stdin?: string }
+let boundMode: Promise<BoundMode> | null = null
+const probeBound = async ($: EngineInterface): Promise<BoundMode> => {
+  const sh = (script: string) => $.process.run(['sh', '-c', script], { timeoutMs: 5000, env: { LC_ALL: 'C' } }).then(r => r, () => null)
+  const set = await sh(BOUND_PROBE_SET(true))
+  if (set !== null && set.exitCode === 0 && set.stdout.trim() === 'set') {
+    // accepted is not enforced: a 64 MiB allocation must succeed without the cap and fail under a 32 MiB one
+    const control = await sh(BOUND_PROBE_CONTROL)
+    const capped = await sh(BOUND_PROBE_CAPPED)
+    if (control !== null && control.exitCode === 0 && capped !== null && capped.exitCode !== 0) return 'full'
+  }
+  const partial = await sh(BOUND_PROBE_SET(false))
+  return partial !== null && partial.exitCode === 0 && partial.stdout.trim() === 'set' ? 'partial' : 'none'
+}
+const bounded = async ($: EngineInterface, argv: string[], init: RunInit = {}) => {
+  boundMode ??= probeBound($)
+  const mode = await boundMode
+  const inner = argv[0] === 'git' ? ['git', ...GIT_BOUNDED, ...argv.slice(1)] : argv
+  const run = { ...init, env: { ...BOUND_ENV, ...(init.env ?? {}) } }
+  return mode === 'none' ? $.process.run(inner, run) : $.process.run(['sh', '-c', boundScript(mode === 'full'), BOUND_TAG, ...inner], run)
+}
+/** For /cockpit doctor: what limits measurement processes run under here, in words. */
+const boundWords = async ($: EngineInterface): Promise<{ enforced: boolean; text: string }> => {
+  boundMode ??= probeBound($)
+  const mode = await boundMode
+  return mode === 'full' ? { enforced: true, text: `working-tree measurement runs under kernel limits: memory ${BOUND_AS_KIB / 1024} MiB, CPU ${BOUND_CPU_S} s, files written at most 64 MiB, no core dump, and the host's timeout` }
+    : mode === 'partial' ? { enforced: false, text: `working-tree measurement runs under CPU ${BOUND_CPU_S} s, files written at most 64 MiB and the host's timeout; this platform does NOT enforce the memory limit, so only the type and size checks before each read bound it` }
+      : { enforced: false, text: 'working-tree measurement runs under the host\'s timeout only: no shell here could set kernel limits, so only the type and size checks before each read bound it' }
+}
+
+/**
+ * Inspects paths without following a final link (`follow`: following it, for configured files a person may keep
+ * as links), in order, through bounded GNU or BSD `stat`. A path that does not exist is 'missing'; any other failure,
+ * or a malformed answer, is null: the caller's measurement is then UNKNOWN.
+ */
+const inspectPaths = async ($: EngineInterface, cwd: string, paths: string[], follow = false): Promise<Inspected[] | null> => {
+  if (paths.length === 0) return []
+  const L = follow ? ['-L'] : []
+  const ask = async (names: string[], gnu: boolean) => bounded($, gnu ? ['stat', ...L, '--printf', INSPECT_GNU, '--', ...names] : ['stat', ...L, '-f', INSPECT_BSD, '--', ...names], { cwd, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
+  const records = (text: string, gnu: boolean): Inspected[] | null => {
+    const rows = text === '' ? [] : gnu ? (text.endsWith('\0') ? text.split('\0').slice(0, -1) : null) : text.endsWith('\n') ? text.split('\n').slice(0, -1) : null
+    if (rows === null) return null
+    const out = rows.map(r => inspectedOf(r, gnu))
+    return out.every((x): x is Inspected => x !== null) ? out : null
+  }
+  // GNU first, all at once. Its records name the path they answer for, so where some paths could not be inspected (one is
+  // missing, say) the others still count, and only those are asked about again, one at a time.
+  const known = new Map<string, Inspected>()
+  const gnu = await ask(paths, true)
+  const rows = gnu !== null && !gnu.isStdoutTruncated && !gnu.isStderrTruncated ? records(gnu.stdout, true) : null
+  if (gnu !== null && gnu.exitCode === 0 && gnu.stderr.trim() === '' && rows !== null && rows.length === paths.length && rows.every((s, k) => s.name === paths[k])) return rows
+  if (rows !== null && rows.length > 0) for (const s of rows) { if (paths.includes(s.name!)) known.set(s.name!, s) }
+  else {
+    // no GNU answer at all: BSD stat, all at once (its records carry no name, so only a complete answer counts)
+    const bsd = await ask(paths, false)
+    const all = bsd !== null && gitAnswered(bsd) ? records(bsd.stdout, false) : null
+    if (all !== null && all.length === paths.length) return all
+  }
+  const out: Inspected[] = []
+  for (const path of paths) {
+    let got: Inspected | null = known.get(path) ?? null
+    for (const isGnu of [true, false]) {
+      if (got !== null) break
+      const r = await ask([path], isGnu)
+      if (r === null) return null
+      if (gitAnswered(r)) { const one = records(r.stdout, isGnu); got = one !== null && one.length === 1 && (!isGnu || one[0]!.name === path) ? one[0]! : null }
+      else if (r.exitCode !== 0 && !r.isStderrTruncated && /No such file or directory/.test(r.stderr)) got = { kind: 'missing', mode: 0, size: 0, identity: 'missing' }
+    }
+    if (got === null) return null
+    out.push(got)
+  }
+  return out
+}
+
+/** One file Git reads whole: where it is (null: not configured), whether it decides what is untracked (a fingerprint source), and what is there. */
+type GitInput = { label: string; path: string | null; source: boolean; seen: Inspected | null }
+/**
+ * What Git reads whole while it lists, diffs, checks attributes or reports status: the excludes and attributes files (the
+ * repository's and the configured ones) and the list of alternate object stores. Read whole, a device or FIFO there exhausted
+ * memory or blocked (measured), so before any such Git command each must be an ordinary file of at most SOURCE_BYTES, or absent.
+ * A configured file is followed through a link (a person may keep a global ignore file as one); what it leads to is never read
+ * here. Anything else, or a Git that cannot say where they are, is { why }: the caller's answer is UNKNOWN.
+ */
+const gitInputs = async ($: EngineInterface, top: string): Promise<GitInput[] | { why: string }> => {
+  const where = await bounded($, ['git', ...GIT_SAFE, '-C', top, 'rev-parse', '--git-path', 'info/exclude', '--git-path', 'info/attributes', '--git-path', 'objects/info/alternates'], { timeoutMs: GIT_TIMEOUT_MS })
+  const own = gitAnswered(where) && where.stdout.endsWith('\n') ? where.stdout.slice(0, -1).split('\n') : null
+  if (own === null || own.length !== 3 || own.some(p => p === '')) return { why: 'Git could not say where its excludes, attributes and alternates files are (it failed, timed out or reached a resource limit)' }
+  const setting = async (name: string): Promise<string | null | undefined> => {
+    const r = await bounded($, ['git', ...GIT_SAFE, '-C', top, 'config', '--type=path', '--get', name], { timeoutMs: GIT_TIMEOUT_MS })
+    if (r.exitCode === 1 && r.stdout === '' && !r.isStderrTruncated && r.stderr.trim() === '') return null
+    return gitAnswered(r) ? r.stdout.replace(/\n$/, '') || null : undefined
+  }
+  const excludesFile = await setting('core.excludesFile')
+  const attributesFile = await setting('core.attributesFile')
+  if (excludesFile === undefined || attributesFile === undefined) return { why: 'Git\'s core.excludesFile or core.attributesFile setting could not be read' }
+  const named: GitInput[] = [
+    { label: 'info/exclude', path: own[0]!, source: true, seen: null },
+    { label: 'core.excludesFile', path: excludesFile, source: true, seen: null },
+    { label: 'info/attributes', path: own[1]!, source: true, seen: null },
+    { label: 'core.attributesFile', path: attributesFile, source: true, seen: null },
+    { label: 'objects/info/alternates', path: own[2]!, source: false, seen: null },
+  ]
+  const present = named.filter(n => n.path !== null)
+  const seen = await inspectPaths($, top, present.map(n => n.path!), true)
+  if (seen === null) return { why: 'Git\'s excludes, attributes or alternates files could not be inspected' }
+  for (const [k, s] of seen.entries()) {
+    present[k]!.seen = s
+    if (s.kind === 'missing' || (s.kind === 'file' && s.size <= SOURCE_BYTES)) continue
+    return { why: `${present[k]!.label} is ${s.kind === 'file' ? `larger than ${SOURCE_BYTES / 1024 / 1024} MiB` : `a ${KIND_WORDS[s.kind]}, not an ordinary file`}; Git would read it without bound, so the working tree is not measured` }
+  }
+  return named
+}
+
 /**
  * The commit a release review is for: the full id of HEAD, and only when the working tree is clean (every
  * untracked file and submodule counted, whatever the user's git configuration says), because a review of a
@@ -274,14 +394,14 @@ type Candidate = { sha: string } | { sha: null; why: 'dirty' | 'unknown' }
 const verifiedGitPlace = async ($: EngineInterface): Promise<{ root: string; dir: string } | null> => {
   const intended = await $.session.cwd()
   if (!intended) return null
-  const top = await $.process.run(['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd: intended, timeoutMs: GIT_TIMEOUT_MS })
-  const prefix = await $.process.run(['git', ...GIT_SAFE, 'rev-parse', '--show-prefix'], { cwd: intended, timeoutMs: GIT_TIMEOUT_MS })
+  const top = await bounded($, ['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd: intended, timeoutMs: GIT_TIMEOUT_MS })
+  const prefix = await bounded($, ['git', ...GIT_SAFE, 'rev-parse', '--show-prefix'], { cwd: intended, timeoutMs: GIT_TIMEOUT_MS })
   if (top.exitCode !== 0 || prefix.exitCode !== 0 || top.isStdoutTruncated || prefix.isStdoutTruncated || top.isStderrTruncated || prefix.isStderrTruncated || top.stderr.trim() !== '' || prefix.stderr.trim() !== '') return null
   const root = top.stdout.replace(/\n$/, '')
   const relative = prefix.stdout.replace(/\n$/, '')
   if (!root.startsWith('/') || relative.startsWith('/') || relative.split('/').some(part => part === '..' || part === '.')) return null
-  const actual = await $.process.run(['realpath', '-e', '--', intended], { timeoutMs: GIT_TIMEOUT_MS })
-  const reported = await $.process.run(['realpath', '-e', '--', `${root}/${relative}`], { timeoutMs: GIT_TIMEOUT_MS })
+  const actual = await bounded($, ['realpath', '-e', '--', intended], { timeoutMs: GIT_TIMEOUT_MS })
+  const reported = await bounded($, ['realpath', '-e', '--', `${root}/${relative}`], { timeoutMs: GIT_TIMEOUT_MS })
   if (actual.exitCode !== 0 || reported.exitCode !== 0 || actual.isStdoutTruncated || reported.isStdoutTruncated || actual.isStderrTruncated || reported.isStderrTruncated || actual.stderr.trim() !== '' || reported.stderr.trim() !== '') return null
   const canonical = (value: string) => value.replace(/\n$/, '').replace(/\/+$/, '') || '/'
   return canonical(actual.stdout) === canonical(reported.stdout) ? { root, dir: intended } : null
@@ -294,23 +414,23 @@ const verifiedGitRoot = async ($: EngineInterface): Promise<string | null> => {
 /** Check attributes before status/diff can run a repository-controlled clean/process command. The effective
  * command value wins; dormant filters (for example globally installed LFS) do not make ordinary trees unknown. */
 const gitFiltersReliable = async ($: EngineInterface, top: string, committed: string[] = []): Promise<boolean> => {
-  const cfg = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'config', '--null', '--get-regexp', '^filter\\..*\\.(clean|process)$'], { timeoutMs: GIT_TIMEOUT_MS })
+  const cfg = await bounded($, ['git', ...GIT_SAFE, '-C', top, 'config', '--null', '--get-regexp', '^filter\\..*\\.(clean|process)$'], { timeoutMs: GIT_TIMEOUT_MS })
   if (cfg.isStdoutTruncated || cfg.isStderrTruncated || cfg.stderr.trim() !== '' || (cfg.exitCode !== 0 && cfg.exitCode !== 1)) return false
   if (cfg.exitCode === 1) return cfg.stdout === ''
   const drivers = filterCommands(cfg.stdout)
   if (drivers === null) return false
   if (drivers.size === 0) return true
-  const tree = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'ls-tree', '-r', '-z', '--full-tree', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS })
+  const tree = await bounded($, ['git', ...GIT_SAFE, '-C', top, 'ls-tree', '-r', '-z', '--full-tree', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS })
   const base = gitAnswered(tree) ? commitEntries(tree.stdout) : null
   if (base === null) return false
-  const paths = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'ls-files', '-z'], { timeoutMs: GIT_TIMEOUT_MS })
+  const paths = await bounded($, ['git', ...GIT_SAFE, '-C', top, 'ls-files', '-z'], { timeoutMs: GIT_TIMEOUT_MS })
   if (paths.exitCode !== 0 || paths.isStdoutTruncated || paths.isStderrTruncated || paths.stderr.trim() !== '') return false
   if (paths.stdout !== '' && !paths.stdout.endsWith('\0')) return false
   const all = [...new Set([...paths.stdout.split('\0').filter(Boolean), ...base.map(e => e.path), ...committed])]
   if (all.length > 100_000) return false
   for (let i = 0; i < all.length; i += HASH_CHUNK) {
     const names = all.slice(i, i + HASH_CHUNK).join('\0') + '\0'
-    const attrs = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'check-attr', '-z', '--stdin', 'filter'], { stdin: names, timeoutMs: GIT_TIMEOUT_MS })
+    const attrs = await bounded($, ['git', ...GIT_SAFE, '-C', top, 'check-attr', '-z', '--stdin', 'filter'], { stdin: names, timeoutMs: GIT_TIMEOUT_MS })
     if (attrs.exitCode !== 0 || attrs.isStdoutTruncated || attrs.isStderrTruncated || attrs.stderr.trim() !== '' || activeFilter(attrs.stdout, drivers, names) !== false) return false
   }
   return true
@@ -322,11 +442,28 @@ const hashesOf = (text: string, count: number): string[] | null => {
   return hashes.length === count && hashes.every(x => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(x)) ? hashes : null
 }
 
+/** The text of a symbolic link, which is what Git records for one, read without following it; null when it cannot be read reliably. */
+const linkText = async ($: EngineInterface, root: string, path: string): Promise<string | null> => {
+  let link = await bounded($, ['readlink', '-z', '--', path], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
+  if (!gitAnswered(link)) {
+    const fallback = await bounded($, ['readlink', path], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
+    if (!gitAnswered(fallback) || !fallback.stdout.endsWith('\n')) return null
+    link = { ...fallback, stdout: fallback.stdout.slice(0, -1) + '\0' }
+  }
+  return link.stdout.endsWith('\0') && link.stdout.length <= 4096 && !link.stdout.slice(0, -1).includes('\0') ? link.stdout.slice(0, -1) : null
+}
+/** What a path that is never read is, in words. */
+const KIND_WORDS: Record<Kind, string> = { file: 'file', link: 'symbolic link', dir: 'directory', fifo: 'FIFO', socket: 'socket', char: 'character device', block: 'block device', missing: 'missing path' }
+
+/** Bytes read by one fingerprint, shared by its steps so that the total is bounded (FINGERPRINT_TOTAL_BYTES). */
+type ReadBudget = { bytes: number }
+const GIB = 1024 ** 3
 /** Read every intended tracked file even if status, diff, and the index's dirty listing all say clean. */
-const measureCommit = async ($: EngineInterface, root: string, sha: string): Promise<Measurement> => {
+const measureCommit = async ($: EngineInterface, root: string, sha: string, budget: ReadBudget = { bytes: 0 }): Promise<Measurement> => {
   try {
     const began = await $.clock.now()
-    const git = (args: string[], stdin?: string) => $.process.run(['git', ...GIT_SAFE, '-C', root, ...args], { timeoutMs: GIT_TIMEOUT_MS, ...(stdin === undefined ? {} : { stdin }) })
+    const late = async () => await $.clock.now() - began > FINGERPRINT_BUDGET_MS
+    const git = (args: string[], stdin?: string) => bounded($, ['git', ...GIT_SAFE, '-C', root, ...args], { timeoutMs: GIT_TIMEOUT_MS, ...(stdin === undefined ? {} : { stdin }) })
     const tree = await git(['ls-tree', '-r', '-z', '--full-tree', sha])
     const entries = gitAnswered(tree) ? commitEntries(tree.stdout) : null
     if (entries === null) return { why: 'the intended commit tree is unreadable, malformed or exceeds the tracked-file limit' }
@@ -334,40 +471,35 @@ const measureCommit = async ($: EngineInterface, root: string, sha: string): Pro
     const out: DiskEntry[] = []
     let regularLinks: boolean | undefined
     for (let i = 0; i < entries.length; i += HASH_CHUNK) {
-      if (await $.clock.now() - began > FINGERPRINT_BUDGET_MS) return { why: 'tracked-file measurement exceeded its time budget' }
+      if (await late()) return { why: 'tracked-file measurement exceeded its time budget' }
       const chunk = entries.slice(i, i + HASH_CHUNK)
-      const paths = chunk.map(e => `./${e.path}`)
-      let stat = await $.process.run(['stat', '--printf', '%f\\0', '--', ...paths], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
-      let modes = gitAnswered(stat) && stat.stdout.endsWith('\0') ? stat.stdout.split('\0').slice(0, -1).map(x => /^[0-9a-f]+$/.test(x) ? parseInt(x, 16) : NaN) : []
-      if (!gitAnswered(stat)) {
-        stat = await $.process.run(['stat', '-f', '%p', '--', ...paths], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
-        modes = gitAnswered(stat) ? stat.stdout.trimEnd().split('\n').map(x => /^[0-7]+$/.test(x) ? parseInt(x, 8) : NaN) : []
+      // What is on disk at each path, without following a link: a link is measured by its own text, never the file it leads
+      // to, and a directory, FIFO, socket or device is never opened. A missing tracked file is a known deletion.
+      const seen = await inspectPaths($, root, chunk.map(e => `./${e.path}`))
+      if (seen === null) return { why: 'tracked files could not be inspected completely' }
+      const regular: number[] = []
+      for (let n = 0; n < chunk.length; n++) {
+        const s = seen[n]!
+        if (s.kind === 'file') {
+          if (s.size > FINGERPRINT_FILE_BYTES) return { why: `a tracked file is larger than ${FINGERPRINT_FILE_BYTES / GIB} GiB, more than the fingerprint reads` }
+          budget.bytes += s.size
+          regular.push(n)
+        } else if (s.kind !== 'link' && s.kind !== 'missing') return { why: 'a tracked path is not an ordinary file or symbolic link (a directory, FIFO, socket or device), so it is not read' }
       }
-      if (modes.length !== chunk.length || modes.some(x => !Number.isSafeInteger(x))) {
-        // A missing tracked file is a known deletion; a permission or partial-read failure is UNKNOWN.
-        modes = []
-        for (const path of paths) {
-          if (await $.clock.now() - began > FINGERPRINT_BUDGET_MS) return { why: 'tracked-file measurement exceeded its time budget' }
-          let one = await $.process.run(['stat', '--printf', '%f\\0', '--', path], { cwd: root, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } })
-          if (gitAnswered(one) && /^[0-9a-f]+\0$/.test(one.stdout)) modes.push(parseInt(one.stdout, 16))
-          else if (one.exitCode !== 0 && !one.isStderrTruncated && /No such file or directory/.test(one.stderr)) modes.push(0)
-          else {
-            one = await $.process.run(['stat', '-f', '%p', '--', path], { cwd: root, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } })
-            if (gitAnswered(one) && /^[0-7]+\n$/.test(one.stdout)) modes.push(parseInt(one.stdout, 8))
-            else if (one.exitCode !== 0 && !one.isStderrTruncated && /No such file or directory/.test(one.stderr)) modes.push(0)
-            else return { why: 'tracked files could not be inspected completely' }
-          }
-        }
-      }
-      const regular = chunk.filter((_, n) => (modes[n]! & 0xf000) === 0x8000)
-      const read = regular.length ? await git(['hash-object', '--no-filters', '--', ...regular.map(e => `./${e.path}`)]) : null
+      if (budget.bytes > FINGERPRINT_TOTAL_BYTES) return { why: `the working tree holds more than ${FINGERPRINT_TOTAL_BYTES / GIB} GiB to read, more than the fingerprint reads` }
+      const read = regular.length ? await git(['hash-object', '--no-filters', '--', ...regular.map(n => `./${chunk[n]!.path}`)]) : null
       const hashes = read === null ? [] : gitAnswered(read) ? hashesOf(read.stdout, regular.length) : null
-      if (hashes === null) return { why: 'tracked working-tree bytes could not be hashed completely' }
+      if (hashes === null) return { why: 'tracked working-tree bytes could not be hashed completely (a file could not be read, or its process reached a resource limit)' }
+      // A file replaced (by a link to a device, say) or rewritten between the inspection and the read is not believed.
+      if (regular.length) {
+        const again = await inspectPaths($, root, regular.map(n => `./${chunk[n]!.path}`))
+        if (again === null || again.some((s, k) => s.identity !== seen[regular[k]!]!.identity)) return { why: 'a tracked file changed while it was being measured' }
+      }
       let at = 0
       for (let n = 0; n < chunk.length; n++) {
-        if (await $.clock.now() - began > FINGERPRINT_BUDGET_MS) return { why: 'tracked-file measurement exceeded its time budget' }
-        const e = chunk[n]!, type = modes[n]! & 0xf000
-        if (type === 0x8000) {
+        if (await late()) return { why: 'tracked-file measurement exceeded its time budget' }
+        const e = chunk[n]!, s = seen[n]!
+        if (s.kind === 'file') {
           let isSameType = e.mode !== '120000'
           if (!isSameType) {
             if (regularLinks === undefined) {
@@ -376,26 +508,21 @@ const measureCommit = async ($: EngineInterface, root: string, sha: string): Pro
             }
             isSameType = regularLinks
           }
-          out.push({ ...e, raw: hashes[at++]!, isSameType, diskMode: modes[n]! & 0o111 ? '100755' : '100644' })
-        } else if (type === 0xa000) {
+          out.push({ ...e, raw: hashes[at++]!, isSameType, diskMode: s.mode & 0o111 ? '100755' : '100644' })
+        } else if (s.kind === 'link') {
           // Hash the link target, not the file it leads to; Git commits the target's bytes.
-          let link = await $.process.run(['readlink', '-z', '--', `./${e.path}`], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
-          if (!gitAnswered(link)) {
-            const fallback = await $.process.run(['readlink', `./${e.path}`], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
-            if (!gitAnswered(fallback) || !fallback.stdout.endsWith('\n')) return { why: 'a tracked symbolic link could not be read reliably' }
-            link = { ...fallback, stdout: fallback.stdout.slice(0, -1) + '\0' }
-          }
-          if (!gitAnswered(link) || !link.stdout.endsWith('\0') || link.stdout.length > 4096 || link.stdout.slice(0, -1).includes('\0')) return { why: 'a tracked symbolic link could not be read reliably' }
-          const hash = await git(['hash-object', '--no-filters', '--stdin'], link.stdout.slice(0, -1))
+          const text = await linkText($, root, `./${e.path}`)
+          if (text === null) return { why: 'a tracked symbolic link could not be read reliably' }
+          const hash = await git(['hash-object', '--no-filters', '--stdin'], text)
           const got = gitAnswered(hash) ? hashesOf(hash.stdout, 1) : null
           if (got === null) return { why: 'a tracked symbolic link could not be hashed' }
           out.push({ ...e, raw: got[0]!, isSameType: e.mode === '120000', diskMode: '120000' })
-        } else if (type === 0) {
+        } else {
           out.push({ ...e, raw: '', isSameType: false, diskMode: 'missing' })
-        } else return { why: 'a tracked path is not an ordinary file or symbolic link' }
+        }
       }
     }
-    return await $.clock.now() - began > FINGERPRINT_BUDGET_MS ? { why: 'tracked-file measurement exceeded its time budget' } : { entries: out }
+    return await late() ? { why: 'tracked-file measurement exceeded its time budget' } : { entries: out }
   } catch { return { why: 'tracked-content verification failed or timed out' } }
 }
 
@@ -405,7 +532,7 @@ const matchesCommit = async ($: EngineInterface, root: string, entries: DiskEntr
   const began = await $.clock.now()
   if (entries.some(e => !e.isSameType)) return false
   if (entries.some(e => e.mode !== '120000' && e.diskMode !== undefined && e.diskMode !== e.mode)) {
-    const config = await $.process.run(['git', ...GIT_SAFE, '-C', root, 'config', '--bool', '--get', 'core.filemode'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+    const config = await bounded($, ['git', ...GIT_SAFE, '-C', root, 'config', '--bool', '--get', 'core.filemode'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
     if (config === null || config.isStdoutTruncated || config.isStderrTruncated || config.stderr.trim() !== '' || ![0, 1].includes(config.exitCode ?? -1)) return null
     if (config.exitCode === 1 || config.stdout.trim() === 'true') return false
     if (config.stdout.trim() !== 'false') return null
@@ -415,9 +542,14 @@ const matchesCommit = async ($: EngineInterface, root: string, entries: DiskEntr
   for (let i = 0; i < changed.length; i += HASH_CHUNK) {
     if (await $.clock.now() - began > FINGERPRINT_BUDGET_MS) return null
     const chunk = changed.slice(i, i + HASH_CHUNK)
-    const r = await $.process.run(['git', ...GIT_SAFE, '-C', root, 'hash-object', '--', ...chunk.map(e => `./${e.path}`)], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+    // Each is read again, so each is inspected again: only an ordinary file within the size bound, unchanged by the read.
+    const seen = await inspectPaths($, root, chunk.map(e => `./${e.path}`))
+    if (seen === null || seen.some(s => s.kind !== 'file' || s.size > FINGERPRINT_FILE_BYTES)) return null
+    const r = await bounded($, ['git', ...GIT_SAFE, '-C', root, 'hash-object', '--', ...chunk.map(e => `./${e.path}`)], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
     const hashes = r !== null && gitAnswered(r) ? hashesOf(r.stdout, chunk.length) : null
     if (hashes === null) return null
+    const again = await inspectPaths($, root, chunk.map(e => `./${e.path}`))
+    if (again === null || again.some((s, n) => s.identity !== seen[n]!.identity)) return null
     if (chunk.some((e, n) => hashes[n] !== e.oid)) return false
   }
   return await $.clock.now() - began > FINGERPRINT_BUDGET_MS ? null : true
@@ -426,8 +558,8 @@ const matchesCommit = async ($: EngineInterface, root: string, entries: DiskEntr
 const candidateOf = async ($: EngineInterface): Promise<Candidate> => {
   try {
     const top = await verifiedGitRoot($)
-    if (top === null || !(await gitFiltersReliable($, top))) return { sha: null, why: 'unknown' }
-    const run = (argv: string[]) => $.process.run(['git', ...GIT_SAFE, '-C', top, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
+    if (top === null || 'why' in await gitInputs($, top) || !(await gitFiltersReliable($, top))) return { sha: null, why: 'unknown' }
+    const run = (argv: string[]) => bounded($, ['git', ...GIT_SAFE, '-C', top, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
     const head = await run(['rev-parse', '--verify', 'HEAD'])
     if (head.exitCode !== 0 || head.isStdoutTruncated || head.isStderrTruncated || head.stderr.trim() !== '') return { sha: null, why: 'unknown' }
     const sha = head.stdout.trim()
@@ -727,7 +859,7 @@ const scopedGitPlan = async ($: EngineInterface, s: Swarm, task: SwarmTask, comm
       if (!ownershipAllows(s, task.id, canonical, 'read')) return outside(shortResource(canonical))
     }
     for (const name of vetted.git.commits) {
-      const peeled = await $.process.run(['git', ...GIT_SAFE, '-C', place.dir, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`], { timeoutMs: GIT_TIMEOUT_MS })
+      const peeled = await bounded($, ['git', ...GIT_SAFE, '-C', place.dir, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`], { timeoutMs: GIT_TIMEOUT_MS })
       if (!gitAnswered(peeled) || hashesOf(peeled.stdout, 1) === null) return { deny: `SWARM / "${name.slice(0, 60)}" does not name a commit here. Under a narrow scope a revision must be a branch, tag or commit id that resolves to a commit; a tree, a file or an unknown name is refused.`, isGit: true }
     }
 
@@ -1319,6 +1451,7 @@ const doctorFacts = async ($: EngineInterface): Promise<DoctorFacts> => {
     agents: agentsOf(ledger.agents.map(a => (typeof a.start === 'number' && typeof a.end === 'number' ? a.end - a.start : null))),
     stop: await stopFacts($),
     guard: await guardFacts($),
+    measurement: await boundWords($).catch(() => undefined),
   }
 }
 
@@ -1791,8 +1924,8 @@ const refreshGit = async ($: EngineInterface): Promise<void> => {
     cwd = await $.session.cwd()
     const root = await verifiedGitRoot($)
     // HUD reads must not run repository-controlled clean/process filters either.
-    const reliable = root !== null && await gitFiltersReliable($, root)
-    const status = reliable ? await $.process.run(['git', ...GIT_SAFE, '-C', root!, 'status', '--porcelain=v2', '--branch'], {
+    const reliable = root !== null && !('why' in await gitInputs($, root)) && await gitFiltersReliable($, root)
+    const status = reliable ? await bounded($, ['git', ...GIT_SAFE, '-C', root!, 'status', '--porcelain=v2', '--branch'], {
       timeoutMs: GIT_TIMEOUT_MS,
     }) : { exitCode: 128, stdout: '' }
     const old = await read($, gitAtom)
@@ -1811,7 +1944,7 @@ const refreshGit = async ($: EngineInterface): Promise<void> => {
         at: now,
       }
     } else {
-      const top = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { timeoutMs: GIT_TIMEOUT_MS })
+      const top = await bounded($, ['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { timeoutMs: GIT_TIMEOUT_MS })
       const project = projectOf(top.exitCode === 0 && top.stdout.trim() !== '' ? top.stdout.trim() : cwd)
       const parsed = parseStatus(status.stdout)
       const isSameRepo = old !== null && old.isRepo && old.project === project
@@ -2173,14 +2306,19 @@ const HASH_CHUNK = 400
 const IGNORED_FILES = 100_000
 /** The whole ignored-file measurement of one fingerprint may take this long; beyond it the tree is UNKNOWN. */
 const FINGERPRINT_BUDGET_MS = 25_000
+/** The whole fingerprint may take this long between its steps (each process has its own timeout too); beyond it the tree is UNKNOWN. */
+const FINGERPRINT_DEADLINE_MS = 90_000
 /** Why the latest fingerprint was unknown, in words for the Ledger and HUD. Empty after a known one. */
 let treeWhy = ''
 const treeStamp = async ($: EngineInterface, base?: string): Promise<string | null> => {
   treeWhy = ''
   const unknown = (why: string): null => { treeWhy = why; return null }
   try {
+    const began = await $.clock.now()
+    const overdue = async () => (await $.clock.now()) - began > FINGERPRINT_DEADLINE_MS
+    const late = `measuring the working tree took longer than ${FINGERPRINT_DEADLINE_MS / 1000}s`
     const sh = async (argv: string[]): Promise<string | null> => {
-      const r = await $.process.run(['git', ...GIT_SAFE, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
+      const r = await bounded($, ['git', ...GIT_SAFE, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
 
       return r.exitCode === 0 && !r.isStdoutTruncated ? r.stdout : null
     }
@@ -2188,34 +2326,57 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     // files in it out of the listing (reproduced with real git). Any stderr from a listing means it was not complete: UNKNOWN.
     let incomplete = ''
     const listing = async (argv: string[]): Promise<string | null> => {
-      const r = await $.process.run(['git', ...GIT_SAFE, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
+      const r = await bounded($, ['git', ...GIT_SAFE, ...argv], { timeoutMs: GIT_TIMEOUT_MS })
       if (r.exitCode === 0 && r.stderr.trim() !== '') incomplete = oneLine(r.stderr, 160)
 
       return r.exitCode === 0 && !r.isStdoutTruncated && r.stderr.trim() === '' ? r.stdout : null
     }
     const top = await verifiedGitRoot($)
     if (top === null) return unknown('not a git work tree, or the work tree does not match the session directory, or its identity could not be verified')
-    if (!(await gitFiltersReliable($, top))) return unknown('an active clean/process filter or unreadable filter configuration makes the working tree unreliable')
     const at = (...argv: string[]) => sh(['-C', top, ...argv])
+    // Git's excludes, attributes and alternates files are checked before any Git command below reads them (gitInputs).
+    const inputs = await gitInputs($, top)
+    if ('why' in inputs) return unknown(inputs.why)
+    if (!(await gitFiltersReliable($, top))) return unknown('an active clean/process filter or unreadable filter configuration makes the working tree unreliable')
+    // Bytes read by the whole fingerprint, against FINGERPRINT_TOTAL_BYTES.
+    const budget: ReadBudget = { bytes: 0 }
+    // Reads regular files already inspected, then inspects them again: a file replaced (by a link to a device, say) or rewritten in
+    // between is not believed. `follow` as when they were inspected.
+    const hashFiles = async (names: string[], seen: Inspected[], follow: boolean): Promise<string[] | { why: string }> => {
+      if (names.length === 0) return []
+      for (const s of seen) {
+        if (s.size > FINGERPRINT_FILE_BYTES) return { why: `a file is larger than ${FINGERPRINT_FILE_BYTES / GIB} GiB, more than the fingerprint reads` }
+        budget.bytes += s.size
+      }
+      if (budget.bytes > FINGERPRINT_TOTAL_BYTES) return { why: `the working tree holds more than ${FINGERPRINT_TOTAL_BYTES / GIB} GiB to read, more than the fingerprint reads` }
+      const r = await bounded($, ['git', ...GIT_SAFE, '-C', top, 'hash-object', '--no-filters', '--', ...names], { timeoutMs: GIT_TIMEOUT_MS })
+      const hashes = gitAnswered(r) ? hashesOf(r.stdout, names.length) : null
+      if (hashes === null) return { why: 'a file could not be hashed (deleted meanwhile, unreadable, not present in a sparse checkout, or its process reached a time or memory limit)' }
+      const again = await inspectPaths($, top, names, follow)
+      if (again === null || again.some((s, k) => s.identity !== seen[k]!.identity)) return { why: 'a file changed while it was being measured' }
+      return hashes
+    }
     // The files (and links) under a directory, for what git cannot hash or list file by file. A directory that exists but cannot be read
-    // in full is never "missing" and never a partial answer: the caller makes the tree UNKNOWN.
+    // in full is never "missing" and never a partial answer: the caller makes the tree UNKNOWN. Nothing is read but the listing.
     const walk = async (dir: string): Promise<{ names: string[] } | { missing: true } | { why: string }> => {
-      const f = await $.process.run(['find', '-H', dir, '(', '-type', 'f', '-o', '-type', 'l', ')', '-print0'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+      const f = await bounded($, ['find', '-H', dir, '(', '-type', 'f', '-o', '-type', 'l', ')', '-print0'], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
       if (f !== null && f.exitCode === 0 && !f.isStdoutTruncated) return { names: f.stdout.split('\0').filter(Boolean).sort() }
       // "missing" only when the system says there is no such file: a path that is there but cannot be entered (permission denied on a
       // parent) must not become a constant "missing" that a writer can keep equal at both measurements. C locale: stable wording.
-      const there = await $.process.run(['stat', '--', dir], { timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
+      const there = await bounded($, ['stat', '--', dir], { timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
       if (f !== null && f.exitCode !== 0 && there !== null && there.exitCode !== 0 && /No such file or directory/.test(there.stderr)) return { missing: true }
 
       return { why: `${dir} exists but could not be listed in full (unreadable, too large or timed out)` }
     }
     const head = base ?? (await at('rev-parse', '--verify', 'HEAD'))?.trim()
     if (!head) return unknown('no commit to measure against')
-    const tracked = await measureCommit($, top, head)
+    const tracked = await measureCommit($, top, head, budget)
     if ('why' in tracked) return unknown(tracked.why)
     if (!(await gitFiltersReliable($, top, tracked.entries.map(e => e.path)))) return unknown('active commit-path filters make the working tree unreliable')
-    const changed = await at('diff', head, '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=d')
-    const deleted = await at('diff', head, '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=D')
+    if (await overdue()) return unknown(late)
+    // -O/dev/null: a configured diff.orderFile is read whole (measured: one pointed at a device exhausted memory); no order is needed here.
+    const changed = await at('diff', head, '-O/dev/null', '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=d')
+    const deleted = await at('diff', head, '-O/dev/null', '--no-renames', '--ignore-submodules=none', '--name-only', '-z', '--diff-filter=D')
     const untracked = await listing(['-C', top, 'ls-files', '-o', '--exclude-standard', '-z'])
     // What git ignores is not hashed, but its NAMES are part of the state: a nested .gitignore of `*`, a line in .git/info/exclude or in
     // any global ignore file moves a new file out of the untracked list and into this one, which is a change in itself (reproduced).
@@ -2226,21 +2387,17 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     // hashed from the disk instead; a path that cannot be hashed (a sparse-checkout file that is not there) makes the tree unknown.
     const flags = await at('ls-files', '-v', '-z')
     if (incomplete !== '') return unknown(`git could not read part of the work tree, so its listing is incomplete (${incomplete})`)
-    if (changed === null || deleted === null || untracked === null) return unknown('a git command failed, timed out or its output was cut short')
+    if (changed === null || deleted === null || untracked === null) return unknown('a git command failed, timed out, reached a resource limit or its output was cut short')
     if (ignored === null) return unknown('the ignored-entry listing failed, timed out or was cut short')
     if (flags === null) return unknown('the index listing failed, timed out or was cut short by the host output limit')
     const hidden = flags.split('\0').filter(l => l.length > 2 && (/[a-z]/.test(l[0] as string) || l[0] === 'S')).map(l => l.slice(2))
-    // The sources that decide what "untracked" means are part of the state, so adding a file to them is a change in itself.
-    const sources: string[] = []
-    const exclude = (await at('rev-parse', '--git-path', 'info/exclude'))?.trim()
-    const global = (await at('config', '--type=path', '--get', 'core.excludesFile'))?.trim()
-    const attributes = (await at('rev-parse', '--git-path', 'info/attributes'))?.trim()
-    const globalAttributes = (await at('config', '--type=path', '--get', 'core.attributesFile'))?.trim()
-    for (const file of [exclude, global, attributes, globalAttributes]) {
-      if (!file) { sources.push('-'); continue }
-      const r = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'hash-object', '--no-filters', '--', file], { timeoutMs: GIT_TIMEOUT_MS })
-      sources.push(r.exitCode === 0 ? r.stdout.trim() : 'none')
-    }
+    // The sources that decide what "untracked" means are part of the state, so adding a file to them is a change in itself. They were
+    // inspected before Git read them; one that is gone is 'none', and one that cannot be read or changed meanwhile is UNKNOWN.
+    const sourceList = inputs.filter(n => n.source)
+    const readable = sourceList.filter((n): n is GitInput & { path: string; seen: Inspected } => n.seen?.kind === 'file')
+    const sourceHashes = await hashFiles(readable.map(n => n.path), readable.map(n => n.seen), true)
+    if ('why' in sourceHashes) return unknown(`the excludes or attributes files: ${sourceHashes.why}`)
+    const sources = sourceList.map(n => (n.path === null ? '-' : n.seen?.kind === 'file' ? sourceHashes[readable.indexOf(n as typeof readable[number])]! : 'none'))
     // Operator-authorized volatile directories (caches, build output) leave the IGNORED part of the stamp; nothing else is excluded.
     const ignoredNames = ignored.split('\0').filter(Boolean).sort().filter(name => !stopCfg.volatile.some(v => name.startsWith(v) || `${name}/` === v))
     if (ignoredNames.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored files (list the generated directories in stopVolatile, or the check runs every time)`)
@@ -2249,21 +2406,33 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     // their files under the same bound; one that cannot be listed in full makes the tree unknown.
     const embedded: string[] = []
     for (const entry of ignoredNames.filter(name => name.endsWith('/'))) {
+      if (await overdue()) return unknown(late)
       const listed = await walk(`${top}/${entry.replace(/\/+$/, '')}`)
       if ('why' in listed) return unknown(listed.why)
       if ('missing' in listed) return unknown(`${entry} vanished while it was listed`)
       embedded.push(...listed.names)
       if (embedded.length + ignoredNames.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored files (list the generated directories in stopVolatile, or the check runs every time)`)
     }
-    // The verifier and the operator's watched paths are hashed by content whatever git says about them. A watched DIRECTORY cannot be
-    // hashed as an object: its files are listed (find follows no link below the start) and measured like the ignored files, with the same bound.
+    // The verifier and the operator's watched paths are measured whatever git says about them, following a link the operator named: a
+    // file by its content; a DIRECTORY by its files, listed (find follows no link below the start) and measured like the ignored files,
+    // with the same bound. A watched device, FIFO or socket is never read: UNKNOWN.
     const watched: string[] = []
     const watchedFiles: string[] = []
     for (const file of [stopCfg.script, ...stopCfg.watch]) {
       if (file === null || file === undefined) continue
+      if (await overdue()) return unknown(late)
       const full = file.startsWith('/') ? file : `${top}/${file}`
-      const r = await $.process.run(['git', ...GIT_SAFE, '-C', top, 'hash-object', '--no-filters', '--', full], { timeoutMs: GIT_TIMEOUT_MS })
-      if (r.exitCode === 0) { watched.push(`W\0${file}\0${r.stdout.trim()}`); continue }
+      const seen = await inspectPaths($, top, [full], true)
+      if (seen === null) return unknown(`the watched path ${file} could not be inspected`)
+      const s = seen[0]!
+      if (s.kind === 'missing') { watched.push(`W\0${file}\0none`); continue }
+      if (s.kind === 'file') {
+        const got = await hashFiles([full], [s], true)
+        if ('why' in got) return unknown(`the watched path ${file}: ${got.why}`)
+        watched.push(`W\0${file}\0${got[0]}`)
+        continue
+      }
+      if (s.kind !== 'dir') return unknown(`the watched path ${file} is a ${KIND_WORDS[s.kind]}, which is never read`)
       const listed = await walk(full)
       if ('missing' in listed) { watched.push(`W\0${file}\0none`); continue }
       if ('why' in listed) return unknown(`the watched path ${file}: ${listed.why}`)
@@ -2278,14 +2447,15 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const toMeasure = [...new Set([...ignoredNames, ...embedded, ...watchedFiles])].sort()
     if (toMeasure.length > IGNORED_FILES) return unknown(`more than ${IGNORED_FILES} ignored and watched files`)
     const measured: string[] = []
-    const began = await $.clock.now()
+    const ignoredBegan = await $.clock.now()
     for (let i = 0; i < toMeasure.length; i += HASH_CHUNK) {
-      if ((await $.clock.now()) - began > FINGERPRINT_BUDGET_MS) return unknown(`measuring the ignored files took longer than ${FINGERPRINT_BUDGET_MS / 1000}s`)
+      if ((await $.clock.now()) - ignoredBegan > FINGERPRINT_BUDGET_MS) return unknown(`measuring the ignored files took longer than ${FINGERPRINT_BUDGET_MS / 1000}s`)
+      if (await overdue()) return unknown(late)
       const chunk = toMeasure.slice(i, i + HASH_CHUNK)
-      let r = await $.process.run(['stat', '--printf', '%i %s %.9Y %.9Z %n\\0', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
+      let r = await bounded($, ['stat', '--printf', '%i %s %.9Y %.9Z %n\\0', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
       let lines: string[] = r.exitCode === 0 ? r.stdout.split('\0').filter(Boolean) : []
       if (r.exitCode !== 0) {
-        r = await $.process.run(['stat', '-f', '%i %z %m %c %N', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
+        r = await bounded($, ['stat', '-f', '%i %z %m %c %N', '--', ...chunk], { cwd: top, timeoutMs: GIT_TIMEOUT_MS })
         lines = r.exitCode === 0 ? r.stdout.split('\n').filter(Boolean) : []
       }
       if (r.exitCode !== 0 || r.isStdoutTruncated || lines.length !== chunk.length) return unknown('ignored entries could not be measured (stat failed, or an entry vanished meanwhile)')
@@ -2295,12 +2465,35 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const paths = [...new Set([...changed.split('\0'), ...untracked.split('\0'), ...hidden].filter(path => path !== '' && !committedPaths.has(path)))].sort()
     if (paths.length > TREE_FILES) return unknown(`more than ${TREE_FILES} changed, untracked or flagged files`)
     const lines: string[] = [...deleted.split('\0').filter(Boolean).sort().map(path => `D\0${path}`), `X\0${sources.join('\0')}`, ...measured.map(line => `S\0${line}`), ...watched]
+    // Changed, untracked and flagged paths are inspected before anything is read, without following a final link: a regular file is
+    // hashed by content, a link by its own text (as Git records it, never the file it leads to), and a FIFO, socket or device by its
+    // kind alone, never opened. A directory here (a nested repository) or a path gone meanwhile is UNKNOWN.
     for (let i = 0; i < paths.length; i += HASH_CHUNK) {
+      if (await overdue()) return unknown(late)
       const chunk = paths.slice(i, i + HASH_CHUNK)
-      const hashes = await at('hash-object', '--no-filters', '--', ...chunk)
-      const got = hashes?.split('\n').filter(Boolean)
-      if (got === undefined || got.length !== chunk.length) return unknown('a file could not be hashed (deleted meanwhile, unreadable or not present in a sparse checkout)')
-      chunk.forEach((path, n) => lines.push(`${got[n]}\0${path}`))
+      const seen = await inspectPaths($, top, chunk.map(path => `./${path}`))
+      if (seen === null) return unknown('a changed or untracked path could not be inspected')
+      const regular: number[] = []
+      for (let n = 0; n < chunk.length; n++) {
+        const s = seen[n]!
+        if (s.kind === 'file') regular.push(n)
+        else if (s.kind === 'dir') return unknown('a changed or untracked path is a directory (a nested repository?), which is not measured')
+        else if (s.kind === 'missing') return unknown('a changed or untracked file vanished while it was measured')
+      }
+      const hashes = await hashFiles(regular.map(n => `./${chunk[n]}`), regular.map(n => seen[n]!), false)
+      if ('why' in hashes) return unknown(hashes.why)
+      let next = 0
+      for (let n = 0; n < chunk.length; n++) {
+        const path = chunk[n]!, s = seen[n]!
+        if (s.kind === 'file') { lines.push(`${hashes[next++]}\0${path}`); continue }
+        if (s.kind === 'link') {
+          const text = await linkText($, top, `./${path}`)
+          if (text === null) return unknown('a changed or untracked symbolic link could not be read reliably')
+          lines.push(`L\0${path}\0${text}`)
+          continue
+        }
+        lines.push(`K\0${path}\0${s.kind}\0${(s.mode & 0o7777).toString(8)}`)
+      }
     }
     // The commit enumerates authority; raw disk bytes are measured even when the index says every entry is clean.
     for (const e of tracked.entries) {
@@ -2308,6 +2501,7 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
         if (!deleted.split('\0').includes(e.path)) lines.push(`D\0${e.path}`)
       } else if (e.raw !== e.oid || !e.isSameType || (e.diskMode !== undefined && e.diskMode !== e.mode)) lines.push(`${e.raw}\0${e.path}\0${e.isSameType ? 'blob' : 'type-changed'}\0${e.diskMode}`)
     }
+    if (await overdue()) return unknown(late)
     const text = lines.join('\n')
     // FNV-1a twice with different seeds: a change detector, not a security boundary. Paths and hashes never leave this function.
     let a = 0x811c9dc5, b = 0x01000193
@@ -2331,10 +2525,13 @@ const reconcileOnce = async ($: EngineInterface): Promise<void> => {
   const accepted = task?.alignment?.tree
   if (task?.alignment?.state !== 'ALIGNED' || typeof accepted !== 'string') return
   const tree = await treeStamp($, baseOf(accepted))
-  if (tree === null || tree === accepted) return
+  // at once: another measurement may replace it
+  const why = treeWhy
+  if (tree === accepted) return
   const now = await $.clock.now()
-  // only the check that was measured: one made since is about a newer tree
-  const held = await update($, taskAtom, t => (t === null || t.alignment?.tree !== accepted ? t : settle(treeMoved(t, tree)).task))
+  // only the check that was measured: one made since is about a newer tree. A tree that can no longer be measured is not the
+  // one the check was accepted for either: the acceptance is stale, never kept on a failed measurement.
+  const held = await update($, taskAtom, t => (t === null || t.alignment?.tree !== accepted ? t : settle(tree === null ? treeUnmeasured(t, why) : treeMoved(t, tree)).task))
   if (held !== null) await quiet(async () => { await mutateLedger($, l => recordDiscovery(l, held, now)); await persist($) })
 }
 // One measurement at a time; calls that arrive while one runs share the next, which starts after they did.
@@ -2367,7 +2564,10 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
   const before = e.action === 'align' || e.action === 'gate' || (e.action as string) === 'gates' ? await read($, taskAtom) : null
   const goalChecked = before !== null && needsAlignment(before)
   const stamp = goalChecked && e.action === 'align' ? await treeStamp($, baseOf(before.gateTree)) : null
+  const stampWhy = treeWhy
   const gateStamp = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') ? await treeStamp($, baseOf(before.gateTree)) : null
+  // why the gate measurement failed, when it was taken and failed; undefined when none was taken
+  const gateWhy = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') && gateStamp === null ? treeWhy : undefined
   // A model's "read-only" is a claim. With the Stop guard enforcing, it is accepted only when the tree is still the one the task
   // began with (a known baseline taken by the host, no edit seen); an unknown baseline or fingerprint cannot show that, so the
   // task is planned as coding and the enrolled check runs. The baseline is never replaced by a later fingerprint.
@@ -2399,7 +2599,13 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
 
       return reopenVerification(old, 'the working tree changed since the checks were observed')
     }
-    const outcome = applyAction(old === null ? { ...newTask(1, '', now, sha), startTree: null } : checkedAt(old, gateStamp), input, now, sha)
+    // checks observed on a measured tree say nothing about one that can no longer be measured
+    if (e.action === 'align' && goalChecked && old !== null && stamp === null && old.gateTree !== undefined) {
+      reply = `error: ALIGNED refused: ${unmeasuredWhy(stampWhy)}, so the checks observed on it before cannot be shown to describe it. Run the checks again, record the gates, then align. Nothing was recorded`
+
+      return reopenVerification(old, unmeasuredWhy(stampWhy))
+    }
+    const outcome = applyAction(old === null ? { ...newTask(1, '', now, sha), startTree: null } : checkedAt(old, gateStamp, gateWhy), input, now, sha)
     if (outcome.error !== undefined) {
       reply = `error: ${outcome.error}`
 
@@ -2410,7 +2616,7 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
     const isLegacy = old !== null && old.milestones.length > 0 && old.discovery === undefined && e.action !== 'plan'
     const gated = e.action === 'gate' || (e.action as string) === 'gates' ? stampGates(outcome.task, gateStamp) : outcome.task
     const stamped = stamp !== null && gated.alignment?.state === 'ALIGNED' ? { ...gated, alignment: { ...gated.alignment, tree: stamp } } : gated
-    if (goalChecked && e.action === 'align' && stamp === null && gated.alignment?.state === 'ALIGNED') unprotected = 'No working-tree fingerprint could be taken here (no git repository, no commit, or git did not answer), so a later change outside Edit, Write and Bash edit diffs will not be noticed.'
+    if (goalChecked && e.action === 'align' && stamp === null && gated.alignment?.state === 'ALIGNED') unprotected = `No working-tree fingerprint could be taken here (${stampWhy || 'no git repository, no commit, or git did not answer'}), so a later change outside Edit, Write and Bash edit diffs will not be noticed.`
     const settled = settle(isLegacy ? stamped : withDiscovery(stamped, pin))
     cues = settled.cues
     reply = [outcome.note, claimNote, unprotected, summaryOf(settled.task)].filter(Boolean).join(' ')
@@ -2518,12 +2724,14 @@ const noteEnd = async (
         )
       : []
 
-  const observed = readings.some(r => r.state === 'pass') ? await treeStamp($, baseOf((await read($, taskAtom))?.gateTree)) : null
+  const measuring = readings.some(r => r.state === 'pass')
+  const observed = measuring ? await treeStamp($, baseOf((await read($, taskAtom))?.gateTree)) : null
+  const observedWhy = measuring && observed === null ? treeWhy : undefined
   if (edits.length > 0 || readings.length > 0) {
     await change($, (task, now) => {
       let chain = task
       for (const edit of edits) chain = touchFile(chain, edit.path, edit.added, edit.removed)
-      if (observed !== null) chain = checkedAt(chain, observed)
+      if (measuring) chain = checkedAt(chain, observed, observedWhy)
       if (edits.length > 0 && isSonnetLed()) chain = requireReview(chain, mandatoryGrounds(factsOf({ ...chain, files: chain.files.map(f => ({ ...f, path: relative(f.path) })) }, 0, chain.promptGrounds ?? [])))
       // a test command's result cannot lift or replace what the Stop guard holds the task for
       for (const reading of readings) if (!(reading.gate === 'TEST' && isGuardHeld(chain))) chain = setGate(chain, reading.gate, reading.state, reading.evidence, 'auto', now)
@@ -3835,6 +4043,8 @@ export const register: Register = (on, options) => {
   stopOptions = options
   guardCfg = guardConfigOf(options)
   stopCfg = stopConfigOf(options, null)
+  // what limits a measurement process runs under is probed again for this registration's host
+  boundMode = null
   // Before the first settings read the home directory is unknown, so `~/…` cannot be expanded: ENFORCE with a script named is
   // enforcing already (fail closed); loadStopCfg refines it once the configuration is read.
   setGuardRequired(stopCfg.policy === 'ENFORCE')
@@ -4156,7 +4366,7 @@ export const register: Register = (on, options) => {
     if (config.hasOrchestration && e.agentId && e.tool === 'Bash' && (gitPlan.pin !== undefined || agentInspection(String(call['command'] ?? '')))) {
       // a scoped command's repository was verified when its paths were checked; a wildcard one's is verified here
       const root = gitPlan.root ?? await verifiedGitRoot($)
-      if (root === null || !(await gitFiltersReliable($, root))) {
+      if (root === null || 'why' in await gitInputs($, root) || !(await gitFiltersReliable($, root))) {
         const deny = GIT_IDENTITY_DENY
         await ledgerToolEnd($, call, { deny })
         return { deny }

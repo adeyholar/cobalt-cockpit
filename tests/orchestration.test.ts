@@ -9,6 +9,7 @@ import { describe, expect, test as engineTest } from 'claude-code/testing'
 import { roleOf } from '../hooks/orchestra'
 import { parseShell } from '../hooks/shell'
 import { BLOCK_LINE } from '../hooks/policy'
+import { INSPECT_BSD, INSPECT_GNU } from '../hooks/git-integrity'
 import { FIVE, bash, command, hostState, mountHud, mountPane, passAllGates, planAndComplete, progress, prompt, rowsOf, start, TOOL, world } from './world'
 import type { World } from './world'
 
@@ -152,8 +153,9 @@ describe('no network or provider call is made for a refused request', () => {
     expect(w.requests).toEqual([])
     expect(w.spawns).toEqual([])
     expect(w.ran).toEqual([])
-    // Only read-only Git and canonical directory identity probes ran.
-    expect(w.runs.every(argv => argv[0] === 'git' || (argv[0] === 'realpath' && argv[1] === '-e' && argv[2] === '--'))).toBe(true)
+    // Only read-only Git, canonical directory identity probes and (v0.6.4) the inspection of a path's kind ran, each under the limit script.
+    expect(w.runs.every(argv => argv[0] === 'git' || (argv[0] === 'realpath' && argv[1] === '-e' && argv[2] === '--') || (argv[0] === 'stat' && (argv.includes(INSPECT_GNU) || argv.includes(INSPECT_BSD))))).toBe(true)
+    expect(w.wrappers.every(script => script !== null)).toBe(true)
   })
 
   test('ordinary work makes no extra call either: one request in, one request out', async ($, on) => {

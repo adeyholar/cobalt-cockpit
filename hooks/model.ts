@@ -591,9 +591,18 @@ export const reopenVerification = (task: Task, why: string): Task => {
   return { ...reopened, gates }
 }
 
-/** Before a check is recorded: checks that passed on another tree than this one are stale, whatever they were. */
-export const checkedAt = (task: Task, tree: string | null): Task =>
-  tree !== null && needsAlignment(task) && task.gateTree !== undefined && task.gateTree !== tree ? reopenVerification(task, 'the working tree changed since the checks were observed') : task
+/** Why checks observed on a measured tree no longer count, once that tree cannot be measured (v0.6.4). */
+export const unmeasuredWhy = (why: string): string => `the working tree can no longer be measured (${why || 'its fingerprint is UNKNOWN'})`
+
+/**
+ * Before a check is recorded: checks that passed on another tree than this one are stale, whatever they were. `unmeasured`
+ * is why the tree could not be measured when `tree` is null because measuring failed: checks observed on a measured tree
+ * cannot be shown to describe an unmeasurable one, so they are stale too (a failed measurement never keeps a pass).
+ */
+export const checkedAt = (task: Task, tree: string | null, unmeasured?: string): Task =>
+  !needsAlignment(task) || task.gateTree === undefined || task.gateTree === tree || (tree === null && unmeasured === undefined)
+    ? task
+    : reopenVerification(task, tree === null ? unmeasuredWhy(unmeasured ?? '') : 'the working tree changed since the checks were observed')
 
 /** After a check is recorded: the passed checks are about this tree. */
 export const stampGates = (task: Task, tree: string | null): Task =>
@@ -606,6 +615,14 @@ export const treeMoved = (task: Task, tree: string | null): Task => {
 
   return markEdited(task, 'the working tree changed')
 }
+
+/**
+ * Where ALIGNED was accepted for a measured tree and the tree can no longer be measured, nothing shows the acceptance still
+ * holds: the goal check and the checks it rests on are stale (v0.6.4; before, an unmeasurable tree left them standing).
+ * Nothing was seen to be edited, so the task is not marked edited.
+ */
+export const treeUnmeasured = (task: Task, why: string): Task =>
+  task.alignment?.state === 'ALIGNED' && typeof task.alignment.tree === 'string' ? reopenVerification(task, unmeasuredWhy(why)) : task
 
 /** Distinct files the main loop edits before a task without a plan is reminded of one. */
 export const NUDGE_FILES = 2

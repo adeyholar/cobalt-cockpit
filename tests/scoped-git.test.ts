@@ -81,9 +81,12 @@ describe('what a scoped inspection costs the host', () => {
     }
     const wildcard = await cost(wide, 'git diff main...HEAD -- hooks/swarm.ts')
     const scoped = await cost(narrow, 'git diff main...HEAD -- hooks/swarm.ts')
-    // repository identity (two git, two realpath) and the filter check are what a wildcard inspection already paid
-    expect(wildcard).toEqual(['git rev-parse', 'git rev-parse', 'realpath', 'realpath', 'git config'])
-    expect(scoped).toEqual(['git rev-parse', 'git rev-parse', 'realpath', 'realpath', 'realpath', 'git rev-parse --verify', 'git rev-parse --verify', 'git config'])
+    // repository identity (two git, two realpath), Git's excludes and attributes files checked before Git reads them (v0.6.4: one
+    // rev-parse, two config, one stat, and one more for the alternates file that is usually absent) and the filter check are what a
+    // wildcard inspection already paid
+    const inputs = ['git rev-parse', 'git config', 'git config', 'stat', 'stat']
+    expect(wildcard).toEqual(['git rev-parse', 'git rev-parse', 'realpath', 'realpath', ...inputs, 'git config'])
+    expect(scoped).toEqual(['git rev-parse', 'git rev-parse', 'realpath', 'realpath', 'realpath', 'git rev-parse --verify', 'git rev-parse --verify', ...inputs, 'git config'])
     // a command refused for its shape, or for a path outside the scope, runs no revision proof at all
     expect(await cost(narrow, 'git log --full-diff -- hooks/swarm.ts')).toEqual([])
     expect((await cost(narrow, 'git diff main...HEAD -- README.md')).filter(run => run.includes('--verify'))).toEqual([])

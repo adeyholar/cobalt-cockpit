@@ -30,6 +30,8 @@ export type DoctorFacts = {
   cache: CacheReading
   agents: Agents
   stop: StopFacts
+  /** v0.6.4: the limits working-tree measurement processes run under, as probed on this host. */
+  measurement?: { enforced: boolean; text: string }
   guard: { enabled: boolean; /** v0.5.9: incidents are recorded without being notified. */ recordOnly?: boolean; label: string; used: number; max: number; cooldownSec: number; repeat: boolean; sound: boolean; /** The transport diagnostics, already worded. */ transport: string[]; /** Priorities, notified kinds, quiet hours and active conditions, already worded. */ policy?: string[] }
 }
 
@@ -83,6 +85,7 @@ export const doctorText = (f: DoctorFacts): string => {
   out.push('', 'HOST')
   out.push(line(f.hostSupported === false ? 'WARN' : 'INFO', `Claude Code ${f.host ?? 'version UNKNOWN'}${f.hostSupported === false ? ' is older than this build supports; Cockpit stands by' : ''}`))
   out.push(line('INFO', `permission mode ${f.permissionMode ?? 'UNKNOWN (not yet seen on a tool call)'} · Cockpit never changes it`))
+  if (f.measurement !== undefined) out.push(line(f.measurement.enforced ? 'OK' : 'WARN', f.measurement.text))
   out.push(line('INFO', 'Auto mode: the host classifier decides tool permissions. Cockpit adds no bypass; its own file and process calls are the plugin API\'s, and a refusal is recorded as unverified and not retried another way.'))
   out.push('', 'TELEMETRY')
   const t = f.telemetry

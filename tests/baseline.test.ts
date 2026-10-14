@@ -236,7 +236,8 @@ describe('B3: ignored content', () => {
     const { w, h } = fixture(on, 'ok')
     w.ignoredFiles = Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`out/f${i}`, '1 1']))
     await start($); await enroll($); await prompt($, 'tidy it')
-    w.duringRun = async argv => { if (argv[0] === 'stat') await w.clock.advance(30_000) }
+    // only the ignored-entry measurement is slow (v0.6.4: a path's kind is inspected with stat too, in another format)
+    w.duringRun = async argv => { if (argv[0] === 'stat' && argv.includes('%i %s %.9Y %.9Z %n\\0')) await w.clock.advance(30_000) }
     await stop($)
     expect(keptChecks(h).at(-1)?.complete).toBe(false)
     expect(keptChecks(h).at(-1)?.summary).toContain('longer than 25s')

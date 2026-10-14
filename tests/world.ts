@@ -6,6 +6,8 @@
 import type { On } from 'claude-code'
 import { mock } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
+import { BOUND_PROBE_CAPPED, BOUND_PROBE_CONTROL, BOUND_PROBE_SET, BOUND_TAG, INSPECT_BSD, INSPECT_GNU } from '../hooks/git-integrity'
+import type { Kind } from '../hooks/git-integrity'
 
 export const PLUGIN = 'cobalt-cockpit'
 export const TOOL = 'mcp__cobalt-cockpit__progress'
@@ -14,8 +16,27 @@ export type PlayerBehavior = 'ok' | 'fails' | 'missing' | 'hangs'
 
 export type World = {
   clock: MockClock
-  /** Every `$.process.run`, as its argv. */
+  /** Every `$.process.run`, as its argv; a command started through the limit script is recorded as itself (see `wrappers`). */
   runs: string[][]
+  /** v0.6.4, in the order of `runs`: the limit script a command was started through, or null when it was started directly. */
+  wrappers: (string | null)[]
+  /** The limit probes the plugin ran, as their scripts; they are not in `runs`. */
+  boundProbes: string[]
+  /** What this host's `sh` makes of the limits: all enforced, accepted but no memory cap enforced, or no `sh` at all. */
+  boundMode: 'full' | 'partial' | 'none'
+  /**
+   * What `stat` (without -L) sees at a path, relative to the work tree or absolute outside it; unset: from `diskModes`, a watched
+   * or embedded directory, else an ordinary file (alternates: missing). `followKinds` is what `stat -L` sees through a link
+   * (unset: an ordinary file). `sizes` overrides a file's size (default: its content's), `inodes` its inode (default 1).
+   */
+  kinds: Record<string, Kind>
+  followKinds: Record<string, Kind>
+  sizes: Record<string, number>
+  inodes: Record<string, number>
+  /** The text of a symbolic link, as `readlink` prints it (default `target`); `outputs.readlink` overrides it. */
+  linkTargets: Record<string, string>
+  /** Which `stat` this host has: GNU (`--printf`) or BSD (`-f`). */
+  statFlavor: 'gnu' | 'bsd'
   /** The mkdir, chmod and rm the plugin ran on its own telemetry directory; kept apart so `runs` stays the commands a test is about. */
   telemetryRuns: string[][]
   /** What the plugin's telemetry mkdir, chmod and stat get back: they work, are refused, or read back a wider mode than asked. */
@@ -88,10 +109,14 @@ export type World = {
   embeddedRepos: Record<string, string[]>
   /** Content of files outside git's view that the fingerprint watches (path -> content). */
   watched: Record<string, string>
-  /** Calls to stat, for cost. */
+  /** Calls to stat that measure ignored and watched entries, for cost. */
   statCalls: number
+  /** v0.6.4: calls to stat that inspect a path's kind before it is read, for cost. */
+  inspectCalls: number
   /** A git subcommand that times out (throws), by name. */
   gitHangs: string | null
+  /** v0.6.4: a git subcommand whose output the host cuts short (isStdoutTruncated), by name. */
+  gitTruncates: string | null
   /** The content of .git/info/exclude. */
   excludes: string
   /** The working tree as git sees it against HEAD: path to content. Changing it is a change the fingerprint must notice. */
@@ -187,6 +212,15 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
   const w: World = {
     clock: mock.clock(on, { now: 1_000_000 }),
     runs: [],
+    wrappers: [],
+    boundProbes: [],
+    boundMode: 'full',
+    kinds: {},
+    followKinds: {},
+    sizes: {},
+    inodes: {},
+    linkTargets: {},
+    statFlavor: 'gnu',
     telemetryRuns: [],
     telemetryModes: 'ok',
     failWrites: false,
@@ -225,7 +259,9 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     embeddedRepos: {},
     watched: {},
     statCalls: 0,
+    inspectCalls: 0,
     gitHangs: null,
+    gitTruncates: null,
     excludes: '',
     tree: {},
     head: 'a'.repeat(40),
@@ -399,6 +435,33 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     return { value: names.map(name => ({ name, kind: 'file' as const, size: w.files[`${dir}${name}`]!.length, mtimeMs: 0, isLink: false })) }
   })
 
+  // v0.6.4: what `stat` sees at one path, without or with -L, as the plugin inspects it before anything is read
+  const KIND_MODE: Record<string, number> = { file: 0x81a4, link: 0xa1ff, dir: 0x41ed, fifo: 0x11a4, socket: 0xc1ed, char: 0x21b6, block: 0x61b0 }
+  const KIND_OF: Record<number, Kind> = { 0x8000: 'file', 0xa000: 'link', 0x4000: 'dir', 0x1000: 'fifo', 0xc000: 'socket', 0x2000: 'char', 0x6000: 'block' }
+  const keyOf = (raw: string): string => { const p = raw.replace(/^\.\//, ''); return p.startsWith(`${w.top}/`) ? p.slice(w.top.length + 1) : p }
+  const contentOf = (raw: string): string => {
+    const bare = raw.replace(/^\.\//, ''), key = keyOf(raw)
+    return key.endsWith('info/exclude') ? w.excludes : key.endsWith('info/attributes') ? w.attributes : w.watched[bare] ?? w.watched[key] ?? w.tree[key] ?? (w.untracked.includes(key) ? 'u' : '')
+  }
+  const inspectOne = (raw: string, follow: boolean): { mode: number; size: number; ino: number } | 'missing' | 'denied' => {
+    const bare = raw.replace(/^\.\//, ''), key = keyOf(raw)
+    if (w.watchedDenied.includes(raw) || w.watchedDenied.includes(bare)) return 'denied'
+    let kind: Kind | undefined = w.kinds[key] ?? w.kinds[bare]
+    if (kind === undefined) {
+      const m = w.diskModes[key]
+      if (m !== undefined) kind = m === 0 ? 'missing' : KIND_OF[m & 0xf000] ?? 'file'
+      else if (w.watchedDirs[raw] !== undefined || w.watchedDirs[bare] !== undefined || w.watchedUnreadable.includes(raw) || w.embeddedRepos[`${key}/`] !== undefined) kind = 'dir'
+      else kind = key.endsWith('objects/info/alternates') ? 'missing' : 'file'
+    }
+    if (follow && kind === 'link') kind = w.followKinds[key] ?? w.followKinds[bare] ?? 'file'
+    if (kind === 'missing') return 'missing'
+    const disk = w.diskModes[key]
+    const mode = kind === 'file' && disk !== undefined && (disk & 0xf000) === 0x8000 ? disk : KIND_MODE[kind]!
+    const size = w.sizes[key] ?? w.sizes[bare] ?? (kind === 'file' ? new TextEncoder().encode(contentOf(raw)).length : kind === 'link' ? (w.linkTargets[key] ?? 'target').length : 0)
+    return { mode, size, ino: w.inodes[key] ?? w.inodes[bare] ?? 1 }
+  }
+  const PROBES = new Set([BOUND_PROBE_SET(true), BOUND_PROBE_SET(false), BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED])
+
   on('process.run', async ($, e) => {
     if (['mkdir', 'chmod', 'rm', 'stat'].includes(e.argv[0] ?? '') && e.argv.some(a => a.includes('/cobalt-cockpit/telemetry') || a.endsWith('/.local/state/cobalt-cockpit'))) {
       w.telemetryRuns.push([...e.argv])
@@ -407,34 +470,64 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
       return ran(0)
     }
-    w.runs.push([...e.argv])
+    // The limit probes: `full` accepts and enforces every limit, `partial` accepts them but a 64 MiB allocation still succeeds
+    // under the 32 MiB cap, `none` has no `sh`.
+    if (e.argv[0] === 'sh' && e.argv[1] === '-c' && PROBES.has(String(e.argv[2]))) {
+      const script = String(e.argv[2])
+      w.boundProbes.push(script)
+      if (w.boundMode === 'none') throw new Error('spawn sh ENOENT')
+
+      return script === BOUND_PROBE_CAPPED ? ran(w.boundMode === 'full' ? 1 : 0) : script === BOUND_PROBE_CONTROL ? ran(0) : ran(0, 'set\n')
+    }
+    // A command started through the limit script is answered as itself; the script is recorded beside it.
+    const isWrapped = e.argv[0] === 'sh' && e.argv[1] === '-c' && e.argv[3] === BOUND_TAG
+    const argv: readonly string[] = isWrapped ? e.argv.slice(4) : e.argv
+    w.runs.push([...argv])
+    w.wrappers.push(isWrapped ? String(e.argv[2]) : null)
     w.runEnvs.push(e.init?.env)
-    if (w.duringRun !== null) await w.duringRun(e.argv)
-    const program = e.argv[0] ?? ''
-    if (program === 'stat' && e.argv.includes('--printf') && w.players['stat'] !== 'fails') {
+    if (w.duringRun !== null) await w.duringRun(argv)
+    const program = argv[0] ?? ''
+    const inspecting = program === 'stat' && ((argv.includes('--printf') && argv[argv.indexOf('--printf') + 1] === INSPECT_GNU) || (argv.includes('-f') && argv[argv.indexOf('-f') + 1] === INSPECT_BSD))
+    if (inspecting && w.players['stat'] !== 'fails') {
+      const gnu = argv.includes('--printf')
+      if ((w.statFlavor === 'gnu') !== gnu) return { value: { exitCode: 1, stdout: '', stderr: gnu ? 'stat: illegal option -- -\n' : 'stat: cannot read file system information\n', isStdoutTruncated: false, isStderrTruncated: false } }
+      w.inspectCalls++
+      const names = argv.slice(argv.indexOf('--') + 1)
+      const seen = names.map(n => inspectOne(n, argv.includes('-L')))
+      const errors = names.flatMap((n, k) => (seen[k] === 'missing' ? [`stat: cannot statx '${n}': No such file or directory\n`] : seen[k] === 'denied' ? [`stat: cannot statx '${n}': Permission denied\n`] : []))
+      const stdout = seen.map((x, k) => (typeof x === 'string' ? '' : gnu ? `${x.mode.toString(16)} ${x.size} ${x.ino} 1.000000000 1.000000000 ${names[k]}\0` : `${x.mode.toString(8)} ${x.size} ${x.ino} 1 1\n`)).join('')
+
+      return { value: { exitCode: errors.length > 0 ? 1 : 0, stdout, stderr: errors.join(''), isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (program === 'stat' && argv.includes('--printf') && w.players['stat'] !== 'fails') {
       w.statCalls++
-      const names = e.argv.slice(e.argv.indexOf('--') + 1)
-      if (e.argv[e.argv.indexOf('--printf') + 1] === '%f\\0') return ran(0, names.map(n => `${(w.diskModes[n.replace(/^\.\//, '')] ?? 0x81a4).toString(16)}\0`).join(''))
+      const names = argv.slice(argv.indexOf('--') + 1)
 
       return ran(0, names.map(n => `${w.ignoredFiles[n] ?? w.dirMeta[n] ?? w.ignoredMeta[n] ?? '1 1'} ${n}\0`).join(''))
     }
+    if (program === 'readlink' && w.outputs['readlink'] === undefined) {
+      const asked = String(argv.at(-1))
+      const text = w.linkTargets[keyOf(asked)] ?? 'target'
+
+      return ran(0, argv.includes('-z') ? `${text}\0` : `${text}\n`)
+    }
     if (program === 'find') {
-      const asked = String(e.argv[2])
+      const asked = String(argv[2])
       if (w.watchedUnreadable.includes(asked)) return ran(1, `${(w.watchedDirs[asked] ?? []).slice(0, 1).map(n => `${n}\0`).join('')}`)
       const dir = w.watchedDirs[asked] ?? w.embeddedRepos[`${asked.replace(/^\/work\/example\//, '')}/`]
       if (dir === undefined || w.watchedDenied.includes(asked)) return ran(1)
 
       return ran(0, dir.map(n => `${n}\0`).join(''))
     }
-    if (program === 'stat' && !e.argv.includes('--printf')) {
-      const asked = String(e.argv.at(-1))
+    if (program === 'stat' && !argv.includes('--printf')) {
+      const asked = String(argv.at(-1))
       if (w.watchedUnreadable.includes(asked)) return ran(0, '')
       const why = w.watchedDenied.includes(asked) ? 'Permission denied' : 'No such file or directory'
 
       return { value: { exitCode: 1, stdout: '', stderr: `stat: cannot statx '${asked}': ${why}\n`, isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (program === 'realpath') {
-      const asked = String(e.argv.at(-1)).replace(/\/+$/, '')
+      const asked = String(argv.at(-1)).replace(/\/+$/, '')
       const link = Object.keys(w.links).find(from => asked === from || asked.startsWith(`${from}/`))
 
       return ran(0, (link === undefined ? asked : `${w.links[link]}${asked.slice(link.length)}`) + '\n')
@@ -444,15 +537,16 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
       // global options (--no-optional-locks, --no-replace-objects, -c k=v) and -C <top> come before the subcommand
       let at = 1
-      while (at < e.argv.length) {
-        const a = e.argv[at] as string
+      while (at < argv.length) {
+        const a = argv[at] as string
         if (a === '-c' || a === '-C') at += 2
         else if (a.startsWith('--no-') || a === '--literal-pathspecs') at += 1
         else break
       }
-      const git = e.argv.slice(at)
+      const git = argv.slice(at)
       if (w.gitHangs !== null && git[0] === w.gitHangs) throw new Error('git was still running at the timeout')
-      if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, `/work/example/.git/${git[git.indexOf('--git-path') + 1]}\n`)
+      if (w.gitTruncates !== null && git[0] === w.gitTruncates) return { value: { exitCode: 0, stdout: 'cut', stderr: '', isStdoutTruncated: true, isStderrTruncated: false } }
+      if (git[0] === 'rev-parse' && git.includes('--git-path')) return ran(0, git.flatMap((a, i) => (a === '--git-path' ? [`/work/example/.git/${git[i + 1]}\n`] : [])).join(''))
       if (git[0] === 'config') return git.includes('--get-regexp') && w.gitFilterConfig !== '' ? ran(0, w.gitFilterConfig) : w.gitConfig[git.at(-1)!] !== undefined ? ran(0, w.gitConfig[git.at(-1)!] + '\n') : ran(1)
       if (git[0] === 'check-attr') return ran(0, w.gitFilterAttributes)
       if (git[0] === 'rev-parse' && git.includes('--show-prefix')) return ran(0, w.gitPrefix + '\n')
@@ -466,7 +560,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
         return ran(0, git.includes('--diff-filter=D') ? '' : seen.join('\0') + (seen.length ? '\0' : ''))
       }
       if (git[0] === 'status' && git.includes('--porcelain')) {
-        const hardened = e.argv.includes('--no-replace-objects') && e.argv.includes('core.fsmonitor=false') && e.argv.includes('core.untrackedCache=false')
+        const hardened = argv.includes('--no-replace-objects') && argv.includes('core.fsmonitor=false') && argv.includes('core.untrackedCache=false')
 
         const answer = ran(0, w.uncommitted && !(w.statusHidden && !hardened) ? ' M src/api.js\n' : '')
         answer.value.stderr = w.statusWarning
@@ -502,7 +596,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       return ran(0, w.gitStatus)
     }
     const output = w.outputs[program]
-    if (output !== undefined) return ran(0, output(e.argv))
+    if (output !== undefined) return ran(0, output(argv))
     const behavior = w.players[program] ?? 'missing'
     if (behavior === 'missing') throw new Error(`spawn ${program} ENOENT`)
     if (behavior === 'hangs') throw new Error(`${program} was still running at the timeout`)

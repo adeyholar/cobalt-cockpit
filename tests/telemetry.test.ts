@@ -180,7 +180,9 @@ describe('through the host', () => {
       expect(out).not.toContain('read back as')
       // the record is still kept; the refused call is not retried by another route
       expect(files(w)).toHaveLength(1)
-      expect(w.runs.some(r => ['mkdir', 'chmod', 'stat', 'sh', 'bash', 'python3', 'install'].includes(r[0] ?? ''))).toBe(false)
+      // (v0.6.4: the fingerprint's own read-only `stat` of the work tree is no route to the telemetry directory)
+      expect(w.runs.some(r => ['mkdir', 'chmod', 'sh', 'bash', 'python3', 'install'].includes(r[0] ?? ''))).toBe(false)
+      expect(w.runs.some(r => r[0] === 'stat' && r.some(a => a.includes('cobalt-cockpit')))).toBe(false)
     })
   }
   // Forty prompts run through the whole prompt hook at once, about 5 git calls and a ledger write each. Measured in isolation: 1.4 s on a
