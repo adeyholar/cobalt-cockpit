@@ -2374,10 +2374,11 @@ const TRACKED_RACE = 'a tracked file changed while it was being measured'
 /**
  * One measurement of the working tree. `stamp` is null where it could not be taken, with `why`; `raced` when the only cause
  * was a file that changed or vanished while it was read; `noRepo` only where the session is outside any Git repository
- * (outsideGit), which is the one case a goal check may be accepted without a fingerprint (as UNPROTECTED). Returned whole so
- * that concurrent measurements cannot swap each other's reasons.
+ * (outsideGit), which is the one case a goal check may be accepted without a fingerprint (as UNPROTECTED); `inRepo` when there
+ * is positive evidence of a repository here, measurable or not. Returned whole so that concurrent measurements cannot swap
+ * each other's reasons.
  */
-type TreeReading = { stamp: string | null; why: string; raced: boolean; noRepo: boolean }
+type TreeReading = { stamp: string | null; why: string; raced: boolean; noRepo: boolean; inRepo: boolean }
 const treeStamp = async ($: EngineInterface, base?: string): Promise<string | null> => {
   const reading = await measureTree($, base)
   treeWhy = reading.why
@@ -2388,6 +2389,7 @@ const measureTree = async ($: EngineInterface, base?: string): Promise<TreeReadi
   let why = ''
   let raced = false
   let noRepo = false
+  let inRepo = false
   const unknown = (reason: string, isRace = false): null => { why = reason; raced = isRace; return null }
   const stamp = await (async (): Promise<string | null> => { try {
     const began = await $.clock.now()
@@ -2410,9 +2412,13 @@ const measureTree = async ($: EngineInterface, base?: string): Promise<TreeReadi
     const top = await verifiedGitRoot($)
     if (top === null) {
       // outside any repository is not the same as a repository Git cannot read: only the first may go unprotected
-      if (await outsideGit($)) { noRepo = true; return unknown('this project is not a Git repository') }
+      const place = await outsideGit($)
+      if (place === 'outside') { noRepo = true; return unknown('this project is not a Git repository') }
+      if (place === 'unknown') return unknown('Git could not say whether this is a Git repository (it failed or timed out)')
+      inRepo = true
       return unknown('a Git repository is here, but Git could not read it, its work tree is not the session directory, or its identity could not be verified')
     }
+    inRepo = true
     const at = (...argv: string[]) => sh(['-C', top, ...argv])
     // Git's excludes, attributes and alternates files are checked before any Git command below reads them (gitInputs).
     const inputs = await gitInputs($, top)
@@ -2603,32 +2609,38 @@ const measureTree = async ($: EngineInterface, base?: string): Promise<TreeReadi
     return unknown(error instanceof BoundRefused ? error.message : 'git raised an error or timed out')
   } })()
 
-  return stamp !== null ? { stamp, why: '', raced: false, noRepo: false } : { stamp, why, raced, noRepo }
+  return stamp !== null ? { stamp, why: '', raced: false, noRepo: false, inRepo: true } : { stamp, why, raced, noRepo, inRepo }
 }
 /**
  * Whether the session directory is outside every Git repository: Git says so, in the C locale and in its own words, and no
- * `.git` entry exists in the directory or any parent. A damaged or hostile `.git`, a repository Git refuses (another owner) or
- * one whose work tree is elsewhere says something else, or leaves a `.git` behind: that is a repository whose fingerprint is
- * UNKNOWN, never a project without one.
+ * `.git` entry exists in the directory or any parent, along the path the session names and along its physical path. 'repository'
+ * is positive evidence of one (Git found it, or said something else of it, or a `.git` is there): a damaged or hostile `.git`, a
+ * repository Git refuses (another owner) or one whose work tree is elsewhere is a repository whose fingerprint is UNKNOWN, never
+ * a project without one. 'unknown' when Git or the inspection could not answer.
  */
-const outsideGit = async ($: EngineInterface): Promise<boolean> => {
+const outsideGit = async ($: EngineInterface): Promise<'outside' | 'repository' | 'unknown'> => {
   const cwd = await $.session.cwd()
-  if (!cwd || !cwd.startsWith('/')) return false
+  if (!cwd || !cwd.startsWith('/')) return 'unknown'
   const r = await bounded($, ['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
-  if (r === null || r.exitCode === 0 || r.isStdoutTruncated || r.isStderrTruncated || !NOT_A_REPOSITORY.test(r.stderr)) return false
+  if (r === null || r.isStdoutTruncated || r.isStderrTruncated) return 'unknown'
+  if (r.exitCode === 0 || !NOT_A_REPOSITORY.test(r.stderr)) return 'repository'
   // Git searches up the physical path; the session may name it through a link. Both chains of parents are checked.
   const real = await bounded($, ['realpath', '-e', '--', cwd], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
-  if (real === null || !gitAnswered(real) || !real.stdout.startsWith('/')) return false
+  if (real === null || !gitAnswered(real) || !real.stdout.startsWith('/')) return 'unknown'
   const dotGit: string[] = []
   for (const start of new Set([cwd, real.stdout.replace(/\n$/, '')])) {
-    for (let dir = start.replace(/\/+$/, '') || '/', depth = 0; depth < 256; dir = dir.slice(0, dir.lastIndexOf('/')) || '/', depth++) {
+    let dir = start.replace(/\/+$/, '') || '/'
+    for (let depth = 0; ; dir = dir.slice(0, dir.lastIndexOf('/')) || '/', depth++) {
+      // a path deeper than this is not walked to the root: no answer, rather than an answer about part of it
+      if (depth >= 256) return 'unknown'
       dotGit.push(`${dir === '/' ? '' : dir}/.git`)
       if (dir === '/') break
     }
   }
   const seen = await inspectPaths($, '/', [...new Set(dotGit)])
+  if (seen === null) return 'unknown'
 
-  return seen !== null && seen.every(s => s.kind === 'missing')
+  return seen.every(s => s.kind === 'missing') ? 'outside' : 'repository'
 }
 /** Git's whole answer outside a repository (C locale), with the line it adds when the search stops at a file-system boundary. */
 const NOT_A_REPOSITORY = /^fatal: not a git repository \((?:or any of the parent directories\): \.git|or any parent up to mount point [^\n]*\))\n(?:Stopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.\n)?$/
@@ -2657,7 +2669,7 @@ const reconcileOnce = async ($: EngineInterface): Promise<void> => {
     const now = await $.clock.now()
     const held = await update($, taskAtom, t => {
       if (t === null || t.alignment?.state !== 'ALIGNED' || typeof t.alignment.tree === 'string' || t.alignment.protection !== undefined) return t
-      if (reading.noRepo && typeof t.startTree !== 'string') return { ...t, alignment: { ...t.alignment, protection: { state: 'UNPROTECTED' as const, why: reading.why } } }
+      if (reading.noRepo && typeof t.startTree !== 'string' && t.repoSeen !== true) return { ...t, alignment: { ...t.alignment, protection: { state: 'UNPROTECTED' as const, why: reading.why } } }
 
       return settle(reopenVerification(t, reading.stamp === null ? unmeasuredWhy(reading.why) : 'the goal check was accepted without a working-tree fingerprint (before v0.6.4)')).task
     })
@@ -2765,8 +2777,8 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
     let notAccepted = ''
     if (goalChecked && e.action === 'align' && stamp === null && gated.alignment?.state === 'ALIGNED') {
       // a task that began in a measured repository is not made unprotected by that repository going away
-      const leftGit = stampNoRepo && typeof gated.startTree === 'string'
-      const why = leftGit ? 'this task began in a measured Git repository that is no longer there' : stampWhy
+      const leftGit = stampNoRepo && (typeof gated.startTree === 'string' || gated.repoSeen === true)
+      const why = leftGit ? 'this task began in a Git repository that is no longer there' : stampWhy
       if (stampNoRepo && !leftGit) {
         // outside every repository there is nothing to fingerprint: accepted as before, and marked so wherever it is shown
         stamped = { ...gated, alignment: { ...gated.alignment, protection: { state: 'UNPROTECTED', why: stampWhy } } }
@@ -2783,7 +2795,8 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
         notAccepted = `error: ALIGNED not accepted: this Git repository's working tree cannot be measured safely (${why}), so the goal check is recorded as UNKNOWN, not ALIGNED. A measurement that fails says nothing of a clean or a changed tree. Resolve the cause, then align again.`
       }
     }
-    const settled = settle(isLegacy ? stamped : withDiscovery(stamped, pin))
+    const seen = stampReading?.inRepo === true || gateReading?.inRepo === true
+    const settled = settle(isLegacy ? stamped : withDiscovery(seen && stamped.repoSeen !== true ? { ...stamped, repoSeen: true } : stamped, pin))
     cues = settled.cues
     reply = [notAccepted, outcome.note, claimNote, unprotected, summaryOf(settled.task)].filter(Boolean).join(' ')
 
@@ -4380,7 +4393,9 @@ export const register: Register = (on, options) => {
       // The baseline of a task is taken here, at the host's own boundary and before any work of this prompt; a task that goes on
       // keeps the one it has, so nothing the model does later can move it.
       const standing = await read($, taskAtom)
-      const startStamp = standing !== null && standing.status !== 'done' ? null : await treeStamp($)
+      const startReading = standing !== null && standing.status !== 'done' ? null : await measureTree($)
+      treeWhy = startReading?.why ?? treeWhy
+      const startStamp = startReading?.stamp ?? null
       // an unverified obligation (see owedAtom) goes on with the next task: that task is a coding task from its first moment
       const isOwed = (await read($, owedAtom)) !== null
       const task = await update($, taskAtom, old => {
@@ -4394,7 +4409,9 @@ export const register: Register = (on, options) => {
         // baselines existed) and the fact that it edited go on with whatever follows it.
         const unfinished = old !== null && old.status !== 'done'
         const startTree = unfinished ? (old.startTree === undefined ? null : old.startTree) : startStamp
-        const base = isContinuing ? old : { ...newTask((old?.id ?? 0) + 1, e.text, now, sha), startTree, ...((unfinished && (old.edited === true || old.files.length > 0)) || isOwed ? { edited: true as const } : {}), ...(owed ? { review: old.review, ...(old.promptGrounds === undefined ? {} : { promptGrounds: old.promptGrounds }) } : {}) }
+        // a repository seen at any measurement for this task stays seen (v0.6.4): it never becomes "outside Git" by going away
+        const repoSeen = (unfinished && old.repoSeen === true) || startReading?.inRepo === true
+        const base = isContinuing ? old : { ...newTask((old?.id ?? 0) + 1, e.text, now, sha), startTree, ...(repoSeen ? { repoSeen: true as const } : {}), ...((unfinished && (old.edited === true || old.files.length > 0)) || isOwed ? { edited: true as const } : {}), ...(owed ? { review: old.review, ...(old.promptGrounds === undefined ? {} : { promptGrounds: old.promptGrounds }) } : {}) }
 
         const prompted: Task = {
           ...base,

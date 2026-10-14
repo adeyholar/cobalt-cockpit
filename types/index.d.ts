@@ -199,6 +199,8 @@ export type Task = {
    * neither can show that a tree is unchanged. A model's "read-only" is measured against this, never against the moment it is claimed.
    */
   startTree?: string | null
+  /** v0.6.4: a measurement for this task found a Git repository, measurable or not; such a task is never taken for one outside Git. */
+  repoSeen?: true
   edited?: true
   /** v0.5.1: how much discovery this task warrants and what it found. Absent on tasks stored by older versions. */
   discovery?: Discovery

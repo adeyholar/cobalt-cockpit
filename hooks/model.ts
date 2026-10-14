@@ -744,6 +744,7 @@ export const applyAction = (task: Task, given: ProgressInput, now: number, sha: 
               lineage: uidOf(task),
               ...(task.stopHold === undefined ? {} : { stopHold: task.stopHold }),
               ...(task.startTree === undefined ? {} : { startTree: task.startTree }),
+              ...(task.repoSeen === true ? { repoSeen: true as const } : {}),
               // Edits already made are not unmade by planning again, whatever the new plan calls itself.
               ...(task.edited === true || task.files.length > 0 ? { edited: true as const } : {}),
               ...(task.promptGrounds === undefined ? {} : { promptGrounds: task.promptGrounds }),

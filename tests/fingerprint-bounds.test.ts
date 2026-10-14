@@ -609,7 +609,27 @@ describe('a Git repository that cannot be measured is never accepted as protecte
     w.gitStatus = null                                                               // .git removed: Git now says "not a git repository"
     expect(await progress($, aligned)).toStartWith('error: ALIGNED refused')         // checks were observed on the measured tree
     await passAllGates($, { align: false })
-    await recordedUnknown($, 'this task began in a measured Git repository that is no longer there', h)
+    await recordedUnknown($, 'this task began in a Git repository that is no longer there', h)
+  })
+  test('a task begun in a repository that could not be measured is not made UNPROTECTED by removing it either', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitConfig['core.excludesFile'] = '/dev/zero'; w.kinds['/dev/zero'] = 'char'
+    await ready($)
+    expect(taskOf(h)?.startTree).toBeNull()                                          // no baseline could be measured
+    expect(taskOf(h)?.repoSeen).toBe(true)                                           // but a repository was seen
+    delete w.gitConfig['core.excludesFile']; w.gitStatus = null                      // the repository is removed
+    await recordedUnknown($, 'this task began in a Git repository that is no longer there', h)
+  })
+  test('a project outside Git whose first look failed is not marked as a repository: once Git answers, UNPROTECTED', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.gitHangs = 'rev-parse'
+    await ready($)
+    expect(taskOf(h)?.repoSeen).toBeUndefined()                                      // a failure is no evidence of a repository
+    w.gitHangs = null
+    expect(await progress($, aligned)).toContain('UNPROTECTED: this project is not a Git repository')
+  })
+  test('a session directory deeper than the walk is not called outside Git', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.cwd = `/${Array.from({ length: 300 }, (_, i) => `d${i}`).join('/')}`
+    await ready($)
+    await recordedUnknown($, 'Git could not say whether this is a Git repository', h)
   })
   for (const [what, set, why] of [
     ['a .git in a parent directory', (w: World) => { w.kinds['/work/.git'] = 'dir' }, 'a Git repository is here'],
