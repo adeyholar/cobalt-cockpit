@@ -212,4 +212,11 @@ What this shows and does not: the records, the labels you set, the simulated fig
 
 ## Review record
 
-Pending: the independent review of the final candidate.
+**First round, on `a264f2a`.** Three independent reviews, each in a fresh context with its own scope: security and side effects; correctness, concurrency and the statistics; scope, documentation and release hygiene. All three returned GO. What they found, and what was done:
+
+- **Minor, raised by two reviewers independently:** the orphan sweep could delete the label of an occurrence whose key another session had pruned at the bound while a session that still held it would write it again. Corrected in `e24910c`: a label is also kept while any session's persisted records of its project hold the occurrence; regression tests reproduce the case.
+- **Minor, documentation:** the `quiet` profile's window does not cover the minute 23:59; two departures from the proposal were not listed (no per-incident reason, the NOISE wording). Corrected.
+- **Minor, evidence:** the first harness run predated the version commit. The harness is run again on the final candidate.
+- **Notes:** the report now says that a NOISE label also counts as not wanted in the cells; the look-alike origin test asserts its refusal unconditionally and that the kind is read once; the configuration guidance is worded as a procedure; the bound of label keys is stated with the lazy sweep. Kept as designed, and said here: `review` and `calibration` answer any origin, as the inbox and the digest do (only labelling, like acknowledging, is a person's); the observed set can briefly hold more than 32 stored occurrences between two prunes.
+
+**The final candidate** is reviewed again before delivery; that verdict is in the delivery report, not in this file, so that the file does not change the commit it describes.
