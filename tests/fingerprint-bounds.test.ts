@@ -111,19 +111,23 @@ describe('every measurement process is bounded', () => {
     expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(false)])
     expect(String((await command($, 'doctor')).text)).toContain('no memory limit could be set here')
   })
-  test('none: with no shell to set limits the commands run directly, the probe is tried again, and doctor warns', guard(), async ($, on) => {
+  test('none: with no shell to set limits the commands run directly, the probe is tried again after a while, and doctor warns', guard(), async ($, on) => {
     const { w } = fixture(on); busyTree(w); w.boundMode = 'none'
     await begun($); await stop($)
     expect(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)).every(s => s === null)).toBe(true)
-    expect(w.boundProbes.length).toBeGreaterThan(2)                               // not answered is not kept: probed again
+    expect(w.boundProbes).toHaveLength(2)                                           // not once per process: one unanswered probe stands a while
+    await w.clock.advance(31_000)
     expect(String((await command($, 'doctor')).text)).toContain('WARN working-tree measurement runs under the host\'s timeout only')
+    expect(w.boundProbes).toHaveLength(4)                                           // and is then tried again
   })
   test('a probe that does not answer lowers nothing: the memory limit is still set, and the probe runs again until it answers', guard(), async ($, on) => {
     const { w } = fixture(on); busyTree(w); w.boundMode = 'flaky'
     await begun($); await stop($)
     expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(true)])
-    expect(w.boundProbes.filter(p => p === BOUND_PROBE_CAPPED)).toHaveLength(2)    // once without an answer, once settled
+    expect(String((await command($, 'doctor')).text)).toContain('whether the memory limit is enforced could not be confirmed')
+    await w.clock.advance(31_000)
     expect(String((await command($, 'doctor')).text)).toContain('OK   working-tree measurement runs under kernel limits')
+    expect(w.boundProbes.filter(p => p === BOUND_PROBE_CAPPED)).toHaveLength(2)    // once without an answer, once settled
   })
   test('full: doctor reports the enforced limits', async ($, on) => {
     world(on); await start($)
@@ -455,6 +459,31 @@ describe('an unmeasurable tree never keeps a goal check or a passing check', () 
 })
 
 describe('inspection reads the system\'s answer, not the path', () => {
+  test('the stamp is a commit, a count, a 128-bit SHA-256 digest and the project', guard(), async ($, on) => {
+    const { h } = fixture(on)
+    await begun($)
+    expect(taskOf(h)?.startTree).toMatch(/^[0-9a-f]{40}:\d+\.[0-9a-f]{32}@[0-9a-f]{32}$/)
+  })
+  test('a batch with one missing and one unreadable path is not all "missing": UNKNOWN', guard(), async ($, on) => {
+    const { w, h } = fixture(on)
+    await begun($)
+    w.untracked = ['a.txt', 'b.txt', 'c.txt']; w.kinds['b.txt'] = 'missing'; w.watchedDenied = ['c.txt']
+    await stop($)
+    unidentified(h, 'a changed or untracked path could not be inspected')
+  })
+  test('GNU stat -f (file-system status) is not taken for the BSD form of an ignored entry: UNKNOWN', guard(), async ($, on) => {
+    const { w, h } = fixture(on); w.ignoredEntries = ['.cache/a', '.cache/b']
+    await begun($); w.statFileSystem = true
+    await stop($)
+    unidentified(h, 'ignored entries could not be measured')
+  })
+  test('a nested repository named like "No such file or directory" that cannot be listed is UNKNOWN, not vanished', guard(), async ($, on) => {
+    const name = 'x: No such file or directory'
+    const { w, h } = fixture(on)
+    await begun($); w.embeddedRepos[`${name}/`] = []; w.watchedDenied = [`/work/example/${name}`]
+    await stop($)
+    unidentified(h, 'exists but could not be listed in full')
+  })
   test('a tracked path whose name reads like "No such file or directory", but cannot be inspected, is UNKNOWN, not a deletion', guard(), async ($, on) => {
     const name = 'd/x: No such file or directory'
     const { w, h } = fixture(on); w.headBlobs[name] = blobOf('x'); w.watched[name] = 'x'

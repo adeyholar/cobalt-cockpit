@@ -185,6 +185,7 @@ describe('through the host', () => {
       expect(w.runs.some(r => ['mkdir', 'chmod', 'sh', 'bash', 'python3', 'install'].includes(r[0] ?? ''))).toBe(false)
       // the only stat left is the fingerprint's inspection of the work tree, in its own fixed form
       expect(w.runs.filter(r => r[0] === 'stat' && !r.includes(INSPECT_GNU) && !r.includes(INSPECT_BSD))).toEqual([])
+      expect(w.runs.some(r => r[0] === 'stat' && r.some(a => a.includes('cobalt-cockpit')))).toBe(false)
     })
   }
   // Forty prompts run through the whole prompt hook at once, about 5 git calls and a ledger write each. Measured in isolation: 1.4 s on a

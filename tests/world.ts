@@ -48,6 +48,11 @@ export type World = {
   linkTargets: Record<string, string>
   /** Which `stat` this host has: GNU (`--printf`) or BSD (`-f`). */
   statFlavor: 'gnu' | 'bsd'
+  /**
+   * The ignored-entry `stat --printf` fails as if an entry vanished, and the BSD-form fallback answers as GNU `stat -f` does:
+   * file-system status, one line per name, none of them the form asked for.
+   */
+  statFileSystem: boolean
   /** The mkdir, chmod and rm the plugin ran on its own telemetry directory; kept apart so `runs` stays the commands a test is about. */
   telemetryRuns: string[][]
   /** What the plugin's telemetry mkdir, chmod and stat get back: they work, are refused, or read back a wider mode than asked. */
@@ -234,6 +239,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     gitPathBase: '.git/',
     linkTargets: {},
     statFlavor: 'gnu',
+    statFileSystem: false,
     telemetryRuns: [],
     telemetryModes: 'ok',
     failWrites: false,
@@ -514,6 +520,12 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       const stdout = seen.map((x, k) => (typeof x === 'string' ? '' : gnu ? `${x.mode.toString(16)} ${x.size} ${x.ino} ${x.mtime} 1.000000000 ${names[k]}\0` : `${x.mode.toString(8)} ${x.size} ${x.ino} ${x.mtime.split('.')[0]} 1\n`)).join('')
 
       return { value: { exitCode: errors.length > 0 ? 1 : 0, stdout, stderr: errors.join(''), isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (program === 'stat' && w.statFileSystem && (argv.includes('--printf') || (argv.includes('-f') && argv[argv.indexOf('-f') + 1] === '%i %z %m %c %N'))) {
+      const names = argv.slice(argv.indexOf('--') + 1)
+      if (argv.includes('--printf')) return { value: { exitCode: 1, stdout: '', stderr: `stat: cannot statx '${names[0]}': No such file or directory\n`, isStdoutTruncated: false, isStderrTruncated: false } }
+
+      return ran(0, names.map(n => `  File: "${n}"    ID: 0        Namelen: 255     Type: ext2/ext3\n`).join(''))
     }
     if (program === 'stat' && argv.includes('--printf') && w.players['stat'] !== 'fails') {
       w.statCalls++

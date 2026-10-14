@@ -273,11 +273,14 @@ const finishObserved = (s: Swarm, id: string, reason: string, conclusion: string
  * What the probe found. `script`: the limit script measurement runs under, with the address-space limit wherever `ulimit -v`
  * is accepted (setting a limit a platform ignores is harmless), or none at all. `enforced`: whether a 64 MiB allocation really
  * failed under a 32 MiB limit; null when a probe did not answer. A result in which a probe did not answer (a timeout under load,
- * say) is used once and not kept: the next measurement probes again, so one slow moment cannot lower the rest of the session.
+ * say) stands for BOUND_RETRY_MS and is then probed again, so one slow moment cannot lower the rest of the session.
  */
 type Bound = { script: 'memory' | 'basic' | null; enforced: boolean | null; settled: boolean }
 type RunInit = { cwd?: string; timeoutMs?: number; env?: Record<string, string>; stdin?: string }
 let boundMode: Promise<Bound> | null = null
+/** Until when an unanswered probe's result stands before the next probe (no shell at all would otherwise cost two failed starts a call). */
+let boundRetryAt = 0
+const BOUND_RETRY_MS = 30_000
 const probeBound = async ($: EngineInterface): Promise<Bound> => {
   const sh = (script: string) => $.process.run(['sh', '-c', script], { timeoutMs: 5000, env: { LC_ALL: 'C' } }).then(r => r, () => null)
   const set = await sh(BOUND_PROBE_SET(true))
@@ -290,12 +293,15 @@ const probeBound = async ($: EngineInterface): Promise<Bound> => {
   }
   const basic = await sh(BOUND_PROBE_SET(false))
   const settled = set !== null && basic !== null
-  return basic !== null && basic.exitCode === 0 && basic.stdout.trim() === 'set' ? { script: 'basic', enforced: false, settled } : { script: null, enforced: false, settled }
+  // a shell that answers one probe but not the other is a slow one, not one without `ulimit -v`: keep the stronger script
+  if (basic !== null && basic.exitCode === 0 && basic.stdout.trim() === 'set') return { script: set === null ? 'memory' : 'basic', enforced: set === null ? null : false, settled }
+  return { script: null, enforced: false, settled }
 }
 const boundOf = async ($: EngineInterface): Promise<Bound> => {
+  if (boundMode !== null && boundRetryAt !== 0 && (await $.clock.now()) >= boundRetryAt) { boundMode = null; boundRetryAt = 0 }
   const probing = (boundMode ??= probeBound($))
   const found = await probing
-  if (!found.settled && boundMode === probing) boundMode = null
+  if (!found.settled && boundMode === probing && boundRetryAt === 0) boundRetryAt = (await $.clock.now()) + BOUND_RETRY_MS
   return found
 }
 const bounded = async ($: EngineInterface, argv: string[], init: RunInit = {}) => {
@@ -2384,7 +2390,8 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       const hashes = gitAnswered(r) ? hashesOf(r.stdout, names.length) : null
       if (hashes === null) return { why: 'a file could not be hashed (deleted meanwhile, unreadable, not present in a sparse checkout, or its process reached a time or memory limit)' }
       const again = await inspectPaths($, top, names, follow)
-      if (again === null || again.some((s, k) => s.identity !== seen[k]!.identity)) return { why: 'a file changed while it was being measured', raced: true }
+      if (again === null) return { why: 'a file could not be inspected again after it was read' }
+      if (again.some((s, k) => s.identity !== seen[k]!.identity)) return { why: 'a file changed while it was being measured', raced: true }
       return hashes
     }
     // The files (and links) under a directory, for what git cannot hash or list file by file. A directory that exists but cannot be read
@@ -2492,7 +2499,9 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       }
       // each record must be the form asked for: GNU `stat -f` is another command (file system status), not BSD's format
       const form = r === first ? /^\d+ \d+ \d+(?:\.\d+)? \d+(?:\.\d+)? / : /^\d+ \d+ \d+ \d+ /
-      if (r.exitCode !== 0 || r.isStdoutTruncated || lines.length !== chunk.length || !lines.every(line => form.test(line))) return unknown('ignored entries could not be measured (stat failed, or an entry vanished meanwhile)', true)
+      // a race only when every error was a vanished entry; a timeout, a cut or a wrong form is not measured again
+      const vanished = first.exitCode !== 0 && !first.isStderrTruncated && first.stderr.split('\n').filter(Boolean).length > 0 && first.stderr.split('\n').filter(Boolean).every(line => ENOENT.test(line))
+      if (r.exitCode !== 0 || r.isStdoutTruncated || lines.length !== chunk.length || !lines.every(line => form.test(line))) return unknown('ignored entries could not be measured (stat failed, or an entry vanished meanwhile)', vanished)
       measured.push(...lines)
     }
     const committedPaths = new Set(tracked.entries.map(e => e.path))
@@ -4088,6 +4097,7 @@ export const register: Register = (on, options) => {
   stopCfg = stopConfigOf(options, null)
   // what limits a measurement process runs under is probed again for this registration's host
   boundMode = null
+  boundRetryAt = 0
   // Before the first settings read the home directory is unknown, so `~/…` cannot be expanded: ENFORCE with a script named is
   // enforcing already (fail closed); loadStopCfg refines it once the configuration is read.
   setGuardRequired(stopCfg.policy === 'ENFORCE')
