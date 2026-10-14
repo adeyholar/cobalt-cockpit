@@ -626,6 +626,35 @@ describe('a Git repository that cannot be measured is never accepted as protecte
     w.gitHangs = null
     expect(await progress($, aligned)).toContain('UNPROTECTED: this project is not a Git repository')
   })
+  for (const [what, exit, stderr] of [
+    ['the group timeout ended Git (124)', 124, ''],
+    ['a signal ended Git', 137, ''],
+    ['the address-space limit ended Git without its own message', 134, 'terminate called after throwing an instance of std::bad_alloc\n'],
+  ] as const) {
+    test(`outside Git, ${what} at the first look: no evidence of a repository, and UNPROTECTED once Git answers`, async ($, on) => {
+      const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.notRepositoryExit = exit; w.notRepository = stderr
+      await ready($)
+      expect(taskOf(h)?.repoSeen).toBeUndefined()
+      w.notRepositoryExit = 128; w.notRepository = 'fatal: not a git repository (or any of the parent directories): .git\n'
+      expect(await progress($, aligned)).toContain('UNPROTECTED: this project is not a Git repository')
+    })
+  }
+  test('with no Git installed, a project with no .git anywhere is outside Git: UNPROTECTED', async ($, on) => {
+    const w = world(on); w.gitStatus = null; w.notRepositoryExit = 127; w.notRepository = 'cockpit-bounded: 1: exec: git: not found\n'
+    await ready($)
+    expect(await progress($, aligned)).toContain('UNPROTECTED: this project is not a Git repository')
+  })
+  test('with no Git installed, a .git in the directory makes it a repository that cannot be measured: UNKNOWN', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.dotGitPresent = true; w.notRepositoryExit = 127; w.notRepository = 'cockpit-bounded: 1: exec: git: not found\n'
+    await ready($)
+    await recordedUnknown($, 'a Git repository is here', h)
+  })
+  test('Git\'s own fatal error that is not "not a git repository" (memory, ownership) is evidence of a repository', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.notRepository = 'fatal: Out of memory, realloc failed\n'
+    await ready($)
+    expect(taskOf(h)?.repoSeen).toBe(true)
+    await recordedUnknown($, 'a Git repository is here', h)
+  })
   test('a session directory deeper than the walk is not called outside Git', async ($, on) => {
     const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.cwd = `/${Array.from({ length: 300 }, (_, i) => `d${i}`).join('/')}`
     await ready($)

@@ -2623,7 +2623,11 @@ const outsideGit = async ($: EngineInterface): Promise<'outside' | 'repository' 
   if (!cwd || !cwd.startsWith('/')) return 'unknown'
   const r = await bounded($, ['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
   if (r === null || r.isStdoutTruncated || r.isStderrTruncated) return 'unknown'
-  if (r.exitCode === 0 || !NOT_A_REPOSITORY.test(r.stderr)) return 'repository'
+  // Only Git's own answers are evidence: found (0), or a fatal error of its own (128) that is not "not a git repository". A
+  // timeout (124), a signal or a limit says nothing either way. With no Git at all (127), only the `.git` walk below decides.
+  const noGit = r.exitCode === 127 && /\bgit\b[^\n]*(?:not found|No such file or directory)/.test(r.stderr)
+  if (r.exitCode === 0 || (r.exitCode === 128 && r.stderr.startsWith('fatal: ') && !NOT_A_REPOSITORY.test(r.stderr))) return 'repository'
+  if (!noGit && !(r.exitCode === 128 && NOT_A_REPOSITORY.test(r.stderr))) return 'unknown'
   // Git searches up the physical path; the session may name it through a link. Both chains of parents are checked.
   const real = await bounded($, ['realpath', '-e', '--', cwd], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
   if (real === null || !gitAnswered(real) || !real.stdout.startsWith('/')) return 'unknown'
@@ -2796,7 +2800,8 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
       }
     }
     const seen = stampReading?.inRepo === true || gateReading?.inRepo === true
-    const settled = settle(isLegacy ? stamped : withDiscovery(seen && stamped.repoSeen !== true ? { ...stamped, repoSeen: true } : stamped, pin))
+    const marked: Task = seen && stamped.repoSeen !== true ? { ...stamped, repoSeen: true } : stamped
+    const settled = settle(isLegacy ? marked : withDiscovery(marked, pin))
     cues = settled.cues
     reply = [notAccepted, outcome.note, claimNote, unprotected, summaryOf(settled.task)].filter(Boolean).join(' ')
 
