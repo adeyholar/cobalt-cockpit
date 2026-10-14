@@ -239,6 +239,11 @@ export type Alignment = {
   at: number
   /** A fingerprint of the working tree when ALIGNED was accepted; null where git could not give one. */
   tree?: string | null
+  /**
+   * v0.6.4: why no fingerprint protects this goal check. UNPROTECTED: ALIGNED accepted outside every Git repository. UNKNOWN: a
+   * repository is here but could not be measured safely, so an ALIGNED claim was recorded as UNKNOWN.
+   */
+  protection?: { state: 'UNPROTECTED' | 'UNKNOWN'; why: string }
 }
 export type DecisionStatus = 'provisional' | 'verified' | 'revised'
 export type DecisionRecord = {

@@ -47,8 +47,18 @@ export const BOUND_FILE_BLOCKS = 131_072
  */
 const LOWER = 'lower() { c=$(ulimit "$1") || return 1; if [ "$c" = unlimited ] || [ "$c" -gt "$2" ]; then ulimit "$1" "$2"; fi; }'
 const LIMITS = (memory: boolean): string => `${LOWER} && ${memory ? `lower -v ${BOUND_AS_KIB} && ` : ''}lower -t ${BOUND_CPU_S} && lower -f ${BOUND_FILE_BLOCKS} && lower -c 0`
-/** CPU, file size and no core dump; with `memory`, the address space too. Then the command, by exec, as its own words. */
-export const boundScript = (memory: boolean): string => `${LIMITS(memory)} && exec "$@"`
+/**
+ * CPU, file size and no core dump; with `memory`, the address space too. Then the command, by exec, as its own words, after
+ * the seconds it may run (the script's first argument). With `group`, it runs under GNU `timeout -s KILL`, which puts it in a
+ * process group of its own and kills the whole group when the time is up, so no child a measurement started outlives it. If
+ * any limit cannot be set, nothing after it runs: the command is never started without its limits.
+ */
+export const boundScript = (memory: boolean, group: boolean): string =>
+  `${LIMITS(memory)} && t=$1 && shift && ${group ? 'exec timeout -s KILL "$t" "$@"' : 'exec "$@"'}`
+/** Whether this host's `timeout` is GNU's, whose process-group kill the script relies on. */
+export const BOUND_PROBE_GROUP = 'timeout --version 2>/dev/null | head -n 1'
+/** Measurement processes running at once, at most; with the address-space limit, the most they hold together. */
+export const BOUND_SLOTS = 2
 /** Probes, once a session: are the limits accepted, and is the memory cap actually enforced (a 64 MiB allocation under 32 MiB must fail, and succeed without it)? */
 export const BOUND_PROBE_SET = (memory: boolean): string => `${LIMITS(memory)} && echo set`
 export const BOUND_PROBE_CONTROL = 'exec dd if=/dev/zero of=/dev/null bs=67108864 count=1'

@@ -50,7 +50,7 @@ import type { Player } from './audio'
 import { EMPTY_LOG, EVENT_TTL_MS, callOf, closeOf, liveOf, push } from './activity'
 import { activityOf, readBash } from './classify'
 import { parseStatus, projectOf, filterCommands, activeFilter } from './git'
-import { GIT_SAFE, commitEntries, BOUND_AS_KIB, BOUND_CPU_S, BOUND_ENV, BOUND_PROBE_CAPPED, BOUND_PROBE_CONTROL, BOUND_PROBE_SET, BOUND_TAG, FINGERPRINT_FILE_BYTES, FINGERPRINT_TOTAL_BYTES, GIT_BOUNDED, INSPECT_BSD, INSPECT_GNU, SOURCE_BYTES, boundScript, inspectedOf } from './git-integrity'
+import { GIT_SAFE, commitEntries, BOUND_AS_KIB, BOUND_CPU_S, BOUND_ENV, BOUND_PROBE_CAPPED, BOUND_PROBE_CONTROL, BOUND_PROBE_GROUP, BOUND_PROBE_SET, BOUND_SLOTS, BOUND_TAG, FINGERPRINT_FILE_BYTES, FINGERPRINT_TOTAL_BYTES, GIT_BOUNDED, INSPECT_BSD, INSPECT_GNU, SOURCE_BYTES, boundScript, inspectedOf } from './git-integrity'
 import type { CommitEntry, DiskEntry, Inspected, Kind, Measurement } from './git-integrity'
 import { assessCommand } from './guard'
 import { failClosed, guardFailure, isInsideFolder } from './guard-rules'
@@ -275,7 +275,19 @@ const finishObserved = (s: Swarm, id: string, reason: string, conclusion: string
  * failed under a 32 MiB limit; null when a probe did not answer. A result in which a probe did not answer (a timeout under load,
  * say) stands for BOUND_RETRY_MS and is then probed again, so one slow moment cannot lower the rest of the session.
  */
-type Bound = { script: 'memory' | 'basic' | null; enforced: boolean | null; settled: boolean }
+type Bound = { script: 'memory' | 'basic' | null; enforced: boolean | null; group: boolean; settled: boolean }
+/** A measurement that was not started because its limits could not be applied (v0.6.4): the caller's answer is UNKNOWN. */
+class BoundRefused extends Error {}
+/** Measurement processes running now, and those waiting for one of BOUND_SLOTS; a slot is handed straight to the next in line. */
+let boundRunning = 0
+const boundWaiting: (() => void)[] = []
+const boundSlot = async (): Promise<() => void> => {
+  const release = () => { const heir = boundWaiting.shift(); if (heir !== undefined) heir(); else boundRunning-- }
+  if (boundRunning < BOUND_SLOTS) { boundRunning++; return release }
+  await new Promise<void>(resolve => boundWaiting.push(resolve))
+
+  return release
+}
 type RunInit = { cwd?: string; timeoutMs?: number; env?: Record<string, string>; stdin?: string }
 let boundMode: Promise<Bound> | null = null
 /** Until when an unanswered probe's result stands before the next probe (no shell at all would otherwise cost two failed starts a call). */
@@ -284,18 +296,20 @@ const BOUND_RETRY_MS = 30_000
 const probeBound = async ($: EngineInterface): Promise<Bound> => {
   const sh = (script: string) => $.process.run(['sh', '-c', script], { timeoutMs: 5000, env: { LC_ALL: 'C' } }).then(r => r, () => null)
   const set = await sh(BOUND_PROBE_SET(true))
+  const timeout = await sh(BOUND_PROBE_GROUP)
+  const group = timeout !== null && /\(GNU coreutils\)/.test(timeout.stdout)
   if (set !== null && set.exitCode === 0 && set.stdout.trim() === 'set') {
     // accepted is not enforced: a 64 MiB allocation must succeed without the cap and fail under a 32 MiB one
     const control = await sh(BOUND_PROBE_CONTROL)
     const capped = await sh(BOUND_PROBE_CAPPED)
     const enforced = control === null || capped === null ? null : control.exitCode === 0 && capped.exitCode !== 0
-    return { script: 'memory', enforced, settled: enforced !== null }
+    return { script: 'memory', enforced, group, settled: enforced !== null && timeout !== null }
   }
   const basic = await sh(BOUND_PROBE_SET(false))
-  const settled = set !== null && basic !== null
+  const settled = set !== null && basic !== null && timeout !== null
   // a shell that answers one probe but not the other is a slow one, not one without `ulimit -v`: keep the stronger script
-  if (basic !== null && basic.exitCode === 0 && basic.stdout.trim() === 'set') return { script: set === null ? 'memory' : 'basic', enforced: set === null ? null : false, settled }
-  return { script: null, enforced: false, settled }
+  if (basic !== null && basic.exitCode === 0 && basic.stdout.trim() === 'set') return { script: set === null ? 'memory' : 'basic', enforced: set === null ? null : false, group, settled }
+  return { script: null, enforced: false, group: false, settled }
 }
 const boundOf = async ($: EngineInterface): Promise<Bound> => {
   if (boundMode !== null && boundRetryAt !== 0 && (await $.clock.now()) >= boundRetryAt) { boundMode = null; boundRetryAt = 0 }
@@ -305,21 +319,30 @@ const boundOf = async ($: EngineInterface): Promise<Bound> => {
   return found
 }
 const bounded = async ($: EngineInterface, argv: string[], init: RunInit = {}) => {
-  const { script } = await boundOf($)
+  const { script, group } = await boundOf($)
+  // no limit can be applied: nothing is started, rather than something unbounded (v0.6.4)
+  if (script === null) throw new BoundRefused('resource limits could not be applied here (no POSIX shell answered), so nothing was measured')
   const inner = argv[0] === 'git' ? ['git', ...GIT_BOUNDED, ...argv.slice(1)] : argv
   const run = { ...init, env: { ...BOUND_ENV, ...(init.env ?? {}) } }
-  return script === null ? $.process.run(inner, run) : $.process.run(['sh', '-c', boundScript(script === 'memory'), BOUND_TAG, ...inner], run)
+  // the group timeout ends a second before the host's, so the whole group is gone before the host gives up on it
+  const seconds = String(Math.max(1, Math.floor(((init.timeoutMs ?? 30_000) - 1000) / 1000)))
+  const release = await boundSlot()
+  try {
+    return await $.process.run(['sh', '-c', boundScript(script === 'memory', group), BOUND_TAG, seconds, ...inner], run)
+  } finally {
+    release()
+  }
 }
 /** For /cockpit doctor: what limits measurement processes run under here, in words. */
 const boundWords = async ($: EngineInterface): Promise<{ enforced: boolean; text: string }> => {
   const found = await boundOf($)
-  const rest = `files written at most 64 MiB, no core dump, and the host's timeout`
+  const rest = `files written at most 64 MiB, no core dump, at most ${BOUND_SLOTS} at once, and ${found.group ? 'a timeout that ends the process and every child it started' : 'the host\'s timeout; no GNU timeout here, so a child process a measurement starts may outlive it'}`
   const gap = 'Cockpit still never opens a device, FIFO or oversized file itself, but a file Git reads on its own (a linked worktree\'s commondir, a configuration include, grafts, sparse-checkout) is bounded only by CPU time and the timeout'
-  if (found.script === 'memory' && found.enforced === true) return { enforced: true, text: `working-tree measurement runs under kernel limits: memory ${BOUND_AS_KIB / 1024} MiB, CPU ${BOUND_CPU_S} s, ${rest}` }
+  if (found.script === 'memory' && found.enforced === true) return { enforced: found.group, text: `working-tree measurement runs under kernel limits: memory ${BOUND_AS_KIB / 1024} MiB, CPU ${BOUND_CPU_S} s, ${rest}` }
   if (found.script === 'memory' && found.enforced === null) return { enforced: false, text: `working-tree measurement sets memory ${BOUND_AS_KIB / 1024} MiB, CPU ${BOUND_CPU_S} s, ${rest}, but whether the memory limit is enforced could not be confirmed (the probe did not answer; it runs again at the next measurement)` }
   if (found.script === 'memory') return { enforced: false, text: `working-tree measurement runs under CPU ${BOUND_CPU_S} s, ${rest}; this platform does NOT enforce the memory limit it accepts. ${gap}` }
   if (found.script === 'basic') return { enforced: false, text: `working-tree measurement runs under CPU ${BOUND_CPU_S} s, ${rest}; no memory limit could be set here. ${gap}` }
-  return { enforced: false, text: `working-tree measurement runs under the host's timeout only: no shell here could set kernel limits. ${gap}` }
+  return { enforced: false, text: 'working-tree measurement is OFF: no shell here could set kernel limits, so no measurement process is started and the working tree is UNKNOWN' }
 }
 
 /** One line of a `stat` error whose cause is a path that is not there (C locale), the cause read after the path, as the line ends. */
@@ -2342,15 +2365,27 @@ const FINGERPRINT_BUDGET_MS = 25_000
 const FINGERPRINT_DEADLINE_MS = 90_000
 /** Why the latest fingerprint was unknown, in words for the Ledger and HUD. Empty after a known one. */
 let treeWhy = ''
-/** Whether the latest fingerprint was unknown only because a file changed or vanished while it was read (a race, not a hazard). */
-let treeRaced = false
 /** measureCommit's reason for a tracked file that changed while it was read. */
 const TRACKED_RACE = 'a tracked file changed while it was being measured'
+/**
+ * One measurement of the working tree. `stamp` is null where it could not be taken, with `why`; `raced` when the only cause
+ * was a file that changed or vanished while it was read; `noRepo` only where the session is outside any Git repository
+ * (outsideGit), which is the one case a goal check may be accepted without a fingerprint (as UNPROTECTED). Returned whole so
+ * that concurrent measurements cannot swap each other's reasons.
+ */
+type TreeReading = { stamp: string | null; why: string; raced: boolean; noRepo: boolean }
 const treeStamp = async ($: EngineInterface, base?: string): Promise<string | null> => {
-  treeWhy = ''
-  treeRaced = false
-  const unknown = (why: string, raced = false): null => { treeWhy = why; treeRaced = raced; return null }
-  try {
+  const reading = await measureTree($, base)
+  treeWhy = reading.why
+
+  return reading.stamp
+}
+const measureTree = async ($: EngineInterface, base?: string): Promise<TreeReading> => {
+  let why = ''
+  let raced = false
+  let noRepo = false
+  const unknown = (reason: string, isRace = false): null => { why = reason; raced = isRace; return null }
+  const stamp = await (async (): Promise<string | null> => { try {
     const began = await $.clock.now()
     const overdue = async () => (await $.clock.now()) - began > FINGERPRINT_DEADLINE_MS
     const late = `measuring the working tree took longer than ${FINGERPRINT_DEADLINE_MS / 1000}s`
@@ -2369,7 +2404,11 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
       return r.exitCode === 0 && !r.isStdoutTruncated && r.stderr.trim() === '' ? r.stdout : null
     }
     const top = await verifiedGitRoot($)
-    if (top === null) return unknown('not a git work tree, or the work tree does not match the session directory, or its identity could not be verified')
+    if (top === null) {
+      // outside any repository is not the same as a repository Git cannot read: only the first may go unprotected
+      if (await outsideGit($)) { noRepo = true; return unknown('this project is not a Git repository') }
+      return unknown('a Git repository is here, but Git could not read it, its work tree is not the session directory, or its identity could not be verified')
+    }
     const at = (...argv: string[]) => sh(['-C', top, ...argv])
     // Git's excludes, attributes and alternates files are checked before any Git command below reads them (gitInputs).
     const inputs = await gitInputs($, top)
@@ -2556,19 +2595,46 @@ const treeStamp = async ($: EngineInterface, base?: string): Promise<string | nu
     const id = (await sha256Text(`cobalt-cockpit/project/v1\0${top}`)).slice(0, 32)
 
     return `${head}:${lines.length}.${digest}@${id}`
-  } catch {
-    return unknown('git raised an error or timed out')
-  }
+  } catch (error) {
+    return unknown(error instanceof BoundRefused ? error.message : 'git raised an error or timed out')
+  } })()
+
+  return stamp !== null ? { stamp, why: '', raced: false, noRepo: false } : { stamp, why, raced, noRepo }
 }
+/**
+ * Whether the session directory is outside every Git repository: Git says so, in the C locale and in its own words, and no
+ * `.git` entry exists in the directory or any parent. A damaged or hostile `.git`, a repository Git refuses (another owner) or
+ * one whose work tree is elsewhere says something else, or leaves a `.git` behind: that is a repository whose fingerprint is
+ * UNKNOWN, never a project without one.
+ */
+const outsideGit = async ($: EngineInterface): Promise<boolean> => {
+  const cwd = await $.session.cwd()
+  if (!cwd || !cwd.startsWith('/')) return false
+  const r = await bounded($, ['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
+  if (r === null || r.exitCode === 0 || r.isStdoutTruncated || r.isStderrTruncated || !NOT_A_REPOSITORY.test(r.stderr)) return false
+  const dotGit: string[] = []
+  for (let dir = cwd.replace(/\/+$/, '') || '/'; ; dir = dir.slice(0, dir.lastIndexOf('/')) || '/') {
+    dotGit.push(`${dir === '/' ? '' : dir}/.git`)
+    if (dir === '/' || dotGit.length > 256) break
+  }
+  const seen = await inspectPaths($, '/', dotGit)
+
+  return seen !== null && seen.every(s => s.kind === 'missing')
+}
+/** Git's whole answer outside a repository (C locale), with the line it adds when the search stops at a file-system boundary. */
+const NOT_A_REPOSITORY = /^fatal: not a git repository \((?:or any of the parent directories\): \.git|or any parent up to mount point [^\n]*\))\n(?:Stopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.\n)?$/
 /** The commit a stored fingerprint was taken against; only a full commit id is passed back to Git, anything else measures against HEAD. */
 const baseOf = (stamp: string | undefined): string | undefined => (typeof stamp === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64}):/.test(stamp) ? stamp.slice(0, stamp.indexOf(':')) : undefined)
 /**
  * A fingerprint, taken once more when the first was cut short only by a race (a file that changed or vanished while it was
  * read): a tree in use is not called unmeasurable for one unlucky moment. A second race, and every other failure, stand.
  */
-const settledStamp = async ($: EngineInterface, base?: string): Promise<string | null> => {
-  const first = await treeStamp($, base)
-  return first !== null || !treeRaced ? first : treeStamp($, base)
+const settledReading = async ($: EngineInterface, base?: string): Promise<TreeReading> => {
+  const first = await measureTree($, base)
+  const reading = first.stamp !== null || !first.raced ? first : await measureTree($, base)
+  treeWhy = reading.why
+
+  return reading
 }
 
 /** If a goal check was accepted for another working tree than the present one, it is stale now. */
@@ -2576,9 +2642,9 @@ const reconcileOnce = async ($: EngineInterface): Promise<void> => {
   const task = await read($, taskAtom)
   const accepted = task?.alignment?.tree
   if (task?.alignment?.state !== 'ALIGNED' || typeof accepted !== 'string') return
-  const tree = await settledStamp($, baseOf(accepted))
-  // at once: another measurement may replace it
-  const why = treeWhy
+  const reading = await settledReading($, baseOf(accepted))
+  const tree = reading.stamp
+  const why = reading.why
   if (tree === accepted) return
   const now = await $.clock.now()
   // only the check that was measured: one made since is about a newer tree. A tree that can no longer be measured is not the
@@ -2615,11 +2681,15 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
   // the tree an accepted goal check is about, taken before the answer is recorded
   const before = e.action === 'align' || e.action === 'gate' || (e.action as string) === 'gates' ? await read($, taskAtom) : null
   const goalChecked = before !== null && needsAlignment(before)
-  const stamp = goalChecked && e.action === 'align' ? await settledStamp($, baseOf(before.gateTree)) : null
-  const stampWhy = treeWhy
-  const gateStamp = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') ? await settledStamp($, baseOf(before.gateTree)) : null
+  const stampReading = goalChecked && e.action === 'align' ? await settledReading($, baseOf(before.gateTree)) : null
+  const stamp = stampReading?.stamp ?? null
+  const stampWhy = stampReading?.why ?? ''
+  // A goal check may stand without a fingerprint only outside every Git repository, and then as UNPROTECTED (v0.6.4).
+  const stampNoRepo = stampReading?.noRepo === true
+  const gateReading = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') ? await settledReading($, baseOf(before.gateTree)) : null
+  const gateStamp = gateReading?.stamp ?? null
   // why the gate measurement failed, when it was taken and failed; undefined when none was taken
-  const gateWhy = goalChecked && (e.action === 'gate' || (e.action as string) === 'gates') && gateStamp === null ? treeWhy : undefined
+  const gateWhy = gateReading !== null && gateReading.stamp === null ? gateReading.why : undefined
   // A model's "read-only" is a claim. With the Stop guard enforcing, it is accepted only when the tree is still the one the task
   // began with (a known baseline taken by the host, no edit seen); an unknown baseline or fingerprint cannot show that, so the
   // task is planned as coding and the enrolled check runs. The baseline is never replaced by a later fingerprint.
@@ -2667,11 +2737,28 @@ const serveProgress = async ($: EngineInterface, e: ProgressInput & { agentId?: 
     // A task stored by v0.5.0 (milestones, no discovery) keeps the rules it began under, unless this call starts a new one.
     const isLegacy = old !== null && old.milestones.length > 0 && old.discovery === undefined && e.action !== 'plan'
     const gated = e.action === 'gate' || (e.action as string) === 'gates' ? stampGates(outcome.task, gateStamp) : outcome.task
-    const stamped = stamp !== null && gated.alignment?.state === 'ALIGNED' ? { ...gated, alignment: { ...gated.alignment, tree: stamp } } : gated
-    if (goalChecked && e.action === 'align' && stamp === null && gated.alignment?.state === 'ALIGNED') unprotected = `No working-tree fingerprint could be taken here (${stampWhy || 'no git repository, no commit, or git did not answer'}), so a later change outside Edit, Write and Bash edit diffs will not be noticed.`
+    let stamped = stamp !== null && gated.alignment?.state === 'ALIGNED' ? { ...gated, alignment: { ...gated.alignment, tree: stamp } } : gated
+    let notAccepted = ''
+    if (goalChecked && e.action === 'align' && stamp === null && gated.alignment?.state === 'ALIGNED') {
+      if (stampNoRepo) {
+        // outside every repository there is nothing to fingerprint: accepted as before, and marked so wherever it is shown
+        stamped = { ...gated, alignment: { ...gated.alignment, protection: { state: 'UNPROTECTED', why: stampWhy } } }
+        unprotected = 'UNPROTECTED: this project is not a Git repository, so no working-tree fingerprint protects this goal check; a later change outside Edit, Write and Bash edit diffs will not be noticed.'
+      } else {
+        // A repository is here and could not be measured safely: the claim is recorded as UNKNOWN, never as an accepted check, and
+        // the failure is read as neither a clean nor a changed tree. Criteria it marked met are unresolved, as for any claim refused.
+        const criteria = gated.discovery?.criteria.map(c => (c.status === 'met' ? { ...c, status: 'unresolved' as const } : c))
+        stamped = {
+          ...gated,
+          alignment: { ...gated.alignment, state: 'UNKNOWN', protection: { state: 'UNKNOWN', why: stampWhy }, note: oneLine(`working tree unmeasurable: ${stampWhy}`, 160) },
+          ...(gated.discovery === undefined || criteria === undefined ? {} : { discovery: { ...gated.discovery, criteria } }),
+        }
+        notAccepted = `error: ALIGNED not accepted: this Git repository's working tree cannot be measured safely (${stampWhy}), so the goal check is recorded as UNKNOWN, not ALIGNED. A measurement that fails says nothing of a clean or a changed tree. Resolve the cause, then align again.`
+      }
+    }
     const settled = settle(isLegacy ? stamped : withDiscovery(stamped, pin))
     cues = settled.cues
-    reply = [outcome.note, claimNote, unprotected, summaryOf(settled.task)].filter(Boolean).join(' ')
+    reply = [notAccepted, outcome.note, claimNote, unprotected, summaryOf(settled.task)].filter(Boolean).join(' ')
 
     return settled.task
   })
@@ -2777,8 +2864,9 @@ const noteEnd = async (
       : []
 
   const measuring = readings.some(r => r.state === 'pass')
-  const observed = measuring ? await settledStamp($, baseOf((await read($, taskAtom))?.gateTree)) : null
-  const observedWhy = measuring && observed === null ? treeWhy : undefined
+  const observedReading = measuring ? await settledReading($, baseOf((await read($, taskAtom))?.gateTree)) : null
+  const observed = observedReading?.stamp ?? null
+  const observedWhy = observedReading !== null && observedReading.stamp === null ? observedReading.why : undefined
   if (edits.length > 0 || readings.length > 0) {
     await change($, (task, now) => {
       let chain = task
@@ -4098,6 +4186,8 @@ export const register: Register = (on, options) => {
   // what limits a measurement process runs under is probed again for this registration's host
   boundMode = null
   boundRetryAt = 0
+  boundRunning = 0
+  boundWaiting.length = 0
   // Before the first settings read the home directory is unknown, so `~/…` cannot be expanded: ENFORCE with a script named is
   // enforcing already (fail closed); loadStopCfg refines it once the configuration is read.
   setGuardRequired(stopCfg.policy === 'ENFORCE')

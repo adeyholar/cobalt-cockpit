@@ -6,7 +6,7 @@
 import type { On } from 'claude-code'
 import { mock } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import { BOUND_PROBE_CAPPED, BOUND_PROBE_CONTROL, BOUND_PROBE_SET, BOUND_TAG, INSPECT_BSD, INSPECT_GNU } from '../hooks/git-integrity'
+import { BOUND_PROBE_CAPPED, BOUND_PROBE_CONTROL, BOUND_PROBE_GROUP, BOUND_PROBE_SET, BOUND_TAG, INSPECT_BSD, INSPECT_GNU } from '../hooks/git-integrity'
 import type { Kind } from '../hooks/git-integrity'
 
 export const PLUGIN = 'cobalt-cockpit'
@@ -22,6 +22,19 @@ export type World = {
   wrappers: (string | null)[]
   /** The limit probes the plugin ran, as their scripts; they are not in `runs`. */
   boundProbes: string[]
+  /** v0.6.4, in the order of `runs`: the seconds the limit script's group timeout was given, or null when there was no script. */
+  wrapperSeconds: (string | null)[]
+  /** Whether this host's `timeout` is GNU's (process-group kill). */
+  groupTimeout: boolean
+  /** Most measurement processes seen running at once. */
+  peakRunning: number
+  /** Event-loop turns each measurement process takes, so that concurrent ones overlap (0: none). */
+  runDelayTicks: number
+  /**
+   * Whether a `.git` entry is in the session directory (unset: there is one exactly when `gitStatus` is a repository). Parents never
+   * have one. A `.git` with no repository Git can read is a damaged repository, not a project outside Git.
+   */
+  dotGitPresent: boolean | null
   /**
    * What this host's `sh` makes of the limits: all enforced (`full`); the memory limit accepted but not enforced (`partial`);
    * no memory limit accepted (`basic`); no `sh` at all (`none`); `flaky`: the first enforcement probe does not answer, later ones
@@ -229,6 +242,11 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     clock: mock.clock(on, { now: 1_000_000 }),
     runs: [],
     wrappers: [],
+    wrapperSeconds: [],
+    groupTimeout: true,
+    peakRunning: 0,
+    runDelayTicks: 0,
+    dotGitPresent: null,
     boundProbes: [],
     boundMode: 'full',
     kinds: {},
@@ -471,6 +489,9 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       if (m !== undefined) kind = m === 0 ? 'missing' : KIND_OF[m & 0xf000] ?? 'file'
       else if (w.watchedDirs[raw] !== undefined || w.watchedDirs[bare] !== undefined || w.watchedUnreadable.includes(raw) || w.embeddedRepos[`${key}/`] !== undefined) kind = 'dir'
       // as in a new repository: an exclude file, no attributes file (unless a test wrote one), no alternates
+      // the session's own `.git` is there with a repository; no parent has one
+      else if (key === '.git') kind = (w.dotGitPresent ?? w.gitStatus !== null) ? 'dir' : 'missing'
+      else if (key.endsWith('/.git')) kind = 'missing'
       else kind = key.endsWith('objects/info/alternates') || (key.endsWith('info/attributes') && w.attributes === '') ? 'missing' : 'file'
     }
     if (follow && kind === 'link') kind = w.followKinds[key] ?? w.followKinds[bare] ?? 'file'
@@ -480,8 +501,9 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     const size = w.sizes[key] ?? w.sizes[bare] ?? (kind === 'file' ? new TextEncoder().encode(contentOf(raw)).length : kind === 'link' ? (w.linkTargets[key] ?? 'target').length : 0)
     return { mode, size, ino: w.inodes[key] ?? w.inodes[bare] ?? 1, mtime: w.mtimes[key] ?? w.mtimes[bare] ?? '1.000000000' }
   }
-  const PROBES = new Set([BOUND_PROBE_SET(true), BOUND_PROBE_SET(false), BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED])
+  const PROBES = new Set([BOUND_PROBE_SET(true), BOUND_PROBE_SET(false), BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED, BOUND_PROBE_GROUP])
 
+  let running = 0
   on('process.run', async ($, e) => {
     if (['mkdir', 'chmod', 'rm', 'stat'].includes(e.argv[0] ?? '') && e.argv.some(a => a.includes('/cobalt-cockpit/telemetry') || a.endsWith('/.local/state/cobalt-cockpit'))) {
       w.telemetryRuns.push([...e.argv])
@@ -498,14 +520,19 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       if (w.boundMode === 'none') throw new Error('spawn sh ENOENT')
       if (w.boundMode === 'basic' && script === BOUND_PROBE_SET(true)) return ran(2)
       if (w.boundMode === 'flaky' && script === BOUND_PROBE_CAPPED && w.boundProbes.filter(x => x === BOUND_PROBE_CAPPED).length === 1) throw new Error('sh was still running at the timeout')
+      if (script === BOUND_PROBE_GROUP) return ran(0, w.groupTimeout ? 'timeout (GNU coreutils) 9.4\n' : '')
 
       return script === BOUND_PROBE_CAPPED ? ran(w.boundMode === 'partial' ? 0 : 1) : script === BOUND_PROBE_CONTROL ? ran(0) : ran(0, 'set\n')
     }
     // A command started through the limit script is answered as itself; the script is recorded beside it.
     const isWrapped = e.argv[0] === 'sh' && e.argv[1] === '-c' && e.argv[3] === BOUND_TAG
-    const argv: readonly string[] = isWrapped ? e.argv.slice(4) : e.argv
+    const argv: readonly string[] = isWrapped ? e.argv.slice(5) : e.argv
     w.runs.push([...argv])
     w.wrappers.push(isWrapped ? String(e.argv[2]) : null)
+    w.wrapperSeconds.push(isWrapped ? String(e.argv[4]) : null)
+    if (isWrapped) { running++; w.peakRunning = Math.max(w.peakRunning, running) }
+    try {
+    if (isWrapped) for (let tick = 0; tick < w.runDelayTicks; tick++) await Promise.resolve()
     w.runEnvs.push(e.init?.env)
     if (w.duringRun !== null) await w.duringRun(argv)
     const program = argv[0] ?? ''
@@ -562,7 +589,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
       return ran(0, (link === undefined ? asked : `${w.links[link]}${asked.slice(link.length)}`) + '\n')
     }
     if (program === 'git') {
-      if (w.gitStatus === null) return ran(128)
+      if (w.gitStatus === null) return { value: { exitCode: 128, stdout: '', stderr: argv.includes('rev-parse') ? 'fatal: not a git repository (or any of the parent directories): .git\n' : '', isStdoutTruncated: false, isStderrTruncated: false } }
 
       // global options (--no-optional-locks, --no-replace-objects, -c k=v) and -C <top> come before the subcommand
       let at = 1
@@ -631,6 +658,9 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     if (behavior === 'hangs') throw new Error(`${program} was still running at the timeout`)
 
     return ran(behavior === 'ok' ? 0 : 1)
+    } finally {
+      if (isWrapped) running--
+    }
   })
 
   // the engine's own drawing, where the plugin draws nothing or wraps it

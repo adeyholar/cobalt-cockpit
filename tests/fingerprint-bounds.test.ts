@@ -4,7 +4,7 @@
 // starts under the limit script, nothing that is not an ordinary file is ever read, every limit ends in UNKNOWN with its reason,
 // and an UNKNOWN never reads as a clean tree, a passing check or DONE. Each hazard has a control that still measures normally.
 import { describe, expect, test } from 'claude-code/testing'
-import { BOUND_PROBE_CAPPED, BOUND_PROBE_CONTROL, BOUND_PROBE_SET, FINGERPRINT_FILE_BYTES, GIT_BOUNDED, SOURCE_BYTES, boundScript, inspectedOf, kindOfMode } from '../hooks/git-integrity'
+import { BOUND_PROBE_CAPPED, BOUND_PROBE_CONTROL, BOUND_PROBE_GROUP, BOUND_PROBE_SET, BOUND_SLOTS, FINGERPRINT_FILE_BYTES, GIT_BOUNDED, SOURCE_BYTES, boundScript, inspectedOf, kindOfMode } from '../hooks/git-integrity'
 import type { Task } from '../types'
 import { CLEAN_REPO, bash, blobOf, command, FIVE, GATE_NAMES, hostState, passAllGates, planAndComplete, progress, prompt, start, world } from './world'
 import type { World } from './world'
@@ -49,10 +49,10 @@ const unidentified = (h: ReturnType<typeof hostState>, why: string) => {
 describe('the limit script', () => {
   test('is one constant: memory, CPU, file size and no core, each only ever lowered, then exec of the words it is given', () => {
     const lower = 'lower() { c=$(ulimit "$1") || return 1; if [ "$c" = unlimited ] || [ "$c" -gt "$2" ]; then ulimit "$1" "$2"; fi; }'
-    expect(boundScript(true)).toBe(`${lower} && lower -v 1048576 && lower -t 20 && lower -f 131072 && lower -c 0 && exec "$@"`)
-    expect(boundScript(false)).toBe(`${lower} && lower -t 20 && lower -f 131072 && lower -c 0 && exec "$@"`)
+    expect(boundScript(true, true)).toBe(`${lower} && lower -v 1048576 && lower -t 20 && lower -f 131072 && lower -c 0 && t=$1 && shift && exec timeout -s KILL "$t" "$@"`)
+    expect(boundScript(false, false)).toBe(`${lower} && lower -t 20 && lower -f 131072 && lower -c 0 && t=$1 && shift && exec "$@"`)
     // no command word is ever interpolated: the probes and the script are fixed strings
-    for (const s of [boundScript(true), boundScript(false), BOUND_PROBE_SET(true), BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED]) expect(s).not.toMatch(/\$\{|`/)
+    for (const s of [boundScript(true, true), boundScript(false, false), BOUND_PROBE_SET(true), BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED, BOUND_PROBE_GROUP]) expect(s).not.toMatch(/\$\{|`/)
     expect(GIT_BOUNDED).toContain('core.hooksPath=/dev/null')
     expect(GIT_BOUNDED).toContain('diff.orderFile=/dev/null')
   })
@@ -76,16 +76,17 @@ describe('every measurement process is bounded', () => {
   test('full: git, stat, find, readlink and realpath all start under the script, Git with the bounded settings', guard(), async ($, on) => {
     const { w } = fixture(on); busyTree(w)
     await begun($); w.tree['src/a.ts'] = 'b'; await stop($)
-    const measuring = w.runs.map((r, i) => ({ r, script: w.wrappers[i], env: w.runEnvs[i] })).filter(x => MEASURING.includes(x.r[0]!))
+    const measuring = w.runs.map((r, i) => ({ r, script: w.wrappers[i], seconds: w.wrapperSeconds[i], env: w.runEnvs[i] })).filter(x => MEASURING.includes(x.r[0]!))
     expect(measuring.length).toBeGreaterThan(20)
     for (const x of measuring) {
-      expect(x.script).toBe(boundScript(true))
+      expect(x.script).toBe(boundScript(true, true))
+      expect(x.seconds).toBe('5')                                                     // a second inside the host's 6 s
       expect(x.env?.['MALLOC_ARENA_MAX']).toBe('2')
       if (x.r[0] === 'git') expect(x.r.slice(1, 1 + GIT_BOUNDED.length)).toEqual(GIT_BOUNDED)
     }
     expect(measuring.some(x => x.r[0] === 'readlink')).toBe(true)
     // the limits are probed once for the registration, not once per process
-    expect(w.boundProbes).toEqual([BOUND_PROBE_SET(true), BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED])
+    expect(w.boundProbes).toEqual([BOUND_PROBE_SET(true), BOUND_PROBE_GROUP, BOUND_PROBE_CONTROL, BOUND_PROBE_CAPPED])
   })
   test('full: only reading Git subcommands run, hash-object never writes an object, and nothing destructive is started', guard(), async ($, on) => {
     const { w } = fixture(on); busyTree(w)
@@ -100,30 +101,44 @@ describe('every measurement process is bounded', () => {
     const { w } = fixture(on); busyTree(w); w.boundMode = 'partial'
     await begun($); await stop($)
     const scripts = new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))
-    expect([...scripts]).toEqual([boundScript(true)])
+    expect([...scripts]).toEqual([boundScript(true, true)])
     const out = String((await command($, 'doctor')).text)
-    expect(out).toContain('WARN working-tree measurement runs under CPU 20 s, files written at most 64 MiB, no core dump, and the host\'s timeout; this platform does NOT enforce the memory limit it accepts')
+    expect(out).toContain('WARN working-tree measurement runs under CPU 20 s, files written at most 64 MiB, no core dump, at most 2 at once, and a timeout that ends the process and every child it started; this platform does NOT enforce the memory limit it accepts')
     expect(out).toContain('a file Git reads on its own (a linked worktree\'s commondir, a configuration include, grafts, sparse-checkout) is bounded only by CPU time and the timeout')
   })
   test('basic: where no memory limit can be set, CPU, file size and core still apply', guard(), async ($, on) => {
     const { w } = fixture(on); busyTree(w); w.boundMode = 'basic'
     await begun($); await stop($)
-    expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(false)])
+    expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(false, true)])
     expect(String((await command($, 'doctor')).text)).toContain('no memory limit could be set here')
   })
-  test('none: with no shell to set limits the commands run directly, the probe is tried again after a while, and doctor warns', guard(), async ($, on) => {
-    const { w } = fixture(on); busyTree(w); w.boundMode = 'none'
+  test('none: with no shell to set limits nothing is started, the tree is UNKNOWN with the reason, and doctor says measurement is off', guard(), async ($, on) => {
+    const { w, h } = fixture(on); busyTree(w); w.boundMode = 'none'
     await begun($); await stop($)
-    expect(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)).every(s => s === null)).toBe(true)
-    expect(w.boundProbes).toHaveLength(2)                                           // not once per process: one unanswered probe stands a while
+    expect(w.runs.filter(r => MEASURING.includes(r[0]!))).toEqual([])            // refused before launch, never run unbounded
+    unidentified(h, 'resource limits could not be applied here')
+    expect(w.boundProbes).toHaveLength(3)                                           // not once per process: one unanswered probe stands a while
     await w.clock.advance(31_000)
-    expect(String((await command($, 'doctor')).text)).toContain('WARN working-tree measurement runs under the host\'s timeout only')
-    expect(w.boundProbes).toHaveLength(4)                                           // and is then tried again
+    expect(String((await command($, 'doctor')).text)).toContain('WARN working-tree measurement is OFF: no shell here could set kernel limits')
+    expect(w.boundProbes).toHaveLength(6)                                           // and is then tried again
+  })
+  test('without GNU timeout the limits still apply, without the group kill, and doctor says a child may outlive a measurement', guard(), async ($, on) => {
+    const { w } = fixture(on); busyTree(w); w.groupTimeout = false
+    await begun($); await stop($)
+    expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(true, false)])
+    expect(String((await command($, 'doctor')).text)).toContain('WARN working-tree measurement runs under kernel limits: memory 1024 MiB, CPU 20 s, files written at most 64 MiB, no core dump, at most 2 at once, and the host\'s timeout; no GNU timeout here, so a child process a measurement starts may outlive it')
+  })
+  test(`concurrent measurements share ${BOUND_SLOTS} process slots: never more run at once, and every one completes`, guard(), async ($, on) => {
+    const { w } = fixture(on); busyTree(w); w.runDelayTicks = 25
+    await start($); await enroll($)
+    await Promise.all(Array.from({ length: 6 }, (_, i) => prompt($, `burst ${i}`)))
+    await Promise.all([stop($), command($, 'doctor'), progress($, { action: 'status' })])
+    expect(w.peakRunning).toBe(BOUND_SLOTS)
   })
   test('a probe that does not answer lowers nothing: the memory limit is still set, and the probe runs again until it answers', guard(), async ($, on) => {
     const { w } = fixture(on); busyTree(w); w.boundMode = 'flaky'
     await begun($); await stop($)
-    expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(true)])
+    expect([...new Set(w.wrappers.filter((_, i) => MEASURING.includes(w.runs[i]![0]!)))]).toEqual([boundScript(true, true)])
     expect(String((await command($, 'doctor')).text)).toContain('whether the memory limit is enforced could not be confirmed')
     await w.clock.advance(31_000)
     expect(String((await command($, 'doctor')).text)).toContain('OK   working-tree measurement runs under kernel limits')
@@ -131,7 +146,7 @@ describe('every measurement process is bounded', () => {
   })
   test('full: doctor reports the enforced limits', async ($, on) => {
     world(on); await start($)
-    expect(String((await command($, 'doctor')).text)).toContain('OK   working-tree measurement runs under kernel limits: memory 1024 MiB, CPU 20 s, files written at most 64 MiB, no core dump')
+    expect(String((await command($, 'doctor')).text)).toContain('OK   working-tree measurement runs under kernel limits: memory 1024 MiB, CPU 20 s, files written at most 64 MiB, no core dump, at most 2 at once, and a timeout that ends the process and every child it started')
   })
 })
 
@@ -430,11 +445,12 @@ describe('an unmeasurable tree never keeps a goal check or a passing check', () 
     expect(refused).toStartWith('error: ALIGNED refused')
     expect(refused).toContain('the working tree can no longer be measured (core.excludesFile is a character device')
     expect(await progress($, { action: 'status' })).toContain('TEST pending')
-    // checks observed again on the unmeasurable tree: the goal check is accepted, and says why later changes cannot be seen
+    // checks observed again on the unmeasurable tree: a repository is here, so the goal check is recorded UNKNOWN, never accepted
     await passAllGates($, { align: false })
-    const accepted = await progress($, aligned)
-    expect(accepted).toContain('alignment ALIGNED')
-    expect(accepted).toContain('No working-tree fingerprint could be taken here (core.excludesFile is a character device')
+    const again = await progress($, aligned)
+    expect(again).toStartWith('error: ALIGNED not accepted')
+    expect(again).toContain('recorded as UNKNOWN')
+    expect(again).toContain('core.excludesFile is a character device')
   })
   test('a passing command seen on an unmeasurable tree stales the checks observed on a measured one', async ($, on) => {
     const w = world(on); await start($)
@@ -509,6 +525,89 @@ describe('inspection reads the system\'s answer, not the path', () => {
     await prompt($, 'again'); w.tree['a.ts'] = 'changed'
     await stop($)
     unidentified(h, 'info/attributes is a character device')
+  })
+})
+
+describe('a Git repository that cannot be measured is never accepted as protected', () => {
+  const aligned = { action: 'align', alignment: { state: 'ALIGNED', demonstrated: [{ id: 'c1', evidence: "cancel test 'frees the slot' passes in test/api.test.js (4 pass)" }] } }
+  /** A goal-checked task with every gate recorded, ready for its goal check. */
+  const ready = async ($: any) => {
+    await start($)
+    await prompt($, 'Add booking cancellation to the API and the UI')
+    await progress($, { action: 'discover', criteria: ['A booking can be cancelled'] })
+    await planAndComplete($, 4)
+    await passAllGates($, { align: false })
+  }
+  const recordedUnknown = async ($: any, why: string, h: ReturnType<typeof hostState>) => {
+    const reply = await progress($, aligned)
+    expect(reply).toStartWith('error: ALIGNED not accepted')
+    expect(reply).toContain('recorded as UNKNOWN, not ALIGNED')
+    expect(reply).toContain(why)
+    const status = await progress($, { action: 'status' })
+    expect(status).toContain('alignment UNKNOWN (working tree UNKNOWN:')
+    expect(status).not.toStartWith('DONE')
+    expect(await progress($, { action: 'complete', milestone: 'm5' })).not.toStartWith('DONE')
+    // a failed measurement is neither a clean tree nor a changed one
+    expect(taskOf(h)?.alignment?.tree).toBeUndefined()
+    expect(taskOf(h)?.edited).not.toBe(true)
+    expect(reply).not.toContain('working tree changed')
+  }
+  test('a repository whose measurement always fails: UNKNOWN, never ALIGNED', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitHangs = 'diff'
+    await ready($)
+    await recordedUnknown($, 'git raised an error or timed out', h)
+  })
+  test('a repository with unsafe metadata: UNKNOWN, naming it', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitConfig['core.excludesFile'] = '/dev/zero'; w.kinds['/dev/zero'] = 'char'
+    await ready($)
+    await recordedUnknown($, 'core.excludesFile is a character device', h)
+  })
+  test('a repository with an oversized tracked file: UNKNOWN, naming it', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.headBlobs['data.bin'] = blobOf('d'); w.watched['data.bin'] = 'd'; w.sizes['data.bin'] = 2 * FINGERPRINT_FILE_BYTES
+    await ready($)
+    await recordedUnknown($, 'a tracked file is larger than 1 GiB', h)
+  })
+  test('a repository with no commit yet is a repository: UNKNOWN until its first commit', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.head = ''
+    await ready($)
+    await recordedUnknown($, 'no commit to measure against', h)
+  })
+  test('a damaged repository (Git says "not a git repository" but .git is there) is not taken for a project outside Git', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.dotGitPresent = true
+    await ready($)
+    await recordedUnknown($, 'a Git repository is here', h)
+  })
+  test('a project outside Git: ALIGNED as before, marked UNPROTECTED in the reply and the status, and DONE is reachable', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null
+    await ready($)
+    const reply = await progress($, aligned)
+    expect(reply).toContain('alignment ALIGNED')
+    expect(reply).toContain('UNPROTECTED: this project is not a Git repository, so no working-tree fingerprint protects this goal check')
+    expect(taskOf(h)?.alignment?.protection).toEqual({ state: 'UNPROTECTED', why: 'this project is not a Git repository' })
+    const done = await progress($, { action: 'complete', milestone: 'm5' })
+    expect(done).toStartWith('DONE 100%')
+    expect(done).toContain('alignment ALIGNED (UNPROTECTED: not a Git repository, no working-tree fingerprint)')
+  })
+  test('a repository that becomes measurable again is accepted as protected, and a later change withdraws it', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitConfig['core.excludesFile'] = '/dev/zero'; w.kinds['/dev/zero'] = 'char'
+    await ready($)
+    expect(await progress($, aligned)).toContain('recorded as UNKNOWN')
+    delete w.gitConfig['core.excludesFile']
+    const reply = await progress($, aligned)
+    expect(reply).toContain('alignment ALIGNED')
+    expect(reply).not.toContain('UNPROTECTED')
+    expect(typeof taskOf(h)?.alignment?.tree).toBe('string')
+    expect(taskOf(h)?.alignment?.protection).toBeUndefined()
+    expect(await progress($, { action: 'complete', milestone: 'm5' })).toStartWith('DONE 100%')
+    w.tree['src/api.js'] = 'changed by a tool nothing watches'
+    expect(await progress($, { action: 'status' })).not.toStartWith('DONE')
+  })
+  test('a claim other than ALIGNED is recorded as given, with no fingerprint to judge', async ($, on) => {
+    const w = world(on); w.gitHangs = 'diff'
+    await ready($)
+    const reply = await progress($, { action: 'align', alignment: { state: 'PARTIAL', demonstrated: [], missing: ['UI not done'] } })
+    expect(reply).not.toStartWith('error')
+    expect(await progress($, { action: 'status' })).toContain('alignment PARTIAL')
   })
 })
 

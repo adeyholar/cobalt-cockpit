@@ -660,7 +660,7 @@ describe('change detection: UNCHANGED, CHANGED, UNKNOWN', () => {
     expect(out.block).toBeDefined()
     expect(taskOf(h).stopHold).toBeDefined()
     const kept = ((h.get('run-ledger')?.value ?? {}) as { stopChecks?: CheckRecord[] }).stopChecks ?? []
-    expect(kept.at(-1)?.summary).toContain('not a git work tree')
+    expect(kept.at(-1)?.summary).toContain('this project is not a Git repository')                  // v0.6.4 wording: outside Git, said so
     notFinished(taskOf(h))
   })
   test('8 modification before a late read-only declaration is not accepted', guard(), async ($, on) => {

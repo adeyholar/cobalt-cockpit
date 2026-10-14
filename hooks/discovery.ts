@@ -211,6 +211,13 @@ export const criteriaMissing = (task: Task): boolean => needsAlignment(task) && 
 
 /** The state shown for the goal check: BLOCKED while there is nothing to check against. */
 export const alignmentShown = (task: Task): string => (criteriaMissing(task) ? 'BLOCKED' : task.alignment?.state ?? 'PENDING')
+/** v0.6.4: why no working-tree fingerprint protects the goal check, where none does; empty otherwise. */
+export const protectionShown = (task: Task): string => {
+  const p = task.alignment?.protection
+  if (p === undefined || (p.state === 'UNPROTECTED' && task.alignment?.state !== 'ALIGNED')) return ''
+
+  return p.state === 'UNPROTECTED' ? ' (UNPROTECTED: not a Git repository, no working-tree fingerprint)' : ` (working tree UNKNOWN: ${clip(p.why, 90)})`
+}
 
 export type DiscoverInput = { goal?: unknown; level?: unknown; criteria?: unknown; unknowns?: unknown; risks?: unknown }
 
@@ -346,7 +353,7 @@ export const alignmentNote = (task: Task): string =>
 export const invalidateAlignment = (task: Task, why: string): Task => {
   const cleared = resetCriteria(task)
 
-  return cleared.alignment === undefined || cleared.alignment.state === 'PENDING' ? cleared : { ...cleared, alignment: (({ tree: _tree, ...rest }) => ({ ...rest, state: 'PENDING' as const, note: clip(`reset: ${why}`, 120) }))(cleared.alignment) }
+  return cleared.alignment === undefined || cleared.alignment.state === 'PENDING' ? cleared : { ...cleared, alignment: (({ tree: _tree, protection: _protection, ...rest }) => ({ ...rest, state: 'PENDING' as const, note: clip(`reset: ${why}`, 120) }))(cleared.alignment) }
 }
 
 export type AlignInput = { alignment?: unknown }
@@ -446,7 +453,7 @@ export const discoverySummary = (task: Task): string => {
   if (d === undefined || d.level === 'LIGHT') return ''
   const open = d.unknowns.filter(u => u.state === 'open').length
 
-  return ` Discovery ${d.level}: ${open} unknown${open === 1 ? '' : 's'} open, ${(task.decisions ?? []).length} decision${(task.decisions ?? []).length === 1 ? '' : 's'}, alignment ${needsAlignment(task) ? alignmentShown(task) : task.kind === 'unplanned' ? 'decided at plan' : 'not required'}${criteriaMissing(task) ? ' (criteria missing)' : ''}.`
+  return ` Discovery ${d.level}: ${open} unknown${open === 1 ? '' : 's'} open, ${(task.decisions ?? []).length} decision${(task.decisions ?? []).length === 1 ? '' : 's'}, alignment ${needsAlignment(task) ? alignmentShown(task) : task.kind === 'unplanned' ? 'decided at plan' : 'not required'}${needsAlignment(task) ? protectionShown(task) : ''}${criteriaMissing(task) ? ' (criteria missing)' : ''}.`
 }
 
 /** The `/cockpit discovery` view; every row is clipped to `width` so a narrow terminal stays readable. */
