@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# A disposable place to try the committed candidate by hand, in two real Claude Code sessions on one test project (v0.6.2).
+# A disposable place to try the committed candidate by hand, in two real Claude Code sessions on one test project (v0.6.2; profiles v0.6.3).
 # Engineering preparation only: it starts nothing on its own, simulates no acknowledgment and confirms nothing for you.
 #
 #   scripts/acceptance-interactive.sh setup  [--dir <new empty directory>]   build it and print the two launch commands
 #   scripts/acceptance-interactive.sh verify <dir>                           probe it with the host (no model, no login needed)
-#   scripts/acceptance-interactive.sh launch <dir> 1|2                       start session 1 or 2 (a terminal each)
+#   scripts/acceptance-interactive.sh launch <dir> 1|2 [profile]             start session 1 or 2 (a terminal each)
 #   scripts/acceptance-interactive.sh clean  <dir>                           remove it
 #
 # Isolation: everything lives under one new private directory. It has its own CLAUDE_CONFIG_DIR and HOME, so the installed
@@ -14,8 +14,10 @@
 # inside the disposable configuration, on the first launch (both sessions share it). On macOS the host may keep its sign-in in the
 # system Keychain, which a configuration directory does not isolate: there the disposable session can reuse your sign-in (the
 # plugin, settings and store are still its own). Set COBALT_ACCEPT_PASS_AUTH=1 to pass
-# ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN from your environment instead. The plugin options (alerts on, a short reminder
-# interval) are given with --settings for these launches only.
+# ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN from your environment instead. The plugin options are given with --settings for
+# these launches only, by profile: record (the default: guardRecordOnly on, guardAlerts off), kinds (the same, with only the
+# critical kind notified), quiet (the same, with a quiet window over the whole UTC day), alerts (alerts on, reminders every minute).
+# A session reads its options when it starts: to compare profiles, exit and launch again with another (CONTINUE=1 for session 1).
 set -euo pipefail
 umask 077
 fail() { printf 'acceptance-interactive: %s\n' "$*" >&2; exit 2; }
@@ -23,7 +25,16 @@ cmd=${1:-}; shift || true
 claude_bin=${CLAUDE_BIN:-$(command -v claude || true)}
 need_claude() { [[ -n $claude_bin && -x $claude_bin ]] || fail 'claude was not found on PATH (set CLAUDE_BIN)'; }
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-settings='{"pluginConfigs":{"cobalt-cockpit@inline":{"options":{"guardAlerts":true,"guardRepeat":true,"guardRepeatSec":60,"guardCooldownSec":30,"guardMaxReminders":3,"guardDigest":false,"telemetry":false}}}}'
+optionsOf() { # the plugin options of a profile, or nothing for a name that is not one
+  case $1 in
+    record) printf '%s' '{"guardRecordOnly":true,"guardDigest":false,"telemetry":false}' ;;
+    kinds) printf '%s' '{"guardRecordOnly":true,"guardNotifyKinds":"none","guardDigest":false,"telemetry":false}' ;;
+    quiet) printf '%s' '{"guardRecordOnly":true,"guardQuietHours":"00:00-23:59","guardQuietTimezone":"UTC","guardDigest":false,"telemetry":false}' ;;
+    alerts) printf '%s' '{"guardAlerts":true,"guardRepeat":true,"guardRepeatSec":60,"guardCooldownSec":30,"guardMaxReminders":3,"guardDigest":false,"telemetry":false}' ;;
+    *) return 1 ;;
+  esac
+}
+settingsOf() { local o; o=$(optionsOf "$1") || return 1; printf '{"pluginConfigs":{"cobalt-cockpit@inline":{"options":%s}}}' "$o"; }
 
 check_dir() { # the directory must be one this script made
   local d=${1:-}
@@ -64,7 +75,7 @@ case $cmd in
     printf '%s\n' "$sha" > "$dir/candidate-sha"
     ( cd "$dir/project" && git init -q . && printf '# disposable acceptance project\n' > README.md && git add README.md && git -c user.name=acceptance -c user.email=acceptance@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q -m 'disposable project' )
     printf 'candidate %s (cobalt-cockpit %s)\ndirectory %s\n\n' "$sha" "$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/plugin/.claude-plugin/plugin.json" | head -1)" "$dir"
-    printf 'Next:\n  %s verify %s\n  %s launch %s 1     # terminal 1\n  %s launch %s 2     # terminal 2, after session 1 has recorded and acknowledged\n  %s clean %s\n' "$0" "$dir" "$0" "$dir" "$0" "$dir" "$0" "$dir"
+    printf 'Next:\n  %s verify %s\n  %s launch %s 1 [profile]     # terminal 1 (profiles: record, the default; kinds; quiet; alerts)\n  %s launch %s 2 [profile]     # terminal 2, when the procedure says so\n  %s clean %s\n' "$0" "$dir" "$0" "$dir" "$0" "$dir" "$0" "$dir"
     ;;
   verify)
     need_claude
@@ -73,15 +84,16 @@ case $cmd in
     probe() { local label=$1 n=$2; shift 2; local out rc=0; out=$("$@" 2>&1 < /dev/null) || rc=$?; printf '%s\n' "--- $label (exit $rc):"; printf '%s\n' "$out" | head -"$n"; }
     echo "candidate: $(cat "$dir/candidate-sha")"
     probe 'installed plugins in the disposable configuration (expect none)' 5 in_host "$dir" "$claude_bin" plugin list
-    probe 'what is loaded, and from where (expect version 0.6.2 and the SOURCE under this directory)' 12 in_host "$dir" timeout 90 "$claude_bin" -p '/cockpit version' --plugin-dir "$dir/plugin" --settings "$settings"
+    probe 'what is loaded, and from where (expect version 0.6.3 and the SOURCE under this directory)' 12 in_host "$dir" timeout 90 "$claude_bin" -p '/cockpit version' --plugin-dir "$dir/plugin" --settings "$(settingsOf record)"
     probe 'strict validation of the snapshot' 12 in_host "$dir" "$claude_bin" plugin validate --strict "$dir/plugin"
     ;;
   launch)
     need_claude
-    dir=$(check_dir "${1:-}"); n=${2:-}
-    [[ $n == 1 || $n == 2 ]] || fail 'launch <dir> 1|2'
+    dir=$(check_dir "${1:-}"); n=${2:-}; profile=${3:-record}
+    [[ $n == 1 || $n == 2 ]] || fail 'launch <dir> 1|2 [record|kinds|quiet|alerts]'
+    settings=$(settingsOf "$profile") || fail "not a profile: $profile (record, kinds, quiet or alerts)"
     local_args=(--plugin-dir "$dir/plugin" --settings "$settings")
-    printf 'Session %s of the candidate %s in %s/project\nExit with /exit or Ctrl+C twice. To continue session 1 after a restart, launch it again with CONTINUE=1.\n' "$n" "$(cat "$dir/candidate-sha")" "$dir"
+    printf 'Session %s of the candidate %s in %s/project, profile %s: %s\nExit with /exit or Ctrl+C twice. To continue session 1 after a restart, launch it again with CONTINUE=1.\n' "$n" "$(cat "$dir/candidate-sha")" "$dir" "$profile" "$(optionsOf "$profile")"
     [[ $n == 1 && ${CONTINUE:-0} == 1 ]] && local_args+=(--continue)
     in_host "$dir" "$claude_bin" "${local_args[@]}"
     ;;
@@ -90,5 +102,5 @@ case $cmd in
     rm -rf -- "$dir"
     echo "removed $dir"
     ;;
-  *) fail 'usage: acceptance-interactive.sh setup [--dir D] | verify D | launch D 1|2 | clean D' ;;
+  *) fail 'usage: acceptance-interactive.sh setup [--dir D] | verify D | launch D 1|2 [record|kinds|quiet|alerts] | clean D' ;;
 esac

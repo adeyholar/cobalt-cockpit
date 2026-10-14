@@ -2,9 +2,11 @@
 # Two genuine Claude Code processes against one disposable plugin store (v0.6.0). Engineering evidence only: it shows that two
 # real host processes started in one project read the same alert history, migrate it without losing an occurrence, refuse the
 # person-only export and deletion to their non-person origin, and agree on the cleanup plan, with the host's own store locking
-# in between. It does not show that a person saw
-# anything, and it cannot acknowledge an alert: `claude -p` runs with the `sdk` origin, which Cockpit refuses for
-# acknowledgments on purpose, and the harness does not weaken that.
+# in between. Since v0.6.3 it also shows that both read the same calibration review and report, that a label typed through
+# `claude -p` is refused, and that neither the review nor the report writes a key. It does not show that a person saw
+# anything, and it cannot acknowledge an alert or set a label: `claude -p` runs with the `sdk` origin, which Cockpit refuses
+# for both on purpose, and the harness does not weaken that. A person's labels are written into the store while no process
+# runs, in the shape the label command writes, as another session would have left them.
 #
 #   scripts/acceptance-harness.sh [--keep]
 #
@@ -31,11 +33,11 @@ mkdir -p "$config" "$state" "$plugin" "$project" "$home"
 for p in "$config" "$state" "$plugin" "$project" "$home"; do case "$p/" in "$root"/*) ;; *) fail "path outside the harness directory: $p" ;; esac; done
 git -C "$repo" archive --format=tar HEAD | tar -x -C "$plugin"
 settings='{"pluginConfigs":{"cobalt-cockpit@inline":{"options":{"guardRecordOnly":true,"telemetry":false}}}}'
-run() { # one genuine host process: an immediate /cockpit command in the project, isolated configuration, no model
+run() { # one genuine host process: an immediate /cockpit command in the project, isolated configuration, no model; $2 replaces the settings
   # an environment of its own: nothing from the operator's but PATH and the terminal type, so no credential variable of any provider
   (cd "$project" && env -i PATH="$PATH" TERM="${TERM:-dumb}" LANG=C.UTF-8 \
     HOME=$home CLAUDE_CONFIG_DIR=$config XDG_STATE_HOME=$state DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-    timeout 90 "$claude_bin" -p "$1" --plugin-dir "$plugin" --settings "$settings" < /dev/null)
+    timeout 90 "$claude_bin" -p "$1" --plugin-dir "$plugin" --settings "${2:-$settings}" < /dev/null)
 }
 pass=0; failed=0
 check() { if eval "$2"; then printf '  PASS %s\n' "$1"; pass=$((pass + 1)); else printf '  FAIL %s\n' "$1"; failed=$((failed + 1)); fi; }
@@ -102,6 +104,45 @@ check 'both digests carry the Attention section' "grep -q '^COBALT GUARD / ATTEN
 check 'records with no resolution mark are UNKNOWN, never open: no task of this session owns them' "grep -q '^STILL OPEN, ACKNOWLEDGED: 0' '$root/g.txt' && grep -q 'open now 0 · UNKNOWN 2' '$root/g.txt' && grep -q 'open now 0 · UNKNOWN 2' '$root/h.txt'"
 check 'no condition is called resolved or no longer open on the strength of a stored record' "! grep -q 'NO LONGER OPEN' '$root/g.txt' '$root/h.txt'"
 check 'drawing the digest changed no alert key, acknowledgment or look marker in the store' "[[ \"\$(alertkeys)\" == \"$before\" ]]"
-printf 'harness: %d passed, %d failed. Engineering evidence only: no person observed anything, and nothing was acknowledged.\n' "$pass" "$failed"
+# 5. Guard Calibration (v0.6.3): a label through `claude -p` is refused; review and the report agree across two processes and write nothing
+mine=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(("cobalt-cockpit/alerts/v1" + chr(0) + sys.argv[1]).encode()).hexdigest()[:12])' "$project")
+read -r first second < <(python3 - "$store" "$mine" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); prefix = f'alert-occ:{sys.argv[2]}:'
+ids = {v['records'][0]['kind']: k[len(prefix):] for k, v in d.items() if k.startswith(prefix)}
+print(ids.get('security-failure', '00000000'), ids.get('run-blocked', '00000000'))
+PY
+)
+run "/cockpit alerts label $first notify" > "$root/i.txt" 2>&1 & i=$!
+run "/cockpit alerts label $second clear" > "$root/j.txt" 2>&1 & j=$!
+wait $i; wait $j
+check 'a label typed through claude -p (the sdk origin) is refused in both processes' "grep -q 'labelled only by a command you type' '$root/i.txt' && grep -q 'labelled only by a command you type' '$root/j.txt'"
+check 'the refused labels wrote no label key' "! grep -q '\"alert-label:' '$store'"
+# a person's labels as another session would have left them, written while no process runs: one readable, one this build cannot
+# read (a free-text field it never writes), and one whose occurrence does not exist
+python3 - "$store" "$mine" "$first" "$second" <<'PY'
+import json, sys
+store, mine, first, second = sys.argv[1:5]
+d = json.load(open(store))
+d[f'alert-label:{mine}:{first}'] = {'v': 1, 'label': 'NOTIFY', 'at': 1000}
+d[f'alert-label:{mine}:{second}'] = {'v': 1, 'label': 'NOISE', 'at': 2000, 'note': 'not a field the label command writes'}
+d[f'alert-label:{mine}:0badc0de'] = {'v': 1, 'label': 'NOISE', 'at': 3000}
+json.dump(d, open(store, 'w'), indent=2)
+PY
+before=$(alertkeys)
+run '/cockpit alerts review' > "$root/k.txt" 2>&1 & k=$!
+run '/cockpit alerts review' > "$root/l.txt" 2>&1 & l=$!
+run '/cockpit alerts calibration' > "$root/m.txt" 2>&1 & m=$!
+run '/cockpit alerts calibration' > "$root/n.txt" 2>&1 & n=$!
+wait $k; wait $l; wait $m; wait $n
+check 'both reviews agree: the labelled occurrence, and the one whose stored label cannot be read' "diff '$root/k.txt' '$root/l.txt' >/dev/null && grep -q \"^  $first .* labelled NOTIFY\$\" '$root/k.txt' && grep -q \"^  $second .* its stored label could not be read\$\" '$root/k.txt'"
+check 'both reports agree: two recorded, one reviewed, the orphan counted nowhere, counts and not a rate' "diff '$root/m.txt' '$root/n.txt' >/dev/null && grep -q '· 2 recorded · 1 reviewed · 1 unreviewed' '$root/m.txt' && grep -q '1 stored label could not be read' '$root/m.txt' && [[ \$(grep -c 'INSUFFICIENT EVIDENCE ·' '$root/m.txt') -eq 2 ]]"
+check 'the report says what it did not simulate, sends nothing, and calls nothing recall' "grep -q '^Not simulated: ' '$root/m.txt' && grep -q 'simulated, nothing sent' '$root/m.txt' && ! grep -qiw 'recall' '$root/m.txt'"
+check 'reviewing and reporting changed no alert key: labels (the orphan too), occurrences, acknowledgments and the look marker' "[[ \"\$(alertkeys)\" == \"$before\" ]]"
+none='{"pluginConfigs":{"cobalt-cockpit@inline":{"options":{"guardRecordOnly":true,"telemetry":false,"guardNotifyKinds":"none"}}}}'
+run '/cockpit alerts calibration' "$none" > "$root/o.txt" 2>&1
+check 'the simulation follows the configuration: with no kind chosen only the security failure would be notified' "grep -q 'would notify 2 · would defer for quiet hours 0 · would not notify 0' '$root/m.txt' && grep -q 'would notify 1 · would defer for quiet hours 0 · would not notify 1' '$root/o.txt'"
+check 'reading the report under another configuration changed no alert key either' "[[ \"\$(alertkeys)\" == \"$before\" ]]"
+printf 'harness: %d passed, %d failed. Engineering evidence only: no person observed anything, and no process acknowledged or labelled anything.\n' "$pass" "$failed"
 [[ $keep -eq 1 ]] && printf 'harness: kept %s\n' "$root"
 [[ $failed -eq 0 ]]
