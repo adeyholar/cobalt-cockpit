@@ -2682,6 +2682,16 @@ const reconcileOnce = async ($: EngineInterface): Promise<void> => {
 
     return
   }
+  if (task?.alignment?.state === 'ALIGNED' && task.alignment.protection?.state === 'UNPROTECTED') {
+    // Accepted outside Git: if a repository has appeared since (`git init`), nothing measured the tree the check was made on, so
+    // it is pending again, and the task is one for which a repository was seen.
+    if ((await outsideGit($)) !== 'repository') return
+    const now = await $.clock.now()
+    const held = await update($, taskAtom, t => (t === null || t.alignment?.protection?.state !== 'UNPROTECTED' || t.alignment.state !== 'ALIGNED' ? t : settle(reopenVerification({ ...t, repoSeen: true }, 'a Git repository appeared after the goal check was accepted without a fingerprint')).task))
+    if (held !== null) await quiet(async () => { await mutateLedger($, l => recordDiscovery(l, held, now)); await persist($) })
+
+    return
+  }
   if (task?.alignment?.state !== 'ALIGNED' || typeof accepted !== 'string') return
   const reading = await settledReading($, baseOf(accepted))
   const tree = reading.stamp

@@ -35,6 +35,8 @@ export type World = {
    * have one. A `.git` with no repository Git can read is a damaged repository, not a project outside Git.
    */
   dotGitPresent: boolean | null
+  /** `realpath` fails (as it would for a directory that cannot be resolved). */
+  realpathFails: boolean
   /** What `git rev-parse` prints outside a repository (Git's own words; the mount-point form is the other real one), and its exit. */
   notRepository: string
   notRepositoryExit: number
@@ -252,6 +254,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
     dotGitPresent: null,
     notRepository: 'fatal: not a git repository (or any of the parent directories): .git\n',
     notRepositoryExit: 128,
+    realpathFails: false,
     boundProbes: [],
     boundMode: 'full',
     kinds: {},
@@ -587,6 +590,7 @@ export const world = (on: On, overrides: Partial<World> = {}, stored: Readonly<R
 
       return { value: { exitCode: 1, stdout: '', stderr: `stat: cannot statx '${asked}': ${why}\n`, isStdoutTruncated: false, isStderrTruncated: false } }
     }
+    if (program === 'realpath' && w.realpathFails) return { value: { exitCode: 1, stdout: '', stderr: 'realpath: cannot resolve\n', isStdoutTruncated: false, isStderrTruncated: false } }
     if (program === 'realpath') {
       const asked = String(argv.at(-1)).replace(/\/+$/, '')
       const link = Object.keys(w.links).find(from => asked === from || asked.startsWith(`${from}/`))

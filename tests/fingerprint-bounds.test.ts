@@ -661,6 +661,33 @@ describe('a Git repository that cannot be measured is never accepted as protecte
     expect(taskOf(h)?.repoSeen).toBe(true)
     await recordedUnknown($, 'a Git repository is here', h)
   })
+  test('a .git that cannot be inspected is not "missing": UNKNOWN, not outside Git', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.watchedDenied = ['/work/example/.git']
+    await ready($)
+    await recordedUnknown($, 'Git could not say whether this is a Git repository', h)
+  })
+  test('a session directory realpath cannot resolve is not called outside Git', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.realpathFails = true
+    await ready($)
+    await recordedUnknown($, 'Git could not say whether this is a Git repository', h)
+  })
+  test('outside Git, then `git init` in the same task: the UNPROTECTED goal check is pending again', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null
+    await ready($)
+    await progress($, aligned)
+    expect(await progress($, { action: 'complete', milestone: 'm5' })).toStartWith('DONE 100%')
+    w.gitStatus = CLEAN_REPO                                                         // a repository appears where there was none
+    expect(await progress($, { action: 'status' })).not.toStartWith('DONE')
+    expect(taskOf(h)?.repoSeen).toBe(true)
+    expect(taskOf(h)?.alignment?.state).not.toBe('ALIGNED')
+  })
+  test('control: outside Git and still outside, the UNPROTECTED goal check stands', async ($, on) => {
+    const w = world(on); w.gitStatus = null
+    await ready($)
+    await progress($, aligned)
+    expect(await progress($, { action: 'complete', milestone: 'm5' })).toStartWith('DONE 100%')
+    expect(await progress($, { action: 'status' })).toStartWith('DONE 100%')
+  })
   test('a session directory deeper than the walk is not called outside Git', async ($, on) => {
     const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.cwd = `/${Array.from({ length: 300 }, (_, i) => `d${i}`).join('/')}`
     await ready($)
