@@ -2612,22 +2612,22 @@ const measureTree = async ($: EngineInterface, base?: string): Promise<TreeReadi
   return stamp !== null ? { stamp, why: '', raced: false, noRepo: false, inRepo: true } : { stamp, why, raced, noRepo, inRepo }
 }
 /**
- * Whether the session directory is outside every Git repository: Git says so, in the C locale and in its own words, and no
- * `.git` entry exists in the directory or any parent, along the path the session names and along its physical path. 'repository'
- * is positive evidence of one (Git found it, or said something else of it, or a `.git` is there): a damaged or hostile `.git`, a
- * repository Git refuses (another owner) or one whose work tree is elsewhere is a repository whose fingerprint is UNKNOWN, never
- * a project without one. 'unknown' when Git or the inspection could not answer.
+ * Whether the session directory is outside every Git repository: Git says so, in the C locale and in its own words (or no Git is
+ * installed), and no `.git` entry exists in the directory or any parent, along the path the session names and along its physical
+ * path. 'repository' is evidence of one: Git found it, or a `.git` entry is there (a damaged or hostile `.git`, a repository Git
+ * refuses, one whose work tree is elsewhere): its fingerprint is UNKNOWN, never that of a project without one. 'unknown' for
+ * anything else: a timeout, a signal, a limit, another message, or an inspection that could not answer.
  */
 const outsideGit = async ($: EngineInterface): Promise<'outside' | 'repository' | 'unknown'> => {
   const cwd = await $.session.cwd()
   if (!cwd || !cwd.startsWith('/')) return 'unknown'
   const r = await bounded($, ['git', ...GIT_SAFE, 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: GIT_TIMEOUT_MS, env: { LC_ALL: 'C' } }).catch(() => null)
   if (r === null || r.isStdoutTruncated || r.isStderrTruncated) return 'unknown'
-  // Only Git's own answers are evidence: found (0), or a fatal error of its own (128) that is not "not a git repository". A
-  // timeout (124), a signal or a limit says nothing either way. With no Git at all (127), only the `.git` walk below decides.
+  // Evidence of a repository is Git finding one, or a `.git` entry being there (the walk below). Anything else Git says, or a
+  // timeout, a signal or a limit, is no evidence either way. Outside Git needs Git's own "not a git repository", or no Git at all.
+  if (r.exitCode === 0) return 'repository'
+  const notRepository = r.exitCode === 128 && NOT_A_REPOSITORY.test(r.stderr)
   const noGit = r.exitCode === 127 && /\bgit\b[^\n]*(?:not found|No such file or directory)/.test(r.stderr)
-  if (r.exitCode === 0 || (r.exitCode === 128 && r.stderr.startsWith('fatal: ') && !NOT_A_REPOSITORY.test(r.stderr))) return 'repository'
-  if (!noGit && !(r.exitCode === 128 && NOT_A_REPOSITORY.test(r.stderr))) return 'unknown'
   // Git searches up the physical path; the session may name it through a link. Both chains of parents are checked.
   const real = await bounded($, ['realpath', '-e', '--', cwd], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
   if (real === null || !gitAnswered(real) || !real.stdout.startsWith('/')) return 'unknown'
@@ -2643,8 +2643,9 @@ const outsideGit = async ($: EngineInterface): Promise<'outside' | 'repository' 
   }
   const seen = await inspectPaths($, '/', [...new Set(dotGit)])
   if (seen === null) return 'unknown'
+  if (seen.some(s => s.kind !== 'missing')) return 'repository'
 
-  return seen.every(s => s.kind === 'missing') ? 'outside' : 'repository'
+  return notRepository || noGit ? 'outside' : 'unknown'
 }
 /** Git's whole answer outside a repository (C locale), with the line it adds when the search stops at a file-system boundary. */
 const NOT_A_REPOSITORY = /^fatal: not a git repository \((?:or any of the parent directories\): \.git|or any parent up to mount point [^\n]*\))\n(?:Stopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.\n)?$/

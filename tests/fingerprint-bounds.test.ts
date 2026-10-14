@@ -649,8 +649,14 @@ describe('a Git repository that cannot be measured is never accepted as protecte
     await ready($)
     await recordedUnknown($, 'a Git repository is here', h)
   })
-  test('Git\'s own fatal error that is not "not a git repository" (memory, ownership) is evidence of a repository', async ($, on) => {
+  test('a fatal error of Git\'s with no .git anywhere (memory under the limit) is no evidence of a repository', async ($, on) => {
     const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.notRepository = 'fatal: Out of memory, realloc failed\n'
+    await ready($)
+    expect(taskOf(h)?.repoSeen).toBeUndefined()
+    await recordedUnknown($, 'Git could not say whether this is a Git repository', h)
+  })
+  test('the same error with a .git there (a linked worktree whose commondir hit the limit) is a repository', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.dotGitPresent = true; w.notRepository = 'fatal: Out of memory, realloc failed\n'
     await ready($)
     expect(taskOf(h)?.repoSeen).toBe(true)
     await recordedUnknown($, 'a Git repository is here', h)
@@ -677,12 +683,26 @@ describe('a Git repository that cannot be measured is never accepted as protecte
     await ready($)
     expect(await progress($, aligned)).toContain('UNPROTECTED: this project is not a Git repository')
   })
-  test('anything else Git says outside a repository is not taken for "outside Git"', async ($, on) => {
-    const w = world(on); const h = hostState(on, {}); w.gitStatus = null
+  test('a repository Git refuses (another owner), with its .git there: a repository, UNKNOWN', async ($, on) => {
+    const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.dotGitPresent = true
     w.notRepository = "fatal: detected dubious ownership in repository at '/work/example'\n"
     await ready($)
+    expect(taskOf(h)?.repoSeen).toBe(true)
     await recordedUnknown($, 'a Git repository is here', h)
   })
+  for (const [what, exit, stderr] of [
+    ['another message of Git\'s', 128, "fatal: detected dubious ownership in repository at '/elsewhere'\n"],
+    ['Git\'s "not a git repository" with a line more', 128, 'fatal: not a git repository (or any of the parent directories): .git\nhint: something else\n'],
+    ['exit 128 without Git\'s fatal', 128, 'not a git repository\n'],
+    ['exit 127 for another program (timeout missing)', 127, 'cockpit-bounded: 1: exec: timeout: not found\n'],
+  ] as const) {
+    test(`with no .git anywhere, ${what} is neither outside Git nor a repository: UNKNOWN, no mark`, async ($, on) => {
+      const w = world(on); const h = hostState(on, {}); w.gitStatus = null; w.notRepositoryExit = exit; w.notRepository = stderr
+      await ready($)
+      expect(taskOf(h)?.repoSeen).toBeUndefined()
+      await recordedUnknown($, 'Git could not say whether this is a Git repository', h)
+    })
+  }
   for (const outside of [true, false]) {
     test(`a goal check stored before v0.6.4 as ALIGNED without a fingerprint is ${outside ? 'kept outside Git, marked UNPROTECTED' : 'pending again in a repository that cannot be measured'}`, async ($, on) => {
       const w = world(on); const h = hostState(on, {}); w.gitStatus = null
