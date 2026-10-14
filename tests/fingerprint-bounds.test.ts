@@ -680,6 +680,15 @@ describe('a Git repository that cannot be measured is never accepted as protecte
     expect(await progress($, { action: 'status' })).not.toStartWith('DONE')
     expect(taskOf(h)?.repoSeen).toBe(true)
     expect(taskOf(h)?.alignment?.state).not.toBe('ALIGNED')
+    expect(taskOf(h)?.edited).not.toBe(true)                                       // a repository appearing is not an edit
+  })
+  test('outside Git, a later look that cannot answer is no evidence: the UNPROTECTED goal check stands', async ($, on) => {
+    const w = world(on); w.gitStatus = null
+    await ready($)
+    await progress($, aligned)
+    expect(await progress($, { action: 'complete', milestone: 'm5' })).toStartWith('DONE 100%')
+    w.notRepositoryExit = 124; w.notRepository = ''                                // the group timeout ended Git: no answer either way
+    expect(await progress($, { action: 'status' })).toStartWith('DONE 100%')
   })
   test('control: outside Git and still outside, the UNPROTECTED goal check stands', async ($, on) => {
     const w = world(on); w.gitStatus = null
